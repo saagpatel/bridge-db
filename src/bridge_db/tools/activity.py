@@ -10,6 +10,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db import config
+from bridge_db.audit import log_audit
 from bridge_db.db import get_db
 from bridge_db.models import CallerID
 
@@ -60,6 +61,7 @@ def register(mcp: FastMCP) -> None:
         )
         await db.commit()
 
+        log_audit("log_activity", caller, project_name, ok=True)
         logger.info("logged activity: [%s] %s: %s", caller, project_name, summary)
         return {"ok": True, "source": caller, "project_name": project_name, "timestamp": ts}
 
@@ -195,5 +197,24 @@ def register(mcp: FastMCP) -> None:
                 updated += 1
 
         await db.commit()
+
+        # Auto-export: keep bridge markdown in sync after processing shipped events
+        try:
+            from bridge_db.tools.export import build_markdown
+
+            content = await build_markdown(db)
+            config.BRIDGE_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            config.BRIDGE_FILE_PATH.write_text(content, encoding="utf-8")
+            logger.info("auto-export triggered after mark_shipped_processed")
+        except Exception:
+            logger.warning("auto-export after mark_shipped_processed failed", exc_info=True)
+
+        log_audit(
+            "mark_shipped_processed",
+            None,
+            None,
+            ok=True,
+            detail=f"updated {updated}/{len(activity_ids)}",
+        )
         logger.info("mark_shipped_processed: updated %d/%d entries", updated, len(activity_ids))
         return {"ok": True, "updated": updated, "total": len(activity_ids)}

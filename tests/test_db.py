@@ -96,3 +96,94 @@ async def test_cost_records_unique_system_month(db: aiosqlite.Connection) -> Non
         await db.execute(
             "INSERT INTO cost_records (system, month, amount) VALUES ('cc', '2026-04', 200.0)"
         )
+
+
+async def test_activity_log_accepts_new_callers(db: aiosqlite.Connection) -> None:
+    """notion_os and personal_ops must be accepted by the v2 CHECK constraint."""
+    await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary) "
+        "VALUES ('notion_os', '2026-04-14', 'P', 'S')"
+    )
+    await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary) "
+        "VALUES ('personal_ops', '2026-04-14', 'P', 'S')"
+    )
+    await db.commit()
+    cursor = await db.execute("SELECT COUNT(*) FROM activity_log")
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == 2
+
+
+async def test_cost_records_accepts_new_systems(db: aiosqlite.Connection) -> None:
+    """notion_os and personal_ops must be accepted by the v2 CHECK constraint."""
+    await db.execute(
+        "INSERT INTO cost_records (system, month, amount) VALUES ('notion_os', '2026-04', 5.0)"
+    )
+    await db.execute(
+        "INSERT INTO cost_records (system, month, amount) VALUES ('personal_ops', '2026-04', 3.0)"
+    )
+    await db.commit()
+    cursor = await db.execute("SELECT COUNT(*) FROM cost_records")
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == 2
+
+
+async def test_migration_v1_to_v2(tmp_path: Path) -> None:
+    """A v1 database gets migrated to v2 with expanded CHECK constraints."""
+    # Build a minimal v1 schema manually
+    db = await aiosqlite.connect(str(tmp_path / "v1.db"))
+    db.row_factory = aiosqlite.Row
+    await db.executescript("""
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL CHECK(source IN ('cc', 'codex', 'claude_ai')),
+            timestamp TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            branch TEXT,
+            tags TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        CREATE TABLE cost_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            system TEXT NOT NULL CHECK(system IN ('cc', 'codex')),
+            month TEXT NOT NULL,
+            amount REAL NOT NULL,
+            notes TEXT,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            UNIQUE(system, month)
+        );
+        INSERT INTO activity_log (source, timestamp, project_name, summary)
+            VALUES ('cc', '2026-01-01', 'OldProject', 'legacy entry');
+        INSERT INTO cost_records (system, month, amount) VALUES ('cc', '2026-01', 42.0);
+        PRAGMA user_version = 1;
+    """)
+    await db.commit()
+    await db.close()
+
+    # Re-open via open_db — migration should run automatically
+    migrated = await open_db(tmp_path / "v1.db")
+
+    # Schema version bumped to 2
+    cursor = await migrated.execute("PRAGMA user_version")
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == SCHEMA_VERSION
+
+    # Old data preserved
+    cursor = await migrated.execute("SELECT project_name FROM activity_log")
+    rows: list[aiosqlite.Row] = await cursor.fetchall()  # type: ignore[assignment]
+    assert len(rows) == 1
+    assert rows[0]["project_name"] == "OldProject"
+
+    # New callers now accepted
+    await migrated.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary) "
+        "VALUES ('notion_os', '2026-04-14', 'New', 'S')"
+    )
+    await migrated.commit()
+
+    await migrated.close()

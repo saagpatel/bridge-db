@@ -9,9 +9,9 @@ import aiosqlite
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-# Full DDL for v1 schema
+# Full DDL for v2 schema (initial create on a fresh DB)
 _SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS context_sections (
     section_name TEXT PRIMARY KEY,
@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS context_sections (
 
 CREATE TABLE IF NOT EXISTS activity_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source TEXT NOT NULL CHECK(source IN ('cc', 'codex', 'claude_ai')),
+    source TEXT NOT NULL CHECK(source IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
     timestamp TEXT NOT NULL,
     project_name TEXT NOT NULL,
     summary TEXT NOT NULL,
@@ -61,13 +61,51 @@ CREATE INDEX IF NOT EXISTS idx_handoff_status ON pending_handoffs(status);
 
 CREATE TABLE IF NOT EXISTS cost_records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    system TEXT NOT NULL CHECK(system IN ('cc', 'codex')),
+    system TEXT NOT NULL CHECK(system IN ('cc', 'codex', 'notion_os', 'personal_ops')),
     month TEXT NOT NULL,
     amount REAL NOT NULL,
     notes TEXT,
     recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     UNIQUE(system, month)
 );
+"""
+
+# Migration from v1 → v2: expand CHECK constraints on activity_log and cost_records.
+# SQLite cannot ALTER COLUMN check constraints; must rename+recreate.
+_MIGRATION_V1_TO_V2 = """
+ALTER TABLE activity_log RENAME TO activity_log_v1;
+
+CREATE TABLE activity_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL CHECK(source IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+    timestamp TEXT NOT NULL,
+    project_name TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    branch TEXT,
+    tags TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+INSERT INTO activity_log SELECT * FROM activity_log_v1;
+DROP TABLE activity_log_v1;
+
+CREATE INDEX IF NOT EXISTS idx_activity_source ON activity_log(source);
+CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_log(timestamp DESC);
+
+ALTER TABLE cost_records RENAME TO cost_records_v1;
+
+CREATE TABLE cost_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    system TEXT NOT NULL CHECK(system IN ('cc', 'codex', 'notion_os', 'personal_ops')),
+    month TEXT NOT NULL,
+    amount REAL NOT NULL,
+    notes TEXT,
+    recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE(system, month)
+);
+
+INSERT INTO cost_records SELECT * FROM cost_records_v1;
+DROP TABLE cost_records_v1;
 """
 
 
@@ -87,12 +125,20 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
     row = await cursor.fetchone()
     current_version: int = row[0] if row else 0  # type: ignore[index]
 
-    if current_version < SCHEMA_VERSION:
-        logger.info("Applying schema v%d (current: %d)", SCHEMA_VERSION, current_version)
+    if current_version == 0:
+        # Fresh DB: apply full v2 DDL directly
+        logger.info("Initializing fresh schema v%d", SCHEMA_VERSION)
         await db.executescript(_SCHEMA_DDL)
         await db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await db.commit()
-        logger.info("Schema v%d applied", SCHEMA_VERSION)
+        logger.info("Schema v%d initialized", SCHEMA_VERSION)
+    elif current_version == 1:
+        # Existing v1 DB: run incremental migration
+        logger.info("Migrating schema v1 → v2")
+        await db.executescript(_MIGRATION_V1_TO_V2)
+        await db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        await db.commit()
+        logger.info("Schema migrated to v%d", SCHEMA_VERSION)
     else:
         logger.debug("Schema already at v%d", current_version)
 
