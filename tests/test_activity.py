@@ -1,6 +1,7 @@
 """Tests for activity log tools."""
 
 import json
+from pathlib import Path
 from typing import Any
 
 import aiosqlite
@@ -153,3 +154,50 @@ async def test_log_activity_prunes_to_retention_limit(
     row = await cursor.fetchone()
     assert row is not None
     assert row[0] == limit
+
+
+async def test_log_activity_accepts_notion_os(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    result = await fns["log_activity"](
+        caller="notion_os", project_name="BuildLog", summary="synced 3 entries", ctx=ctx
+    )
+    assert result["ok"] is True
+    assert result["source"] == "notion_os"
+
+
+async def test_log_activity_accepts_personal_ops(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    result = await fns["log_activity"](
+        caller="personal_ops", project_name="Inbox", summary="processed mail", ctx=ctx
+    )
+    assert result["ok"] is True
+    assert result["source"] == "personal_ops"
+
+
+async def test_mark_shipped_processed_triggers_auto_export(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After mark_shipped_processed, the bridge markdown file should be written."""
+    bridge_path = tmp_path / "bridge.md"
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge_path)
+
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="cc", project_name="TestProject", summary="shipped v1", tags=["SHIPPED"], ctx=ctx
+    )
+    cursor = await db.execute("SELECT id FROM activity_log")
+    row = await cursor.fetchone()
+    assert row is not None
+    activity_id = row["id"]
+
+    await fns["mark_shipped_processed"](activity_ids=[activity_id], ctx=ctx)
+
+    assert bridge_path.exists(), (
+        "bridge markdown file should be written after mark_shipped_processed"
+    )
+    content = bridge_path.read_text()
+    assert "TestProject" in content

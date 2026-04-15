@@ -25,3 +25,11 @@ LOG_LEVEL: str = os.environ.get("BRIDGE_DB_LOG_LEVEL", "INFO").upper()
 # Retention limits
 ACTIVITY_RETENTION_PER_SOURCE: int = 50
 SNAPSHOT_RETENTION_PER_SYSTEM: int = 10
+
+# Audit log (append-only JSONL, co-located with the DB)
+AUDIT_LOG_PATH: Path = Path(
+    os.environ.get(
+        "BRIDGE_DB_AUDIT_LOG_PATH",
+        str(DB_PATH.parent / "audit.jsonl"),
+    )
+)

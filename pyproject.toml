@@ -10,6 +10,9 @@ dependencies = [
     "pydantic>=2.10",
 ]
 
+[project.scripts]
+bridge-db = "bridge_db.__main__:main"
+
 [dependency-groups]
 dev = [
     "pyright>=1.1.390",

@@ -54,7 +54,12 @@ Portfolio truth currently marks this project as `active` with `boilerplate` cont
 
 ## Stack
 
-- Primary stack: Python
+- **Language**: Python 3.11+
+- **MCP transport**: stdio (MCP SDK)
+- **Database**: SQLite via `sqlite3` stdlib
+- **Type checking**: pyright (strict)
+- **Lint**: ruff
+- **Test**: pytest (65 tests)
 
 ## How To Run
 
