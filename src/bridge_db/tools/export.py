@@ -61,20 +61,24 @@ async def build_markdown(db: Any) -> str:
     else:
         cc_snapshot_md = "## Claude Code State Snapshot\n_No snapshot yet._\n"
 
+    def _render_activity_rows(rows: list[Any]) -> list[str]:
+        lines: list[str] = []
+        for r in reversed(rows):
+            tags: list[str] = json.loads(r["tags"])
+            tag_str = f" [{']['.join(tags)}]" if tags else ""
+            branch_str = f" ({r['branch']})" if r["branch"] else ""
+            lines.append(
+                f"- [{r['timestamp']}]{tag_str} {r['project_name']}: {r['summary']}{branch_str}"
+            )
+        return lines
+
     # --- Recent CC Activity ---
     cursor = await db.execute(
         "SELECT timestamp, project_name, summary, branch, tags FROM activity_log "
         "WHERE source='cc' ORDER BY timestamp DESC, created_at DESC LIMIT 20"
     )
     cc_activity_rows = await cursor.fetchall()
-    cc_activity_lines: list[str] = []
-    for r in reversed(cc_activity_rows):
-        tags: list[str] = json.loads(r["tags"])
-        tag_str = f" [{']['.join(tags)}]" if tags else ""
-        branch_str = f" ({r['branch']})" if r["branch"] else ""
-        cc_activity_lines.append(
-            f"- [{r['timestamp']}]{tag_str} {r['project_name']}: {r['summary']}{branch_str}"
-        )
+    cc_activity_lines = _render_activity_rows(cc_activity_rows)
     cc_activity_md = "## Recent Claude Code Activity\n"
     cc_activity_md += (
         "\n".join(cc_activity_lines) if cc_activity_lines else "_No activity yet._"
@@ -106,18 +110,28 @@ async def build_markdown(db: Any) -> str:
         "WHERE source='codex' ORDER BY timestamp DESC, created_at DESC LIMIT 20"
     )
     codex_activity_rows = await cursor.fetchall()
-    codex_activity_lines: list[str] = []
-    for r in reversed(codex_activity_rows):
-        tags: list[str] = json.loads(r["tags"])
-        tag_str = f" [{']['.join(tags)}]" if tags else ""
-        branch_str = f" ({r['branch']})" if r["branch"] else ""
-        codex_activity_lines.append(
-            f"- [{r['timestamp']}]{tag_str} {r['project_name']}: {r['summary']}{branch_str}"
-        )
+    codex_activity_lines = _render_activity_rows(codex_activity_rows)
     codex_activity_md = "## Recent Codex Activity\n"
     codex_activity_md += (
         "\n".join(codex_activity_lines) if codex_activity_lines else "_No activity yet._"
     ) + "\n"
+
+    # --- Additional source activity (notion_os, personal_ops) — rendered only if rows exist ---
+    _EXTRA_SOURCES: dict[str, str] = {
+        "notion_os": "## Recent Notion OS Activity",
+        "personal_ops": "## Recent Personal Ops Activity",
+    }
+    extra_activity_mds: list[str] = []
+    for source, heading in _EXTRA_SOURCES.items():
+        cursor = await db.execute(
+            "SELECT timestamp, project_name, summary, branch, tags FROM activity_log "
+            "WHERE source=? ORDER BY timestamp DESC, created_at DESC LIMIT 20",
+            (source,),
+        )
+        extra_rows = await cursor.fetchall()
+        if extra_rows:
+            lines = _render_activity_rows(extra_rows)
+            extra_activity_mds.append(heading + "\n" + "\n".join(lines) + "\n")
 
     # --- Pending Handoffs ---
     cursor = await db.execute(
@@ -173,6 +187,10 @@ async def build_markdown(db: Any) -> str:
     parts.append(codex_snapshot_md)
     parts.append("")
     parts.append(codex_activity_md)
+
+    for extra_md in extra_activity_mds:
+        parts.append("")
+        parts.append(extra_md)
 
     return "\n".join(parts)
 
