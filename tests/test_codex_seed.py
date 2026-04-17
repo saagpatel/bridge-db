@@ -66,7 +66,9 @@ def test_load_manifest_rejects_mismatched_fingerprint(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_codex_seed_dry_run_reports_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_codex_seed_dry_run_reports_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     db_path = tmp_path / "bridge.db"
     bridge_path = tmp_path / "bridge.md"
     monkeypatch.setattr(config, "DB_PATH", db_path)
@@ -81,7 +83,9 @@ async def test_codex_seed_dry_run_reports_writes(tmp_path: Path, monkeypatch: py
 
 
 @pytest.mark.asyncio
-async def test_codex_seed_apply_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_codex_seed_apply_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     db_path = tmp_path / "bridge.db"
     bridge_path = tmp_path / "bridge.md"
     monkeypatch.setattr(config, "DB_PATH", db_path)
@@ -143,5 +147,47 @@ async def test_codex_seed_skips_duplicate_baseline_activity_for_same_day_project
         row = await cursor.fetchone()
         assert row is not None
         assert row[0] == 1
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_codex_seed_populates_content_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """apply_manifest's direct INSERTs must also populate content_index.
+
+    codex_seed bypasses the tool layer, so it hooks FTS5 inline rather than
+    relying on the per-tool helpers. Regression test for that wiring.
+    """
+    db_path = tmp_path / "bridge.db"
+    bridge_path = tmp_path / "bridge.md"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge_path)
+
+    db = await open_db(db_path)
+    await db.close()
+
+    result = await apply_manifest(make_manifest(), dry_run=False)
+    assert result["snapshot_write"] == "inserted"
+    assert result["activity_write"] == "inserted"
+
+    db = await open_db(db_path)
+    try:
+        cursor = await db.execute(
+            "SELECT source_type, COUNT(*) FROM content_index GROUP BY source_type"
+        )
+        counts = {r[0]: r[1] for r in await cursor.fetchall()}
+        assert counts.get("snapshot") == 1, f"expected 1 snapshot FTS row, got {counts}"
+        assert counts.get("activity") == 1, f"expected 1 activity FTS row, got {counts}"
+
+        # The manifest's baseline activity mentions "bridge-baseline-seed" in
+        # project_name — it should be findable via MATCH.
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM content_index WHERE content_index MATCH 'baseline'"
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] >= 1
     finally:
         await db.close()

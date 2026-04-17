@@ -9,7 +9,11 @@ from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db import config
-from bridge_db.db import get_db
+from bridge_db.db import (
+    fts_text_for_section,
+    get_db,
+    upsert_fts_entry,
+)
 from bridge_db.models import SECTION_OWNERS, CallerID, ownership_error
 
 logger = logging.getLogger("bridge_db.tools.context")
@@ -38,10 +42,7 @@ def parse_owned_sections(markdown: str) -> dict[str, str]:
         if current_section is not None:
             parsed[current_section].append(line)
 
-    return {
-        section_name: "\n".join(lines).strip("\n")
-        for section_name, lines in parsed.items()
-    }
+    return {section_name: "\n".join(lines).strip("\n") for section_name, lines in parsed.items()}
 
 
 async def _upsert_section(db: Any, section_name: str, owner: str, content: str) -> None:
@@ -55,6 +56,7 @@ async def _upsert_section(db: Any, section_name: str, owner: str, content: str) 
         """,
         (section_name, owner, content),
     )
+    await upsert_fts_entry(db, "section", section_name, fts_text_for_section(section_name, content))
 
 
 async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str, Any]:

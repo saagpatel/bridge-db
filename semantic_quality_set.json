@@ -1,0 +1,194 @@
+{
+  "metadata": {
+    "created": "2026-04-17",
+    "bridge_db_snapshot": "TO_FILL_AT_EVAL_TIME",
+    "total_queries": 20,
+    "rater_primary": "saagar",
+    "rater_secondary": "claude-code-blind",
+    "inter_rater_sample_size": 5,
+    "inter_rater_agreement": null,
+    "notes": "Queries drafted in Claude.ai chat from memory of Saagar's workflows. query_written_before_viewing_db is true for all entries because the drafter (Claude) did not have bridge.db access at drafting time. Expected_results to be filled by Saagar in step 2 after opening bridge.db."
+  },
+  "queries": [
+    {
+      "id": "q001",
+      "category": "new_project_arrival",
+      "query": "starting a new mcp server for internal tooling",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": false,
+      "notes": "Should surface mcpforge, bridge-db itself, and the enterprise IT MCP gap research"
+    },
+    {
+      "id": "q002",
+      "category": "new_project_arrival",
+      "query": "building a tauri desktop app with rust backend",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": false,
+      "notes": "Broad but high-signal — AssistSupport, apispy, Codec, Network Protocol Decoder are all Tauri 2 + Rust"
+    },
+    {
+      "id": "q003",
+      "category": "new_project_arrival",
+      "query": "new explorable explanation project",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": false,
+      "notes": "Should pull How Regex Works, How Memory Allocation Works, Neural Network Playground, GPU Pipeline Explorer"
+    },
+    {
+      "id": "q004",
+      "category": "new_project_arrival",
+      "query": "ios app with cloudkit sync",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": false,
+      "notes": "Should surface Calibrate (explicit CloudKit), Ghost Routes, Nocturne; narrower than q002 on purpose"
+    },
+    {
+      "id": "q005",
+      "category": "new_project_arrival",
+      "query": "terraform for multi-account aws setup at work",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": true,
+      "notes": "Terraform is on Saagar's learning path but I don't believe bridge-db has content on multi-account Terraform setups specifically. Testing empty-result path."
+    },
+    {
+      "id": "q006",
+      "category": "mid_session_deja_vu",
+      "query": "why did we pick sqlite-vec over chromadb",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": false,
+      "notes": "Decision from this very plan (v1/v2) — tests whether the plan itself, once committed as a context section, surfaces"
+    },
+    {
+      "id": "q007",
+      "category": "mid_session_deja_vu",
+      "query": "bloomberry mcp server count 1482",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": false,
+      "notes": "Specific factoid from MCP ecosystem research — exact-number recall test"
+    },
+    {
+      "id": "q008",
+      "category": "mid_session_deja_vu",
+      "query": "what was the sonnet vs opus cost decision",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": false,
+      "notes": "Should surface 'Sonnet = Opus quality on well-specified tasks at ~60% cost' snapshot"
+    },
+    {
+      "id": "q009",
+      "category": "mid_session_deja_vu",
+      "query": "reasons to not publish the build log yet",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": false,
+      "notes": "Should surface the infrastructure-mode vs publishing-mode decision from recent updates"
+    },
+    {
+      "id": "q010",
+      "category": "mid_session_deja_vu",
+      "query": "platform engineer reframe vs sre",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": false,
+      "notes": "Should surface the Platform Engineer career-transition research synthesis"
+    },
+    {
+      "id": "q011",
+      "category": "cross_system_coordination",
+      "query": "what did claude code ship yesterday",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": false,
+      "notes": "Temporal + system filter — tests whether activity entries are semantically findable by recency phrasing"
+    },
+    {
+      "id": "q012",
+      "category": "cross_system_coordination",
+      "query": "codex bridge sync status shipped events",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": false,
+      "notes": "Should surface recent shipped-event activity from Codex via get_shipped_events tool outputs"
+    },
+    {
+      "id": "q013",
+      "category": "cross_system_coordination",
+      "query": "pending handoff for apispy or network protocol decoder",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": false,
+      "notes": "Should surface any pending-handoff sections written via Auto Project Dispatch"
+    },
+    {
+      "id": "q014",
+      "category": "cross_system_coordination",
+      "query": "which projects has claude code touched this week",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": false,
+      "notes": "Open-ended temporal query — tests recency-ranking without explicit time filter in the tool"
+    },
+    {
+      "id": "q015",
+      "category": "cross_system_coordination",
+      "query": "codex deep research query packs for geopolitics domain",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": true,
+      "notes": "NotebookLM Deep Research query packs live in Notion, not bridge-db. Testing empty-result path on a plausible-but-wrong-system query."
+    },
+    {
+      "id": "q016",
+      "category": "pattern_re_use",
+      "query": "keychain storage for daemon api keys",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": false,
+      "notes": "Pattern that shows up in bridge-db plan + likely past AssistSupport or other local-daemon work"
+    },
+    {
+      "id": "q017",
+      "category": "pattern_re_use",
+      "query": "how do i structure an implementation roadmap for claude code",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": false,
+      "notes": "Should surface the vibe-code-handoff skill outputs or past CLAUDE.md + IMPLEMENTATION-ROADMAP pairs"
+    },
+    {
+      "id": "q018",
+      "category": "pattern_re_use",
+      "query": "ml accuracy benchmark for support ticket classifier",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": false,
+      "notes": "Should pull AssistSupport's 85.7% accuracy snapshot and any follow-up classifier work"
+    },
+    {
+      "id": "q019",
+      "category": "pattern_re_use",
+      "query": "react artifact with persistent storage via window.storage",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": false,
+      "notes": "Should surface artifact-building skill outputs or Command Center v6 context"
+    },
+    {
+      "id": "q020",
+      "category": "pattern_re_use",
+      "query": "hook pattern for invalidating cached state on write",
+      "query_written_before_viewing_db": true,
+      "expected_results": [],
+      "expected_empty": false,
+      "notes": "Matches Decision 10 of this plan but also likely shows up in past Claude Code hook work and skill-forge patterns"
+    }
+  ]
+}
