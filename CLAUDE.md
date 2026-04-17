@@ -5,7 +5,7 @@ SQLite-backed MCP server for cross-system state sharing between Claude.ai, Claud
 ## Commands
 
 ```bash
-uv run pytest              # run all tests (112 total)
+uv run pytest              # run all tests (115 total)
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run ruff check --fix    # lint + auto-fix
@@ -42,9 +42,9 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 - The Claude.ai file-write overwrite gap is closed: `sync_from_file` is implemented and `/start` runs it before bridge reads.
 - End-to-end verification succeeded from the Claude Desktop side.
 - Recent audit hardening closed the remaining correctness gaps around duplicate handoff clearing, future-schema mismatch handling, and degraded health reporting.
-- Phase −1 of the semantic memory layer (FTS5 + `recall`) is shipped. See [bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md](bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md) for the full plan. Dogfood week under way.
-- Tests at `112` green; `ruff` and `pyright` clean.
-- The project is now past cleanup and into a Phase 5-style operator-readiness state.
+- Phase −1 of the semantic memory layer (FTS5 + `recall`) is shipped and is the **final layer**. A post-shipping dry run through the 20-query eval set showed that most query "misses" reflect content not living in `bridge.db` (it's in memory files, plan docs, Notion), so vector/embedding layers wouldn't help. Scope closed — see the closure banner at the top of [bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md](bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md).
+- Tests at `115` green; `ruff` and `pyright` clean.
+- The project is now in a steady maintenance state. Scope: cross-system *state* coordination (handoffs, snapshots, activity, four Claude.ai-owned context sections) + lexical `recall` over that content.
 
 ## Registration
 
@@ -76,12 +76,12 @@ This project is active, in regular local use, and past the bootstrap stage. The 
 - **Database**: SQLite via `aiosqlite`
 - **Type checking**: pyright (strict)
 - **Lint**: ruff
-- **Test**: pytest (112 tests)
+- **Test**: pytest (115 tests)
 
 ## How To Run
 
 ```bash
-uv run pytest              # run all tests (112 total)
+uv run pytest              # run all tests (115 total)
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run ruff check --fix    # lint + auto-fix
@@ -98,6 +98,6 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 
 ## Next Recommended Move
 
-Phase 3 is closed with a "no watcher for now" decision, and Phase 4 hardening is complete. Next work should focus on operator readiness: add a compact summary/status surface, expand scenario-style workflow tests, and keep tool contracts and docs aligned as the bridge grows.
+Scope is closed. The semantic-memory layer stops at Phase −1 (FTS5 + `recall`). Any further work should be maintenance-only: doc drift, dependency updates, and consumer-side fixes. If a new coordination surface is wanted, introduce it explicitly — don't expand `bridge.db` into a knowledge store.
 
 <!-- portfolio-context:end -->
