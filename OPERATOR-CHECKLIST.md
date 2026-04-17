@@ -59,9 +59,11 @@ Conclusion
 
 After registration, test in this order:
 
-1. `mcp__bridge_db__health()`  ✅ verified on 2026-04-15
+1. `mcp__bridge_db__health()` — includes `wal_size_bytes` and `wal_warning`  ✅ verified on 2026-04-15
 2. `mcp__bridge_db__get_pending_handoffs()`
 3. `mcp__bridge_db__get_all_sections()`
+4. `mcp__bridge_db__recall_stats(days=7)` — read-side observability over recall log
+5. `mcp__bridge_db__audit_tail(limit=5)` — read-side observability over audit log
 
 If those work, move to one owned write path:
 
