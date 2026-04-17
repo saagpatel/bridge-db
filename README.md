@@ -2,7 +2,7 @@
 
 SQLite-backed MCP server for shared state across Claude.ai, Claude Code, Codex, and related local ops tools.
 
-bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLite store and 20 MCP tools (19 state/diagnostics tools + `recall`, an FTS5 lexical search over all content). The markdown bridge file is regenerated from the DB via `export_bridge_markdown` and remains available as a fallback for file-based clients.
+bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLite store and 20 MCP tools (19 state/diagnostics tools plus `recall`, an FTS5 lexical search over all content). The markdown bridge file is regenerated from the DB via `export_bridge_markdown` and remains available as a fallback for file-based clients.
 
 ## Current State
 
@@ -33,7 +33,7 @@ Codex      ──► MCP stdio ──► bridge-db process ──►  ~/.local/s
 
 No shared daemon. Each MCP client spawns its own `bridge-db` process via stdio. WAL mode + `PRAGMA busy_timeout=5000` handles concurrent writes safely.
 
-## Tools (19)
+## Tools (20)
 
 | Module | Tools |
 |---|---|
@@ -44,13 +44,14 @@ No shared daemon. Each MCP client spawns its own `bridge-db` process via stdio. 
 | cost | `record_cost`, `get_cost_history` |
 | export | `export_bridge_markdown` |
 | health | `health`, `status` |
+| recall | `recall` |
 
 Write tools enforce `caller` ownership, so systems can only write the slices of state they own. Recent hardening also added `notion_os` and `personal_ops` as first-class activity and cost writers.
 
 ## Commands
 
 ```bash
-uv run pytest              # run all tests (97 total)
+uv run pytest              # run all tests (115 total)
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run python -m bridge_db --doctor  # local environment diagnostics

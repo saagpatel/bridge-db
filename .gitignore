@@ -13,3 +13,6 @@ wheels/
 
 # OS/editor noise
 .DS_Store
+
+# Serena IDE state (local cache + memories)
+.serena/
