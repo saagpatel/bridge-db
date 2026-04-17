@@ -48,6 +48,8 @@ mcp = FastMCP(
         "update_section/get_section/get_all_sections/sync_from_file for long-lived context "
         "(career, speaking, research, capabilities), "
         "record_cost/get_cost_history for cost tracking, "
+        "recall for FTS5 lexical search across all bridge content, "
+        "recall_stats and audit_tail for observability over the query and audit logs, "
         "health/status for diagnostics, "
         "and export_bridge_markdown to regenerate the human-readable markdown file."
     ),
