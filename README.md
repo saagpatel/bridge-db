@@ -11,8 +11,9 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
 - Startup sync from the bridge markdown file is the chosen fallback strategy; Phase 3 closed with a "no live watcher for now" decision.
 - Recent hardening closed the remaining audit findings around duplicate handoff clearing, future-schema rejection, and health signaling for missing fallback state.
 - Phase −1 of the semantic memory arc shipped and is the **final layer**: `content_index` FTS5 vtable mirrors all content tables, `recall(query, limit, scope)` exposes it via MCP with OR-semantic multi-token queries. Vector/embedding phases were closed after a dry-run showed that "missed" queries targeted content not actually in `bridge.db`. See the closure banner at the top of [bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md](bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md).
-- Local verification is currently green: `136` tests passing, `ruff` clean, `pyright` clean.
-- Project is in steady maintenance. Scope is pinned to cross-system *state* coordination; it is not a knowledge store.
+- **Phase 6 observability shipped (2026-04-17):** `recall_stats` reads the recall query log, `audit_tail` reads the audit log, and `health` now surfaces `wal_size_bytes` + `wal_warning`. All three close half-built feedback loops without expanding scope. See the Phase 6 section in [ROADMAP.md](ROADMAP.md).
+- Local verification is currently green: `137` tests passing, `ruff` clean, `pyright` clean.
+- Project is in steady maintenance. Scope is pinned to cross-system *state* coordination plus lexical `recall` plus observability; it is not a knowledge store.
 
 ## Architecture
 
@@ -52,7 +53,7 @@ Write tools enforce `caller` ownership, so systems can only write the slices of 
 ## Commands
 
 ```bash
-uv run pytest              # run all tests (136 total)
+uv run pytest              # run all tests (137 total)
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run python -m bridge_db --doctor  # local environment diagnostics
