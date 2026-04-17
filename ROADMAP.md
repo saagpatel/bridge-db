@@ -13,7 +13,8 @@ This roadmap captures the current scope-closed state of bridge-db. All originall
 - A startup sync path imports Claude.ai-owned file edits into SQLite before Claude Code reads bridge state.
 - Audit hardening closed the correctness gaps around handoff clearing, future-schema detection, degraded health reporting, and latent v1→v2 migration gaps.
 - Phase −1 of the semantic memory arc (FTS5 + `recall`) shipped; subsequent phases closed (see below).
-- Repo green at `136` tests, `ruff` and `pyright` clean.
+- Phase 6 observability shipped: `recall_stats`, `audit_tail`, and WAL-size health metric (see below).
+- Repo green at `137` tests, `ruff` and `pyright` clean.
 
 ## Outcomes We Want
 
@@ -153,10 +154,24 @@ A dry-run of the 20-query eval set against the live DB showed that **most "misse
 
 Historical artifacts kept for reference: `bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md` (and its v2 predecessor), `eval-set-handoff-package.md`, `semantic_quality_set.json`. Read the closure banner at the top of v2.1 for full decision context.
 
+## Phase 6: Observability (shipped 2026-04-17)
+
+Goal: close the two half-built feedback loops where bridge-db writes JSONL logs that nothing reads, and surface WAL size so operators can act on bloat.
+
+Shipped (PRs #6, #7)
+- `recall_stats(days=7)` — analytical roll-up over `recall_query_log.jsonl`: total queries, miss_rate, top_queries (top 10 by count, empty queries separated), scope_breakdown, empty_query_count. Answers "is recall earning its keep?".
+- `audit_tail(limit, caller, tool, since, ok)` — new `tools/audit.py` module; operational tail over `audit.jsonl`, newest-first, tolerant of malformed lines and missing-`ts` records.
+- `health`: adds `wal_size_bytes` and `wal_warning` (soft signal above `config.WAL_SIZE_WARN_BYTES`, default 10 MiB). Does **not** fold into `ok`.
+- Shared `iter_jsonl` helper in `audit.py` for tolerant JSONL reads (dict-only, malformed-line-skip, missing-file-empty).
+- Server instructions string updated to advertise `recall`, `recall_stats`, and `audit_tail`.
+
+Scope note
+- These are within-scope extensions: they extract more signal from existing state/logs, not new data types. Bridge remains a cross-system state bridge, not a knowledge store.
+
 ## Steady State
 
 Future work is maintenance-only:
 - Keep docs and tool contracts aligned when MCP surfaces change.
-- Watch for WAL bloat if activity volume rises; run `PRAGMA wal_checkpoint(TRUNCATE)` if it exceeds a few MB.
+- Watch for WAL bloat via `health.wal_warning` (>10 MiB). Run `PRAGMA wal_checkpoint(TRUNCATE)` if needed.
 - Apply security/dependency updates to `mcp`, `aiosqlite`, `pydantic`.
 - Reopen the roadmap only if a concrete new cross-system coordination need surfaces — not to expand scope into knowledge search.

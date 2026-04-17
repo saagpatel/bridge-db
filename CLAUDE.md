@@ -5,7 +5,7 @@ SQLite-backed MCP server for cross-system state sharing between Claude.ai, Claud
 ## Commands
 
 ```bash
-uv run pytest              # run all tests (136 total)
+uv run pytest              # run all tests (137 total)
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run ruff check --fix    # lint + auto-fix
@@ -43,8 +43,19 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 - End-to-end verification succeeded from the Claude Desktop side.
 - Recent audit hardening closed the remaining correctness gaps around duplicate handoff clearing, future-schema mismatch handling, and degraded health reporting.
 - Phase −1 of the semantic memory layer (FTS5 + `recall`) is shipped and is the **final layer**. A post-shipping dry run through the 20-query eval set showed that most query "misses" reflect content not living in `bridge.db` (it's in memory files, plan docs, Notion), so vector/embedding layers wouldn't help. Scope closed — see the closure banner at the top of [bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md](bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md).
-- Tests at `136` green; `ruff` and `pyright` clean.
-- The project is now in a steady maintenance state. Scope: cross-system *state* coordination (handoffs, snapshots, activity, four Claude.ai-owned context sections) + lexical `recall` over that content.
+- Phase 6 observability shipped (2026-04-17, PRs #6 + #7): `recall_stats` (read-side of the recall query log), `audit_tail` (read-side of the audit log), and `wal_size_bytes` + `wal_warning` in `health`. Shared `iter_jsonl` helper in `audit.py`. These extend existing state, not scope.
+- Tests at `137` green; `ruff` and `pyright` clean.
+- The project is now in a steady maintenance state. Scope: cross-system *state* coordination (handoffs, snapshots, activity, four Claude.ai-owned context sections) + lexical `recall` over that content + observability over the JSONL logs.
+
+## Recent session log (2026-04-17)
+
+Three PRs on top of the FTS5 closure:
+
+- **PR #5** — README drift fix: tool count 19→20 (missed `recall`), test count 97→115, added `.serena/` to gitignore, deleted stale `HANDOFF.md`.
+- **PR #6** — Observability feature: added `recall_stats`, `audit_tail` (new `tools/audit.py` module), WAL size in `health`, shared `iter_jsonl` helper. Tool count 20→22 across 9 modules.
+- **PR #7** — Post-merge polish: server.py `instructions=` string advertises the new tools, regression test pinning `audit_tail` behavior for externally-edited records without `ts`, operator checklist smoke list includes the observability tools.
+
+If resuming: project is idle. Any new work should respect the closed-scope banner in the semantic-memory plan. Next maintenance tasks (low priority): dep updates, watch for Notion OS / personal-ops caller volume changes.
 
 ## Registration
 
@@ -67,7 +78,7 @@ bridge-db is an active local project in the /Users/d/Projects portfolio.
 
 ## Current State
 
-This project is active, in regular local use, and past the bootstrap stage. The codebase is stable, the DB is live, and the current focus is finishing the shift from mixed file-based Claude.ai workflows toward more direct MCP usage without adding unnecessary watcher complexity.
+This project is in steady-state maintenance. The codebase is stable, the DB is live, core features are shipped and documented, and observability over the two JSONL logs is now closed (was a half-built feedback loop). 22 MCP tools across 9 modules, 137 tests green, pyright + ruff clean. Scope is explicitly pinned to cross-system *state* coordination plus lexical `recall` plus observability — expansion into a knowledge store is ruled out.
 
 ## Stack
 
@@ -76,12 +87,12 @@ This project is active, in regular local use, and past the bootstrap stage. The 
 - **Database**: SQLite via `aiosqlite`
 - **Type checking**: pyright (strict)
 - **Lint**: ruff
-- **Test**: pytest (136 tests)
+- **Test**: pytest (137 tests)
 
 ## How To Run
 
 ```bash
-uv run pytest              # run all tests (136 total)
+uv run pytest              # run all tests (137 total)
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run ruff check --fix    # lint + auto-fix
@@ -98,6 +109,6 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 
 ## Next Recommended Move
 
-Scope is closed. The semantic-memory layer stops at Phase −1 (FTS5 + `recall`). Any further work should be maintenance-only: doc drift, dependency updates, and consumer-side fixes. If a new coordination surface is wanted, introduce it explicitly — don't expand `bridge.db` into a knowledge store.
+Scope is closed. The semantic-memory layer stops at Phase −1 (FTS5 + `recall`); observability is shipped as Phase 6. Any further work should be maintenance-only: doc drift, dependency updates, consumer-side fixes, and dogfooding `recall_stats` / `audit_tail` to see whether those feedback loops surface anything worth acting on. If a new coordination surface is wanted, introduce it explicitly — don't expand `bridge.db` into a knowledge store.
 
 <!-- portfolio-context:end -->
