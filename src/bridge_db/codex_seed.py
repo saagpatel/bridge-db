@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from bridge_db import config
-from bridge_db.db import open_db
+from bridge_db.db import (
+    fts_text_for_activity,
+    fts_text_for_snapshot,
+    gc_fts_orphans,
+    open_db,
+    upsert_fts_entry,
+)
 from bridge_db.tools.export import build_markdown
 
 
@@ -60,9 +66,9 @@ async def _baseline_activity_exists(db: Any, entry: dict[str, Any]) -> bool:
         LIMIT 1
         """,
         (
-          entry["caller"],
-          entry["timestamp"],
-          entry["project_name"],
+            entry["caller"],
+            entry["timestamp"],
+            entry["project_name"],
         ),
     )
     return await cursor.fetchone() is not None
@@ -77,18 +83,24 @@ async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, A
         activity_write = "skipped_duplicate"
 
         current_snapshot = await _latest_codex_snapshot_payload(db)
-        if current_snapshot is None or _fingerprint_snapshot(current_snapshot) != _fingerprint_snapshot(
-            snapshot_payload
-        ):
+        if current_snapshot is None or _fingerprint_snapshot(
+            current_snapshot
+        ) != _fingerprint_snapshot(snapshot_payload):
             snapshot_write = "would_insert" if dry_run else "inserted"
             if not dry_run:
-                await db.execute(
+                snapshot_json = json.dumps(snapshot_payload)
+                cursor = await db.execute(
                     """
                     INSERT INTO system_snapshots (system, snapshot_date, data)
                     VALUES (?, ?, ?)
                     """,
-                    ("codex", manifest["snapshot_date"], json.dumps(snapshot_payload)),
+                    ("codex", manifest["snapshot_date"], snapshot_json),
                 )
+                snapshot_id = cursor.lastrowid
+                if snapshot_id is not None:
+                    await upsert_fts_entry(
+                        db, "snapshot", str(snapshot_id), fts_text_for_snapshot(snapshot_json)
+                    )
                 await db.execute(
                     """
                     DELETE FROM system_snapshots
@@ -99,12 +111,13 @@ async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, A
                     """,
                     ("codex", "codex", config.SNAPSHOT_RETENTION_PER_SYSTEM),
                 )
+                await gc_fts_orphans(db, "snapshot")
 
         activity_exists = await _baseline_activity_exists(db, baseline_activity)
         if not activity_exists:
             activity_write = "would_insert" if dry_run else "inserted"
             if not dry_run:
-                await db.execute(
+                cursor = await db.execute(
                     """
                     INSERT INTO activity_log (source, timestamp, project_name, summary, branch, tags)
                     VALUES (?, ?, ?, ?, ?, ?)
@@ -118,6 +131,18 @@ async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, A
                         json.dumps(baseline_activity.get("tags", [])),
                     ),
                 )
+                activity_id = cursor.lastrowid
+                if activity_id is not None:
+                    await upsert_fts_entry(
+                        db,
+                        "activity",
+                        str(activity_id),
+                        fts_text_for_activity(
+                            baseline_activity["project_name"],
+                            baseline_activity["summary"],
+                            None,
+                        ),
+                    )
 
         if not dry_run and (snapshot_write == "inserted" or activity_write == "inserted"):
             await db.commit()
@@ -140,8 +165,12 @@ async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, A
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m bridge_db.codex_seed")
-    parser.add_argument("--manifest", required=True, help="Path to the Codex baseline seed manifest JSON.")
-    parser.add_argument("--dry-run", action="store_true", help="Validate and report without mutating the DB.")
+    parser.add_argument(
+        "--manifest", required=True, help="Path to the Codex baseline seed manifest JSON."
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Validate and report without mutating the DB."
+    )
     parser.add_argument("--apply", action="store_true", help="Apply the baseline seed manifest.")
     args = parser.parse_args()
 

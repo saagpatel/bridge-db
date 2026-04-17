@@ -58,8 +58,9 @@ To give Claude.ai direct DB access, register bridge-db in Claude Desktop's MCP c
 }
 ```
 
-This gives Claude.ai access to all 19 MCP tools under `mcp__bridge_db__*`, including
-the read-only `health` and `status` diagnostics plus the file-import helper `sync_from_file`.
+This gives Claude.ai access to all 20 MCP tools under `mcp__bridge_db__*`, including
+the read-only `health` and `status` diagnostics, the file-import helper `sync_from_file`,
+and the `recall` FTS5 lexical search over all content (Phase −1 of the semantic memory layer).
 
 **Prerequisite:** Verify that the Claude Desktop version in use supports custom stdio
 MCP servers with `uv`-based Python launchers. As of mid-2026, Claude Desktop MCP

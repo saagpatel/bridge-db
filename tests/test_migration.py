@@ -321,3 +321,40 @@ async def test_migration_is_idempotent(db: aiosqlite.Connection, bridge_file: Pa
     assert row[0] == 4  # unchanged from first run
 
     _ = counts1  # suppress unused warning
+
+
+async def test_migration_populates_content_index(
+    db: aiosqlite.Connection, bridge_file: Path
+) -> None:
+    """migrate_from_markdown must leave content_index in sync with source rows.
+
+    The bootstrap path uses direct INSERTs that bypass the per-tool FTS5 hooks,
+    so migrate_from_markdown calls repopulate_content_index at the end. Regression
+    test to catch future changes that drop that call.
+    """
+    await migrate_from_markdown(db, bridge_file)
+
+    # content_index row count equals the sum of source rows it mirrors.
+    cursor = await db.execute(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM context_sections)
+          + (SELECT COUNT(*) FROM activity_log)
+          + (SELECT COUNT(*) FROM system_snapshots)
+          + (SELECT COUNT(*) FROM pending_handoffs)
+          AS src_total,
+            (SELECT COUNT(*) FROM content_index) AS fts_total
+        """
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["src_total"] > 0, "fixture should have seeded some rows"
+    assert row["fts_total"] == row["src_total"], "content_index not synced after migration"
+
+    # MATCH works — a term from a seeded section reaches the FTS index.
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM content_index WHERE content_index MATCH 'Staff'"
+    )
+    match_row = await cursor.fetchone()
+    assert match_row is not None
+    assert match_row[0] >= 1
