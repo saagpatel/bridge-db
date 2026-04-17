@@ -171,6 +171,132 @@ def test_sanitize_fts5_query_or_joins_multi_token() -> None:
     assert sanitize("foo bar baz") == "foo OR bar OR baz"
 
 
+def _write_recall_log(path: Any, events: list[dict[str, Any]]) -> None:
+    """Write a synthetic recall_query_log.jsonl for stats tests."""
+    lines = [json.dumps(e) for e in events]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+async def test_recall_stats_empty_log(capture: CaptureMCP, tmp_path: Any, monkeypatch: Any) -> None:
+    """Missing log returns zeroed stats, not an error."""
+    monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", tmp_path / "no_such_log.jsonl")
+    result = await capture.fns["recall_stats"](days=7)
+    assert result["total_queries"] == 0
+    assert result["miss_rate"] == 0.0
+    assert result["empty_query_count"] == 0
+    assert result["top_queries"] == []
+    assert result["scope_breakdown"] == {}
+    assert result["window_days"] == 7
+
+
+async def test_recall_stats_aggregates_counts_and_miss_rate(
+    capture: CaptureMCP, tmp_path: Any, monkeypatch: Any
+) -> None:
+    log_path = tmp_path / "recall.jsonl"
+    monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", log_path)
+
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    _write_recall_log(
+        log_path,
+        [
+            {"ts": now, "query": "bridge-db", "scope": "all", "limit": 10, "n_results": 3},
+            {"ts": now, "query": "bridge-db", "scope": "all", "limit": 10, "n_results": 5},
+            {"ts": now, "query": "handoff", "scope": "handoff", "limit": 10, "n_results": 0},
+            {"ts": now, "query": "handoff", "scope": "handoff", "limit": 10, "n_results": 0},
+            {"ts": now, "query": "nothing", "scope": "all", "limit": 10, "n_results": 0},
+        ],
+    )
+
+    result = await capture.fns["recall_stats"](days=7)
+    assert result["total_queries"] == 5
+    # 3 of 5 queries had 0 results
+    assert result["miss_rate"] == 0.6
+    # Top query by count is "bridge-db" (2) or "handoff" (2); both present
+    top_map = {t["query"]: t for t in result["top_queries"]}
+    assert top_map["bridge-db"]["count"] == 2
+    assert top_map["bridge-db"]["avg_results"] == 4.0
+    assert top_map["handoff"]["count"] == 2
+    assert top_map["handoff"]["avg_results"] == 0.0
+    assert top_map["nothing"]["count"] == 1
+    assert result["scope_breakdown"] == {"all": 3, "handoff": 2}
+
+
+async def test_recall_stats_separates_empty_queries(
+    capture: CaptureMCP, tmp_path: Any, monkeypatch: Any
+) -> None:
+    log_path = tmp_path / "recall.jsonl"
+    monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", log_path)
+
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    _write_recall_log(
+        log_path,
+        [
+            {"ts": now, "query": "", "scope": "all", "limit": 10, "n_results": 0},
+            {"ts": now, "query": "   ", "scope": "all", "limit": 10, "n_results": 0},
+            {"ts": now, "query": "real", "scope": "all", "limit": 10, "n_results": 2},
+        ],
+    )
+
+    result = await capture.fns["recall_stats"](days=7)
+    assert result["total_queries"] == 3
+    assert result["empty_query_count"] == 2
+    # Empty queries excluded from top_queries
+    top_queries = [t["query"] for t in result["top_queries"]]
+    assert top_queries == ["real"]
+
+
+async def test_recall_stats_respects_time_window(
+    capture: CaptureMCP, tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Entries older than the window are excluded."""
+    log_path = tmp_path / "recall.jsonl"
+    monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", log_path)
+
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    recent_ts = now.isoformat().replace("+00:00", "Z")
+    old_ts = (now - timedelta(days=30)).isoformat().replace("+00:00", "Z")
+    _write_recall_log(
+        log_path,
+        [
+            {"ts": old_ts, "query": "old", "scope": "all", "limit": 10, "n_results": 1},
+            {"ts": recent_ts, "query": "new", "scope": "all", "limit": 10, "n_results": 1},
+        ],
+    )
+
+    result = await capture.fns["recall_stats"](days=7)
+    assert result["total_queries"] == 1
+    assert [t["query"] for t in result["top_queries"]] == ["new"]
+
+
+async def test_recall_stats_top_queries_capped_at_ten(
+    capture: CaptureMCP, tmp_path: Any, monkeypatch: Any
+) -> None:
+    log_path = tmp_path / "recall.jsonl"
+    monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", log_path)
+
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    # 12 distinct queries, each unique → all ties at count=1
+    _write_recall_log(
+        log_path,
+        [
+            {"ts": now, "query": f"q{i}", "scope": "all", "limit": 10, "n_results": 1}
+            for i in range(12)
+        ],
+    )
+
+    result = await capture.fns["recall_stats"](days=7)
+    assert result["total_queries"] == 12
+    assert len(result["top_queries"]) == 10
+
+
 async def test_recall_or_semantics_returns_partial_matches(
     capture: CaptureMCP, db: Any, tmp_path: Any, monkeypatch: Any
 ) -> None:

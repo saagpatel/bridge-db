@@ -7,6 +7,7 @@ def register_all(mcp: FastMCP) -> None:
     """Register all tool groups. Import order is documentation order."""
     from bridge_db.tools import (
         activity,
+        audit,
         context,
         cost,
         export,
@@ -24,3 +25,4 @@ def register_all(mcp: FastMCP) -> None:
     export.register(mcp)
     health.register(mcp)
     recall.register(mcp)
+    audit.register(mcp)

@@ -5,7 +5,7 @@ SQLite-backed MCP server for cross-system state sharing between Claude.ai, Claud
 ## Commands
 
 ```bash
-uv run pytest              # run all tests (115 total)
+uv run pytest              # run all tests (136 total)
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run ruff check --fix    # lint + auto-fix
@@ -18,7 +18,7 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 
 - **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=5000`). Schema at v3 — adds `content_index` FTS5 vtable mirroring all source rows for lexical search.
 - **MCP transport**: stdio (stdout = JSON-RPC, all logging → stderr)
-- **20 MCP tools** across 8 modules: activity, handoffs, context, snapshots, cost, export, health, recall (FTS5 lexical search; Phase −1 of the semantic memory layer).
+- **22 MCP tools** across 9 modules: activity, handoffs, context, snapshots, cost, export, health, recall (FTS5 lexical search; Phase −1 of the semantic memory layer), audit (read-side observability over the JSONL audit + recall query logs).
 - **Context access**: `get_db(ctx)` helper casts lifespan context to `aiosqlite.Connection`
 - **Tool registration**: `CaptureMCP` pattern in tests — decorators capture raw async fns
 - **FTS5 invariant**: every write path that touches `context_sections`, `activity_log`, `system_snapshots`, or `pending_handoffs` calls `upsert_fts_entry` / `gc_fts_orphans` from [db.py](src/bridge_db/db.py) in the same transaction. Auto-prune paths in `log_activity` and `save_snapshot` GC orphan FTS rows.
@@ -43,7 +43,7 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 - End-to-end verification succeeded from the Claude Desktop side.
 - Recent audit hardening closed the remaining correctness gaps around duplicate handoff clearing, future-schema mismatch handling, and degraded health reporting.
 - Phase −1 of the semantic memory layer (FTS5 + `recall`) is shipped and is the **final layer**. A post-shipping dry run through the 20-query eval set showed that most query "misses" reflect content not living in `bridge.db` (it's in memory files, plan docs, Notion), so vector/embedding layers wouldn't help. Scope closed — see the closure banner at the top of [bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md](bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md).
-- Tests at `115` green; `ruff` and `pyright` clean.
+- Tests at `136` green; `ruff` and `pyright` clean.
 - The project is now in a steady maintenance state. Scope: cross-system *state* coordination (handoffs, snapshots, activity, four Claude.ai-owned context sections) + lexical `recall` over that content.
 
 ## Registration
@@ -76,12 +76,12 @@ This project is active, in regular local use, and past the bootstrap stage. The 
 - **Database**: SQLite via `aiosqlite`
 - **Type checking**: pyright (strict)
 - **Lint**: ruff
-- **Test**: pytest (115 tests)
+- **Test**: pytest (136 tests)
 
 ## How To Run
 
 ```bash
-uv run pytest              # run all tests (115 total)
+uv run pytest              # run all tests (136 total)
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run ruff check --fix    # lint + auto-fix
