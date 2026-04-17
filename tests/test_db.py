@@ -187,3 +187,15 @@ async def test_migration_v1_to_v2(tmp_path: Path) -> None:
     await migrated.commit()
 
     await migrated.close()
+
+
+async def test_ensure_schema_rejects_future_db_version(tmp_path: Path) -> None:
+    db_path = tmp_path / "future.db"
+    db = await aiosqlite.connect(str(db_path))
+    await db.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+    await db.commit()
+
+    with pytest.raises(RuntimeError, match="newer than this bridge-db build supports"):
+        await ensure_schema(db)
+
+    await db.close()

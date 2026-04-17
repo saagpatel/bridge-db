@@ -11,7 +11,7 @@ DB_PATH: Path = Path(
     )
 )
 
-# Bridge markdown file (source of truth for Claude.ai; derived export target for bridge-db)
+# Bridge markdown file (export target for DB state and fallback read path for file-based clients)
 BRIDGE_FILE_PATH: Path = Path(
     os.environ.get(
         "BRIDGE_FILE_PATH",

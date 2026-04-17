@@ -12,7 +12,7 @@ from pydantic import Field
 from bridge_db import config
 from bridge_db.audit import log_audit
 from bridge_db.db import get_db
-from bridge_db.models import CallerID
+from bridge_db.models import ACTIVITY_SOURCES, CallerID, invalid_source_error
 
 logger = logging.getLogger("bridge_db.tools.activity")
 
@@ -22,7 +22,12 @@ def register(mcp: FastMCP) -> None:
     async def log_activity(
         caller: Annotated[
             CallerID,
-            Field(description="The system logging this entry: 'cc', 'codex', or 'claude_ai'"),
+            Field(
+                description=(
+                    "The system logging this entry: 'cc', 'codex', 'claude_ai', "
+                    "'notion_os', or 'personal_ops'"
+                )
+            ),
         ],
         project_name: Annotated[str, Field(description="Project name, e.g. 'bridge-db'")],
         summary: Annotated[str, Field(description="One-line description of what was done")],
@@ -69,7 +74,12 @@ def register(mcp: FastMCP) -> None:
     async def get_recent_activity(
         source: Annotated[
             str | None,
-            Field(description="Filter by source: 'cc', 'codex', or 'claude_ai'. Omit for all."),
+            Field(
+                description=(
+                    "Filter by source: 'cc', 'codex', 'claude_ai', "
+                    "'notion_os', or 'personal_ops'. Omit for all."
+                )
+            ),
         ] = None,
         limit: Annotated[int, Field(description="Max entries to return", ge=1, le=200)] = 20,
         since: Annotated[
@@ -84,6 +94,8 @@ def register(mcp: FastMCP) -> None:
         params: list[Any] = []
 
         if source is not None:
+            if source not in ACTIVITY_SOURCES:
+                raise ToolError(invalid_source_error(source))
             conditions.append("source = ?")
             params.append(source)
         if since is not None:

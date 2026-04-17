@@ -1,4 +1,4 @@
-"""Shared types: CallerID, ownership maps, error helpers."""
+"""Shared types, ownership maps, and validation helpers."""
 
 from typing import Literal
 
@@ -18,9 +18,11 @@ SECTION_OWNERS: dict[str, CallerID] = {
     "capabilities": "claude_ai",
 }
 
-# Callers allowed to log activity per source column value
-# activity_log.source maps directly from caller
-ACTIVITY_ALLOWED_CALLERS: set[CallerID] = {"cc", "codex", "claude_ai", "notion_os", "personal_ops"}
+# Callers allowed to log activity per source column value.
+# activity_log.source maps directly from caller.
+ACTIVITY_SOURCES: frozenset[CallerID] = frozenset(
+    {"cc", "codex", "claude_ai", "notion_os", "personal_ops"}
+)
 
 # Callers allowed to save snapshots per system
 # Only cc/codex own full state snapshots; notion_os/personal_ops use activity log instead
@@ -37,6 +39,8 @@ COST_SYSTEM_MAP: dict[str, SystemID] = {
     "personal_ops": "personal_ops",
 }
 
+READABLE_SYSTEMS: frozenset[SystemID] = frozenset(COST_SYSTEM_MAP.values())
+
 
 def ownership_error(caller: str, section: str, owner: str) -> str:
     return (
@@ -52,3 +56,13 @@ def snapshot_ownership_error(caller: str) -> str:
 def cost_ownership_error(caller: str) -> str:
     allowed = ", ".join(f"'{k}'" for k in COST_SYSTEM_MAP)
     return f"Caller '{caller}' cannot record costs. Allowed callers: {allowed}."
+
+
+def invalid_source_error(source: str) -> str:
+    allowed = ", ".join(f"'{value}'" for value in sorted(ACTIVITY_SOURCES))
+    return f"Invalid source '{source}'. Allowed sources: {allowed}."
+
+
+def invalid_system_error(system: str) -> str:
+    allowed = ", ".join(f"'{value}'" for value in sorted(READABLE_SYSTEMS))
+    return f"Invalid system '{system}'. Allowed systems: {allowed}."

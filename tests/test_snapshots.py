@@ -135,3 +135,11 @@ async def test_get_cost_history_filter_by_system(
 
     all_costs = await cost_fns["get_cost_history"](ctx=ctx)
     assert len(all_costs) == 2
+
+
+async def test_get_cost_history_invalid_system_raises(
+    db: aiosqlite.Connection, cost_fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    with pytest.raises(ToolError, match="Invalid system"):
+        await cost_fns["get_cost_history"](system="claude_ai", ctx=ctx)

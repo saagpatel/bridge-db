@@ -9,7 +9,13 @@ from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db.db import get_db
-from bridge_db.models import COST_SYSTEM_MAP, CallerID, cost_ownership_error
+from bridge_db.models import (
+    COST_SYSTEM_MAP,
+    READABLE_SYSTEMS,
+    CallerID,
+    cost_ownership_error,
+    invalid_system_error,
+)
 
 logger = logging.getLogger("bridge_db.tools.cost")
 
@@ -19,7 +25,10 @@ _MONTH_RE = re.compile(r"^\d{4}-(?:0[1-9]|1[0-2])$")
 def register(mcp: FastMCP) -> None:
     @mcp.tool()
     async def record_cost(
-        caller: Annotated[CallerID, Field(description="Must be 'cc' or 'codex'")],
+        caller: Annotated[
+            CallerID,
+            Field(description="Must be 'cc', 'codex', 'notion_os', or 'personal_ops'"),
+        ],
         month: Annotated[str, Field(description="Month in YYYY-MM format, e.g. '2026-04'")],
         amount: Annotated[float, Field(description="Cost in USD", ge=0)],
         notes: Annotated[
@@ -27,7 +36,7 @@ def register(mcp: FastMCP) -> None:
         ] = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
-        """Upsert a monthly cost record. Caller must own the system (cc or codex)."""
+        """Upsert a monthly cost record. Caller must own the system they are updating."""
         system = COST_SYSTEM_MAP.get(caller)
         if system is None:
             raise ToolError(cost_ownership_error(caller))
@@ -63,6 +72,8 @@ def register(mcp: FastMCP) -> None:
         db = get_db(ctx)
 
         if system is not None:
+            if system not in READABLE_SYSTEMS:
+                raise ToolError(invalid_system_error(system))
             cursor = await db.execute(
                 "SELECT system, month, amount, notes, recorded_at FROM cost_records "
                 "WHERE system = ? ORDER BY month DESC LIMIT ?",

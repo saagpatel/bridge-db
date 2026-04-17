@@ -85,6 +85,14 @@ async def test_get_recent_activity_filters_by_since(
     assert recent[0]["project_name"] == "New"
 
 
+async def test_get_recent_activity_invalid_source_raises(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    with pytest.raises(ToolError, match="Invalid source"):
+        await fns["get_recent_activity"](source="bogus", ctx=ctx)
+
+
 async def test_get_shipped_events(db: aiosqlite.Connection, fns: dict[str, Any]) -> None:
     ctx = make_ctx(db)
     await fns["log_activity"](
