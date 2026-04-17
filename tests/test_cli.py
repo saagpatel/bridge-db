@@ -1,5 +1,8 @@
 """Tests for the bridge-db CLI helpers."""
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -68,3 +71,63 @@ async def test_run_status_reports_degraded_when_bridge_file_missing(
     assert ok is False
     assert "Overall: degraded" in captured
     assert "exists=False, age=missing" in captured
+
+
+@pytest.mark.parametrize(
+    ("flag", "expected_text"),
+    [
+        ("--status", "bridge-db status"),
+        ("--doctor", "DB opens (WAL + schema)"),
+    ],
+)
+def test_cli_entrypoints_smoke(flag: str, expected_text: str, tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    db_path = tmp_path / "bridge.db"
+    bridge_path = tmp_path / "claude_ai_context.md"
+    audit_log_path = tmp_path / "audit.log"
+    bridge_path.write_text("# bridge\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(repo_root / "src")
+    env["DB_PATH"] = str(db_path)
+    env["BRIDGE_FILE_PATH"] = str(bridge_path)
+    env["AUDIT_LOG_PATH"] = str(audit_log_path)
+
+    bootstrap = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import asyncio
+import os
+from pathlib import Path
+from bridge_db.db import open_db
+
+
+async def main() -> None:
+    db = await open_db(Path(os.environ["DB_PATH"]))
+    await db.close()
+
+
+asyncio.run(main())
+""",
+        ],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert bootstrap.returncode == 0, bootstrap.stderr
+
+    result = subprocess.run(
+        [sys.executable, "-m", "bridge_db", flag],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert expected_text in result.stdout
