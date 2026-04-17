@@ -103,11 +103,35 @@ async def test_clear_handoff_by_project_name(db: aiosqlite.Connection, fns: dict
     result = await fns["clear_handoff"](caller="cc", project_name="MyProject", ctx=ctx)
     assert result["ok"] is True
     assert result["cleared"] is True
+    assert result["cleared_count"] == 1
 
     cursor = await db.execute("SELECT status FROM pending_handoffs WHERE project_name='MyProject'")
     row = await cursor.fetchone()
     assert row is not None
     assert row["status"] == "cleared"
+
+
+async def test_clear_handoff_clears_all_matching_rows(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    first = await fns["create_handoff"](caller="claude_ai", project_name="MyProject", ctx=ctx)
+    second = await fns["create_handoff"](caller="claude_ai", project_name="MyProject", ctx=ctx)
+    await fns["pick_up_handoff"](caller="cc", handoff_id=second["handoff_id"], ctx=ctx)
+
+    result = await fns["clear_handoff"](caller="cc", project_name="MyProject", ctx=ctx)
+
+    assert result["ok"] is True
+    assert result["cleared"] is True
+    assert result["cleared_count"] == 2
+    assert sorted(result["handoff_ids"]) == sorted([first["handoff_id"], second["handoff_id"]])
+
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM pending_handoffs WHERE project_name='MyProject' AND status != 'cleared'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == 0
 
 
 async def test_clear_handoff_missing_project_returns_ok(
@@ -125,3 +149,57 @@ async def test_clear_handoff_rejects_claude_ai(
     ctx = make_ctx(db)
     with pytest.raises(ToolError):
         await fns["clear_handoff"](caller="claude_ai", project_name="P", ctx=ctx)
+
+
+async def test_handoff_lifecycle_across_pending_pickup_and_clear(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    first = await fns["create_handoff"](
+        caller="claude_ai",
+        project_name="BridgeStatus",
+        project_path="/Users/d/Projects/bridge-db",
+        phase="Phase 5",
+        ctx=ctx,
+    )
+    second = await fns["create_handoff"](
+        caller="claude_ai",
+        project_name="BridgeExport",
+        project_path="/Users/d/Projects/bridge-db",
+        phase="Phase 5",
+        ctx=ctx,
+    )
+
+    pending_before = await fns["get_pending_handoffs"](ctx=ctx)
+    assert [handoff["project_name"] for handoff in pending_before] == ["BridgeExport", "BridgeStatus"]
+
+    picked_up = await fns["pick_up_handoff"](caller="codex", handoff_id=first["handoff_id"], ctx=ctx)
+    assert picked_up["status"] == "active"
+
+    pending_after_pickup = await fns["get_pending_handoffs"](ctx=ctx)
+    assert [handoff["project_name"] for handoff in pending_after_pickup] == ["BridgeExport"]
+
+    cleared = await fns["clear_handoff"](caller="codex", project_name="BridgeStatus", ctx=ctx)
+    assert cleared["ok"] is True
+    assert cleared["cleared_count"] == 1
+
+    pending_after_clear = await fns["get_pending_handoffs"](ctx=ctx)
+    assert [handoff["project_name"] for handoff in pending_after_clear] == ["BridgeExport"]
+
+    cursor = await db.execute(
+        "SELECT status, picked_up_at, cleared_at FROM pending_handoffs WHERE id = ?",
+        (first["handoff_id"],),
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["status"] == "cleared"
+    assert row["picked_up_at"] is not None
+    assert row["cleared_at"] is not None
+
+    cursor = await db.execute(
+        "SELECT status FROM pending_handoffs WHERE id = ?",
+        (second["handoff_id"],),
+    )
+    second_row = await cursor.fetchone()
+    assert second_row is not None
+    assert second_row["status"] == "pending"

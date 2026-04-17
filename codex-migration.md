@@ -33,9 +33,14 @@ After registration, bridge-db tools appear as `bridge-db__log_activity`, etc.
 | `bridge-db__get_cost_history` | — | Query cost records |
 | `bridge-db__get_section` | — | Read a context section |
 | `bridge-db__get_all_sections` | — | Read all context sections |
+| `bridge-db__sync_from_file` | — | Import Claude.ai-owned file edits into SQLite |
 | `bridge-db__export_bridge_markdown` | — | Regenerate the markdown file |
+| `bridge-db__health` | — | Read DB and bridge file health metrics |
+| `bridge-db__status` | — | Read compact operator summary data |
 
-**Note:** `update_section` requires `caller="claude_ai"` — Codex cannot write Claude.ai's sections.
+**Notes:**
+- `update_section` requires `caller="claude_ai"` — Codex cannot write Claude.ai's sections.
+- Claude Code `/start` now runs `sync_from_file` before bridge reads, so Claude.ai file edits are pulled into SQLite at session start.
 
 ## 3. Per-Skill Migration
 
@@ -170,7 +175,13 @@ If bridge-db is down or misconfigured:
 2. The markdown file is kept in sync by `export_bridge_markdown` on every write — so it's always current
 3. To disable bridge-db: remove `[mcp_servers.bridge-db]` from `~/.codex/config.toml`
 
-## 6. Tool Name Differences
+## 6. Current State
+
+- Tool surface and docs were cleaned up on 2026-04-15 to match the live MCP server.
+- The Claude.ai file-write overwrite gap is closed by `sync_from_file` plus the Claude Code `/start` hook.
+- Direct Claude.ai MCP adoption is now the main remaining integration improvement area.
+
+## 7. Tool Name Differences
 
 Codex MCP tool names use underscores: `bridge-db__log_activity` (not `bridge-db__log-activity`).
 

@@ -66,7 +66,7 @@ def register(mcp: FastMCP) -> None:
                    dispatched_from, dispatched_at, status
             FROM pending_handoffs
             WHERE status = 'pending'
-            ORDER BY dispatched_at DESC
+            ORDER BY dispatched_at DESC, id DESC
             """
         )
         rows = await cursor.fetchall()
@@ -126,7 +126,7 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool()
     async def clear_handoff(
         caller: Annotated[
-            CallerID, Field(description="Must be 'cc' — /end skill clears matched handoffs")
+            CallerID, Field(description="Must be 'cc' or 'codex' — clears matched handoffs")
         ],
         project_name: Annotated[str, Field(description="Project name to match and clear")],
         ctx: Context = None,  # type: ignore[assignment]
@@ -137,22 +137,37 @@ def register(mcp: FastMCP) -> None:
 
         db = get_db(ctx)
         cursor = await db.execute(
-            "SELECT id, status FROM pending_handoffs WHERE project_name = ? AND status != 'cleared'",
+            """
+            SELECT id
+            FROM pending_handoffs
+            WHERE project_name = ? AND status != 'cleared'
+            ORDER BY dispatched_at DESC, id DESC
+            """,
             (project_name,),
         )
-        row = await cursor.fetchone()
-        if row is None:
+        rows = await cursor.fetchall()
+        if not rows:
             # Not an error — handoff may not exist; /end calls this opportunistically
             return {"ok": True, "cleared": False, "reason": "No active handoff found for project"}
 
+        handoff_ids = [row["id"] for row in rows]
         await db.execute(
             """
             UPDATE pending_handoffs
             SET status = 'cleared', cleared_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-            WHERE id = ?
+            WHERE project_name = ? AND status != 'cleared'
             """,
-            (row["id"],),
+            (project_name,),
         )
         await db.commit()
-        logger.info("handoff cleared: project=%s by %s", project_name, caller)
-        return {"ok": True, "cleared": True, "handoff_id": row["id"], "project_name": project_name}
+        logger.info(
+            "handoffs cleared: project=%s by %s count=%d", project_name, caller, len(handoff_ids)
+        )
+        return {
+            "ok": True,
+            "cleared": True,
+            "handoff_id": handoff_ids[0],
+            "handoff_ids": handoff_ids,
+            "cleared_count": len(handoff_ids),
+            "project_name": project_name,
+        }
