@@ -2,7 +2,7 @@
 
 SQLite-backed MCP server for shared state across Claude.ai, Claude Code, Codex, and related local ops tools.
 
-bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLite store and 19 MCP tools. The markdown bridge file is regenerated from the DB via `export_bridge_markdown` and remains available as a fallback for file-based clients.
+bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLite store and 20 MCP tools (19 state/diagnostics tools + `recall`, an FTS5 lexical search over all content). The markdown bridge file is regenerated from the DB via `export_bridge_markdown` and remains available as a fallback for file-based clients.
 
 ## Current State
 
@@ -10,7 +10,8 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
 - Direct Claude.ai MCP read and write paths have both been validated locally.
 - Startup sync from the bridge markdown file is the chosen fallback strategy; Phase 3 closed with a "no live watcher for now" decision.
 - Recent hardening closed the remaining audit findings around duplicate handoff clearing, future-schema rejection, and health signaling for missing fallback state.
-- Local verification is currently green: `97` tests passing, `ruff` clean, `pyright` clean.
+- Phase −1 of the semantic memory layer shipped: `content_index` FTS5 vtable mirrors all content tables, `recall(query, limit, scope)` exposes it via MCP. See [bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md](bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md).
+- Local verification is currently green: `110` tests passing, `ruff` clean, `pyright` clean.
 - The next sensible phase is operator readiness and scenario-style workflow coverage, not more cleanup.
 
 ## Architecture

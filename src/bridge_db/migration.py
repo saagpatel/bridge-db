@@ -19,7 +19,7 @@ from typing import Any
 import aiosqlite
 
 from bridge_db.config import BRIDGE_FILE_PATH, DB_PATH
-from bridge_db.db import open_db
+from bridge_db.db import open_db, repopulate_content_index
 
 logger = logging.getLogger("bridge_db.migration")
 
@@ -326,6 +326,9 @@ async def migrate_from_markdown(db: aiosqlite.Connection, bridge_path: Path) -> 
                 counts["activity_log"] += 1
 
     await db.commit()
+    # Bulk direct INSERTs above bypass the per-tool FTS5 hooks; rebuild the
+    # content_index from source tables so recall stays consistent after bootstrap.
+    await repopulate_content_index(db)
     logger.info("Migration complete: %s", counts)
     return counts
 

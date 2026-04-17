@@ -7,7 +7,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from bridge_db.db import get_db
+from bridge_db.db import fts_text_for_handoff, get_db, upsert_fts_entry
 from bridge_db.models import CallerID
 
 logger = logging.getLogger("bridge_db.tools.handoffs")
@@ -43,8 +43,17 @@ def register(mcp: FastMCP) -> None:
             """,
             (project_name, project_path, roadmap_file, phase),
         )
-        await db.commit()
         handoff_id = cursor.lastrowid
+
+        if handoff_id is not None:
+            await upsert_fts_entry(
+                db,
+                "handoff",
+                str(handoff_id),
+                fts_text_for_handoff(project_name, project_path, roadmap_file, phase),
+            )
+
+        await db.commit()
 
         logger.info("handoff created: id=%d project=%s", handoff_id, project_name)
         return {

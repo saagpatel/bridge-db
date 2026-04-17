@@ -11,7 +11,12 @@ from pydantic import Field
 
 from bridge_db import config
 from bridge_db.audit import log_audit
-from bridge_db.db import get_db
+from bridge_db.db import (
+    fts_text_for_activity,
+    gc_fts_orphans,
+    get_db,
+    upsert_fts_entry,
+)
 from bridge_db.models import ACTIVITY_SOURCES, CallerID, invalid_source_error
 
 logger = logging.getLogger("bridge_db.tools.activity")
@@ -45,13 +50,22 @@ def register(mcp: FastMCP) -> None:
         ts = timestamp or str(date.today())
         tags_json = json.dumps(tags or [])
 
-        await db.execute(
+        cursor = await db.execute(
             """
             INSERT INTO activity_log (source, timestamp, project_name, summary, branch, tags)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (caller, ts, project_name, summary, branch, tags_json),
         )
+        activity_id = cursor.lastrowid
+
+        if activity_id is not None:
+            await upsert_fts_entry(
+                db,
+                "activity",
+                str(activity_id),
+                fts_text_for_activity(project_name, summary, branch),
+            )
 
         # Prune to retention limit per source
         await db.execute(
@@ -64,6 +78,8 @@ def register(mcp: FastMCP) -> None:
             """,
             (caller, caller, config.ACTIVITY_RETENTION_PER_SOURCE),
         )
+        # Drop FTS rows for any source row that the prune removed.
+        await gc_fts_orphans(db, "activity")
         await db.commit()
 
         log_audit("log_activity", caller, project_name, ok=True)
@@ -193,6 +209,9 @@ def register(mcp: FastMCP) -> None:
         db = get_db(ctx)
         updated = 0
 
+        # Tags are not indexed in content_index (see fts_text_for_activity), so
+        # updating tags does not require re-indexing. If fts_text_for_activity
+        # ever starts including tags, add an upsert_fts_entry call here.
         for activity_id in activity_ids:
             cursor = await db.execute("SELECT tags FROM activity_log WHERE id = ?", (activity_id,))
             row = await cursor.fetchone()
