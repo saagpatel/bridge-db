@@ -20,6 +20,9 @@ def load_manifest(path: Path) -> dict[str, Any]:
     missing = sorted(required.difference(data))
     if missing:
         raise ValueError(f"manifest missing required keys: {', '.join(missing)}")
+    expected_fingerprint = _fingerprint_snapshot(data["snapshot_payload"])
+    if data["fingerprint"] != expected_fingerprint:
+        raise ValueError("manifest fingerprint does not match snapshot_payload")
     return data
 
 

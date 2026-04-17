@@ -45,8 +45,10 @@ mcp = FastMCP(
         "Use log_activity/get_recent_activity for session activity, "
         "create_handoff/get_pending_handoffs for project handoffs, "
         "save_snapshot/get_latest_snapshot for system state, "
-        "update_section/get_section for long-lived context (career, speaking, research), "
+        "update_section/get_section/get_all_sections/sync_from_file for long-lived context "
+        "(career, speaking, research, capabilities), "
         "record_cost/get_cost_history for cost tracking, "
+        "health/status for diagnostics, "
         "and export_bridge_markdown to regenerate the human-readable markdown file."
     ),
     lifespan=app_lifespan,
