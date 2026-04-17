@@ -2,7 +2,7 @@
 
 SQLite-backed MCP server for shared state across Claude.ai, Claude Code, Codex, and related local ops tools.
 
-bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLite store and 20 MCP tools (19 state/diagnostics tools plus `recall`, an FTS5 lexical search over all content). The markdown bridge file is regenerated from the DB via `export_bridge_markdown` and remains available as a fallback for file-based clients.
+bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLite store and 22 MCP tools across state, diagnostics, FTS5 lexical `recall`, and observability over the audit and recall logs. The markdown bridge file is regenerated from the DB via `export_bridge_markdown` and remains available as a fallback for file-based clients.
 
 ## Current State
 
@@ -11,7 +11,7 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
 - Startup sync from the bridge markdown file is the chosen fallback strategy; Phase 3 closed with a "no live watcher for now" decision.
 - Recent hardening closed the remaining audit findings around duplicate handoff clearing, future-schema rejection, and health signaling for missing fallback state.
 - Phase −1 of the semantic memory arc shipped and is the **final layer**: `content_index` FTS5 vtable mirrors all content tables, `recall(query, limit, scope)` exposes it via MCP with OR-semantic multi-token queries. Vector/embedding phases were closed after a dry-run showed that "missed" queries targeted content not actually in `bridge.db`. See the closure banner at the top of [bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md](bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md).
-- Local verification is currently green: `115` tests passing, `ruff` clean, `pyright` clean.
+- Local verification is currently green: `136` tests passing, `ruff` clean, `pyright` clean.
 - Project is in steady maintenance. Scope is pinned to cross-system *state* coordination; it is not a knowledge store.
 
 ## Architecture
@@ -33,7 +33,7 @@ Codex      ──► MCP stdio ──► bridge-db process ──►  ~/.local/s
 
 No shared daemon. Each MCP client spawns its own `bridge-db` process via stdio. WAL mode + `PRAGMA busy_timeout=5000` handles concurrent writes safely.
 
-## Tools (20)
+## Tools (22)
 
 | Module | Tools |
 |---|---|
@@ -44,14 +44,15 @@ No shared daemon. Each MCP client spawns its own `bridge-db` process via stdio. 
 | cost | `record_cost`, `get_cost_history` |
 | export | `export_bridge_markdown` |
 | health | `health`, `status` |
-| recall | `recall` |
+| recall | `recall`, `recall_stats` |
+| audit | `audit_tail` |
 
 Write tools enforce `caller` ownership, so systems can only write the slices of state they own. Recent hardening also added `notion_os` and `personal_ops` as first-class activity and cost writers.
 
 ## Commands
 
 ```bash
-uv run pytest              # run all tests (115 total)
+uv run pytest              # run all tests (136 total)
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run python -m bridge_db --doctor  # local environment diagnostics

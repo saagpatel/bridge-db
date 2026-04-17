@@ -3,7 +3,8 @@
 import json
 import logging
 import re
-from datetime import UTC, datetime
+from collections import Counter, defaultdict
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -11,6 +12,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db import config
+from bridge_db.audit import iter_jsonl
 from bridge_db.db import get_db
 
 logger = logging.getLogger("bridge_db.tools.recall")
@@ -164,3 +166,64 @@ def register(mcp: FastMCP) -> None:
 
         _log_recall(query, scope, clamped_limit, len(results), None)
         return results
+
+    @mcp.tool()
+    async def recall_stats(
+        days: Annotated[
+            int, Field(description="Window in days (counting back from now)", ge=1, le=365)
+        ] = 7,
+    ) -> dict[str, Any]:
+        """Roll-up analytics over recall_query_log.jsonl for the last `days` days.
+
+        Answers "is recall earning its keep?" — returns total volume, miss rate,
+        top queries by count, and per-scope usage. Empty-string queries are
+        counted separately so they don't distort the top-queries ranking.
+        """
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
+
+        total = 0
+        misses = 0
+        empty = 0
+        scope_counter: Counter[str] = Counter()
+        query_counts: Counter[str] = Counter()
+        query_result_sums: dict[str, int] = defaultdict(int)
+
+        for record in iter_jsonl(RECALL_LOG_PATH):
+            ts = record.get("ts")
+            if not isinstance(ts, str) or ts < cutoff:
+                continue
+            total += 1
+            n_results = record.get("n_results", 0)
+            if not isinstance(n_results, int):
+                n_results = 0
+            if n_results == 0:
+                misses += 1
+            query = record.get("query", "")
+            if not isinstance(query, str) or not query.strip():
+                empty += 1
+            else:
+                query_counts[query] += 1
+                query_result_sums[query] += n_results
+            scope = record.get("scope")
+            if isinstance(scope, str):
+                scope_counter[scope] += 1
+
+        top_queries = [
+            {
+                "query": q,
+                "count": c,
+                "avg_results": round(query_result_sums[q] / c, 2),
+            }
+            for q, c in query_counts.most_common(10)
+        ]
+
+        miss_rate = round(misses / total, 4) if total else 0.0
+
+        return {
+            "window_days": days,
+            "total_queries": total,
+            "miss_rate": miss_rate,
+            "empty_query_count": empty,
+            "top_queries": top_queries,
+            "scope_breakdown": dict(scope_counter),
+        }

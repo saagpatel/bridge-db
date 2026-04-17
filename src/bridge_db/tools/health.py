@@ -46,6 +46,10 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     db_path = config.DB_PATH
     db_exists = db_path.exists()
 
+    wal_path = db_path.with_name(db_path.name + "-wal")
+    wal_size_bytes = wal_path.stat().st_size if wal_path.exists() else 0
+    wal_warning = wal_size_bytes > config.WAL_SIZE_WARN_BYTES
+
     bridge_path = config.BRIDGE_FILE_PATH
     bridge_file_exists = bridge_path.exists()
     bridge_file_age_seconds: float | None = None
@@ -53,6 +57,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         mtime = bridge_path.stat().st_mtime
         bridge_file_age_seconds = datetime.now(UTC).timestamp() - mtime
 
+    # WAL size is a soft signal — do not fold it into `ok`.
     ok = db_exists and schema_version == SCHEMA_VERSION and bridge_file_exists
 
     return {
@@ -65,6 +70,8 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "bridge_file_exists": bridge_file_exists,
         "bridge_file_age_seconds": bridge_file_age_seconds,
         "unprocessed_shipped_count": unprocessed_shipped_count,
+        "wal_size_bytes": wal_size_bytes,
+        "wal_warning": wal_warning,
     }
 
 
@@ -95,7 +102,9 @@ async def collect_status_summary(db: Any) -> dict[str, Any]:
         )
         activity_row = await cursor.fetchone()
         if activity_row:
-            latest_activity[source] = f"{activity_row['timestamp']} ({activity_row['project_name']})"
+            latest_activity[source] = (
+                f"{activity_row['timestamp']} ({activity_row['project_name']})"
+            )
         else:
             latest_activity[source] = "none"
 

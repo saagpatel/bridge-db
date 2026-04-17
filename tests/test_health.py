@@ -136,3 +136,71 @@ async def test_status_returns_compact_operator_summary(
     assert result["signals"]["unprocessed_shipped"] == 1
     assert result["latest_snapshots"]["cc"] == "2026-04-17"
     assert result["latest_activity"]["cc"] == "2026-04-17 (bridge-db)"
+
+
+async def test_health_wal_absent_when_no_wal_file(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
+) -> None:
+    """Missing WAL sibling file → size 0, warning False."""
+    (tmp_path / "test.db").touch()
+    # Ensure no sibling wal file
+    wal = tmp_path / "test.db-wal"
+    if wal.exists():
+        wal.unlink()
+    ctx = make_ctx(db)
+    result = await fns["health"](ctx=ctx)
+    assert result["wal_size_bytes"] == 0
+    assert result["wal_warning"] is False
+
+
+async def test_health_wal_size_reflects_file_size(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
+) -> None:
+    """`wal_size_bytes` mirrors the real size of the sibling WAL file."""
+    (tmp_path / "test.db").touch()
+    wal = tmp_path / "test.db-wal"
+    wal.write_bytes(b"x" * 1024)
+    ctx = make_ctx(db)
+    result = await fns["health"](ctx=ctx)
+    assert result["wal_size_bytes"] == 1024
+    assert result["wal_warning"] is False
+
+
+async def test_health_wal_warning_at_threshold(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """wal_warning flips True strictly above the configured threshold."""
+    (tmp_path / "test.db").touch()
+    monkeypatch.setattr(config, "WAL_SIZE_WARN_BYTES", 100)
+    wal = tmp_path / "test.db-wal"
+
+    wal.write_bytes(b"x" * 100)
+    result = await fns["health"](ctx=make_ctx(db))
+    # At threshold, not above → no warning
+    assert result["wal_warning"] is False
+
+    wal.write_bytes(b"x" * 101)
+    result = await fns["health"](ctx=make_ctx(db))
+    assert result["wal_warning"] is True
+
+
+async def test_health_ok_unaffected_by_wal_warning(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """wal_warning is a soft signal — `ok` stays True on an otherwise-healthy bridge."""
+    (tmp_path / "test.db").touch()
+    bridge = tmp_path / "bridge.md"
+    bridge.write_text("# test")
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge)
+    monkeypatch.setattr(config, "WAL_SIZE_WARN_BYTES", 100)
+    (tmp_path / "test.db-wal").write_bytes(b"x" * 1024)
+
+    result = await fns["health"](ctx=make_ctx(db))
+    assert result["wal_warning"] is True
+    assert result["ok"] is True

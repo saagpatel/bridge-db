@@ -6,14 +6,14 @@ This roadmap captures the current scope-closed state of bridge-db. All originall
 
 - Core MCP server is stable, typed, and test-backed. Schema at v3 (adds FTS5 `content_index`).
 - SQLite schema and migration path are in place; step-wise migrations proven through v1→v2→v3.
-- 20 MCP tools across 8 modules: activity, handoffs, context, snapshots, cost, export, health, recall.
+- 22 MCP tools across 9 modules: activity, handoffs, context, snapshots, cost, export, health, recall, audit.
 - Markdown export works as a compatibility layer for file-based clients.
 - Claude.ai direct MCP read and write paths have both been proven locally.
 - The file path remains compatibility infrastructure, not the primary coordination path.
 - A startup sync path imports Claude.ai-owned file edits into SQLite before Claude Code reads bridge state.
 - Audit hardening closed the correctness gaps around handoff clearing, future-schema detection, degraded health reporting, and latent v1→v2 migration gaps.
 - Phase −1 of the semantic memory arc (FTS5 + `recall`) shipped; subsequent phases closed (see below).
-- Repo green at `115` tests, `ruff` and `pyright` clean.
+- Repo green at `136` tests, `ruff` and `pyright` clean.
 
 ## Outcomes We Want
 

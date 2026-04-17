@@ -53,3 +53,34 @@ async def test_log_audit_ts_format(tmp_path: Path) -> None:
     event = json.loads(config.AUDIT_LOG_PATH.read_text().splitlines()[0])
     # Must end with Z (UTC marker)
     assert event["ts"].endswith("Z")
+
+
+def test_iter_jsonl_missing_path_returns_empty(tmp_path: Path) -> None:
+    """Missing file must yield nothing, not raise."""
+    records = list(audit.iter_jsonl(tmp_path / "does_not_exist.jsonl"))
+    assert records == []
+
+
+def test_iter_jsonl_empty_file_returns_empty(tmp_path: Path) -> None:
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    assert list(audit.iter_jsonl(empty)) == []
+
+
+def test_iter_jsonl_skips_blank_and_malformed_lines(tmp_path: Path) -> None:
+    """Blank lines and bad JSON are skipped; surrounding valid records still yielded."""
+    path = tmp_path / "mixed.jsonl"
+    path.write_text(
+        '{"tool":"a","ok":true}\n'
+        "\n"
+        "   \n"
+        "this is not json\n"
+        '{"tool":"b","ok":false}\n'
+        "{not a dict but valid json: 42}\n"
+        "[1,2,3]\n"  # valid JSON but not a dict — should be skipped
+        '{"tool":"c","ok":true}\n',
+        encoding="utf-8",
+    )
+    records = list(audit.iter_jsonl(path))
+    tools = [r["tool"] for r in records]
+    assert tools == ["a", "b", "c"]
