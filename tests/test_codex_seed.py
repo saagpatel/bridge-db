@@ -13,14 +13,15 @@ from bridge_db.db import open_db
 
 
 def make_manifest() -> dict[str, object]:
+    snapshot_payload = {
+        "infrastructure": "- Automations: 17 active",
+        "automation_digest": "- Runtime health: healthy",
+        "active_projects": "- ResumeEvolver",
+    }
     return {
-        "fingerprint": "abc123",
+        "fingerprint": "2f7765f0a535ffce7f64a314294f5bc3eb0f4c6452860ea06073dd9406f25d0a",
         "snapshot_date": "2026-04-14",
-        "snapshot_payload": {
-            "infrastructure": "- Automations: 17 active",
-            "automation_digest": "- Runtime health: healthy",
-            "active_projects": "- ResumeEvolver",
-        },
+        "snapshot_payload": snapshot_payload,
         "baseline_activity": {
             "caller": "codex",
             "timestamp": "2026-04-14",
@@ -52,6 +53,15 @@ def test_load_manifest_requires_keys(tmp_path: Path) -> None:
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps({"fingerprint": "x"}), encoding="utf-8")
     with pytest.raises(ValueError, match="manifest missing required keys"):
+        load_manifest(path)
+
+
+def test_load_manifest_rejects_mismatched_fingerprint(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.json"
+    manifest = make_manifest()
+    manifest["fingerprint"] = "wrong"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="fingerprint does not match"):
         load_manifest(path)
 
 

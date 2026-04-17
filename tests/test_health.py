@@ -50,7 +50,9 @@ async def test_health_row_counts_reflect_data(
     ctx = make_ctx(db)
     result = await fns["health"](ctx=ctx)
     assert result["row_counts"]["activity_log"] == 1
+    assert result["row_counts"]["context_sections"] == 0
     assert result["row_counts"]["pending_handoffs"] == 0
+    assert result["row_counts"]["system_snapshots"] == 0
     assert result["row_counts"]["cost_records"] == 0
 
 
@@ -96,5 +98,41 @@ async def test_health_bridge_file_missing(
     monkeypatch.setattr(config, "BRIDGE_FILE_PATH", tmp_path / "nonexistent.md")
     ctx = make_ctx(db)
     result = await fns["health"](ctx=ctx)
+    assert result["ok"] is False
     assert result["bridge_file_exists"] is False
     assert result["bridge_file_age_seconds"] is None
+
+
+async def test_status_returns_compact_operator_summary(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "test.db").touch()
+    bridge = tmp_path / "bridge.md"
+    bridge.write_text("# test", encoding="utf-8")
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge)
+
+    await db.execute(
+        "INSERT INTO context_sections (section_name, owner, content) VALUES (?, ?, ?)",
+        ("career", "claude_ai", "Career notes"),
+    )
+    await db.execute(
+        "INSERT INTO system_snapshots (system, snapshot_date, data) VALUES (?, ?, ?)",
+        ("cc", "2026-04-17", '{"active_projects":"- bridge-db"}'),
+    )
+    await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary, tags) "
+        "VALUES ('cc', '2026-04-17', 'bridge-db', 'checked operator status', ?)",
+        (json.dumps(["SHIPPED"]),),
+    )
+    await db.commit()
+
+    ctx = make_ctx(db)
+    result = await fns["status"](ctx=ctx)
+
+    assert result["ok"] is True
+    assert result["overall"] == "healthy"
+    assert result["row_counts"]["context_sections"] == 1
+    assert result["signals"]["pending_handoffs"] == 0
+    assert result["signals"]["unprocessed_shipped"] == 1
+    assert result["latest_snapshots"]["cc"] == "2026-04-17"
+    assert result["latest_activity"]["cc"] == "2026-04-17 (bridge-db)"

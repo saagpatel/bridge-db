@@ -3,6 +3,8 @@
 This document describes how Claude.ai interacts with bridge-db — current state, known
 limitations, and the planned path to full DB integration.
 
+See `ROADMAP.md` for the execution sequence that turns this target state into phased work, and `OPERATOR-CHECKLIST.md` for the local verification and registration checklist.
+
 ## Current State (File-Based)
 
 Claude.ai accesses the shared context through the markdown file at
@@ -21,12 +23,14 @@ Claude.ai accesses the shared context through the markdown file at
 ### How it stays in sync:
 - CC skills (`/end`, `sync-bridge`) call `export_bridge_markdown` after every DB write,
   keeping the markdown file current for Claude.ai reads
-- Claude.ai writes go directly to the markdown file, not to the DB — they appear in
-  the `context_sections` table only after a full `sync-bridge` export (which reads
-  Claude.ai's sections from the file and does not overwrite them)
+- Claude.ai writes may still go directly to the markdown file via Filesystem MCP
+- Claude Code's `/start` skill now calls `mcp__bridge_db__sync_from_file()` before
+  bridge-db reads, importing the four Claude.ai-owned sections from the file into
+  `context_sections`
 
-**Limitation:** Claude.ai writes to the file bypass the DB entirely. The DB's
-`context_sections` table may lag Claude.ai's file edits until CC runs `sync-bridge`.
+**Current limitation:** Claude.ai file edits are synchronized into the DB on the next
+Claude Code startup, not continuously. That closes the export-stomp gap, but it is
+still a startup-triggered sync rather than a live watcher.
 
 ---
 
@@ -54,7 +58,8 @@ To give Claude.ai direct DB access, register bridge-db in Claude Desktop's MCP c
 }
 ```
 
-This gives Claude.ai access to all 16 MCP tools under `mcp__bridge_db__*`.
+This gives Claude.ai access to all 19 MCP tools under `mcp__bridge_db__*`, including
+the read-only `health` and `status` diagnostics plus the file-import helper `sync_from_file`.
 
 **Prerequisite:** Verify that the Claude Desktop version in use supports custom stdio
 MCP servers with `uv`-based Python launchers. As of mid-2026, Claude Desktop MCP
@@ -79,7 +84,8 @@ mcp__bridge_db__create_handoff(
 ```
 
 Claude Code's `/start` skill already reads `mcp__bridge_db__get_pending_handoffs()` —
-no changes needed on the CC side. The handoff appears immediately in the next CC session.
+it now runs `mcp__bridge_db__sync_from_file()` first, then reads pending handoffs.
+The handoff appears immediately in the next CC session.
 
 ### weekly-review (updated workflow)
 
@@ -114,6 +120,18 @@ mcp__bridge_db__export_bridge_markdown()  # keep file in sync for Codex fallback
 The `update_section` tool enforces ownership — only `caller="claude_ai"` can write
 these sections. CC and Codex calls with these section names will receive a ToolError.
 
+### sync_from_file (startup safety net)
+
+When Claude.ai edits its owned sections through the markdown file instead of MCP tools:
+
+```python
+mcp__bridge_db__sync_from_file()
+```
+
+This reads `BRIDGE_FILE_PATH`, extracts only the four Claude.ai-owned headings, and
+upserts them into `context_sections` with `owner="claude_ai"`. It does not touch
+handoffs, snapshots, activity, or any CC/Codex-owned section content.
+
 ---
 
 ## File Watcher Path (Future)
@@ -133,9 +151,9 @@ lag described in the Current State section.
 `/Users/d/Projects/notification-hub/src/notification_hub/watcher.py` handles activity
 line parsing but not section sync. This would require a new `SectionSyncHandler`.
 
-**Priority:** Low. Claude.ai → DB writes are rare (weekly review, occasional career
-updates). The lag is acceptable. Implement if Claude.ai is registered as MCP client
-and section staleness becomes a problem.
+**Priority:** Deferred by current architecture decision. `/start` imports file edits before
+bridge reads, so a watcher should only be reconsidered if continuous sync becomes a
+real coordination need.
 
 ---
 

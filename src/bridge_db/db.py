@@ -139,6 +139,13 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         await db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await db.commit()
         logger.info("Schema migrated to v%d", SCHEMA_VERSION)
+    elif current_version > SCHEMA_VERSION:
+        msg = (
+            "Database schema version is newer than this bridge-db build supports "
+            f"(db={current_version}, supported={SCHEMA_VERSION})."
+        )
+        logger.error(msg)
+        raise RuntimeError(msg)
     else:
         logger.debug("Schema already at v%d", current_version)
 
