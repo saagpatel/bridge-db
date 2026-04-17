@@ -93,6 +93,29 @@ async def test_audit_tail_combined_filters(fns: dict[str, Any]) -> None:
     assert results[0]["project"] == "B"
 
 
+async def test_audit_tail_handles_records_missing_ts(fns: dict[str, Any], tmp_path: Path) -> None:
+    """Externally-written records without `ts` must not corrupt output.
+
+    Writer always emits `ts`, but the log is append-only and could be edited.
+    Such records sort as "oldest" (empty string sort key) and must still be
+    excluded by a `since` filter that expects a string timestamp.
+    """
+    # Properly-written events bracket a hand-rolled record with no ts.
+    audit.log_audit("log_activity", "cc", "A", ok=True)
+    with open(config.AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
+        f.write('{"tool":"manual","caller":"cc","project":"NOTS","ok":true}\n')
+    audit.log_audit("log_activity", "cc", "B", ok=True)
+
+    # No `since`: all three returned; ts-less sorts last (oldest).
+    results = await fns["audit_tail"](limit=10)
+    assert [r["project"] for r in results[:2]] == ["B", "A"]
+    assert results[-1]["project"] == "NOTS"
+
+    # With `since`: ts-less record is excluded (ts comparison fails type check).
+    filtered = await fns["audit_tail"](limit=10, since="1970-01-01")
+    assert {r["project"] for r in filtered} == {"A", "B"}
+
+
 async def test_audit_tail_skips_malformed_lines(fns: dict[str, Any], tmp_path: Path) -> None:
     """A bad line in the middle must not hide surrounding valid events."""
     audit.log_audit("log_activity", "cc", "before", ok=True)
