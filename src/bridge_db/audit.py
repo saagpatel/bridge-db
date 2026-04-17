@@ -1,8 +1,10 @@
-"""JSONL audit log — append-only, never raises."""
+"""JSONL audit log — append-only writer plus a tolerant line-by-line reader."""
 
 import json
 import logging
+from collections.abc import Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from bridge_db import config
@@ -32,3 +34,24 @@ def log_audit(
             f.write(json.dumps(event) + "\n")
     except Exception:
         logger.debug("audit log write failed", exc_info=True)
+
+
+def iter_jsonl(path: Path) -> Iterator[dict[str, Any]]:
+    """Yield parsed records from a JSONL file.
+
+    Missing file → empty iterator. Blank lines and malformed JSON lines are
+    skipped silently so a single bad write cannot break downstream readers.
+    """
+    if not path.exists():
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                record = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                yield record

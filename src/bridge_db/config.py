@@ -26,6 +26,12 @@ LOG_LEVEL: str = os.environ.get("BRIDGE_DB_LOG_LEVEL", "INFO").upper()
 ACTIVITY_RETENTION_PER_SOURCE: int = 50
 SNAPSHOT_RETENTION_PER_SYSTEM: int = 10
 
+# WAL file size at which `health` surfaces a soft warning. CLAUDE.md notes
+# that WAL over "a few MB" is worth a checkpoint. 10 MiB is a comfortable
+# default — high enough not to flap on normal workloads, low enough to catch
+# genuine bloat before it becomes a problem.
+WAL_SIZE_WARN_BYTES: int = 10 * 1024 * 1024
+
 # Audit log (append-only JSONL, co-located with the DB)
 AUDIT_LOG_PATH: Path = Path(
     os.environ.get(
