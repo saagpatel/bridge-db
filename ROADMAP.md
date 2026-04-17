@@ -1,17 +1,19 @@
 # bridge-db Roadmap
 
-This roadmap captures the current post-cleanup state of bridge-db and the next sensible work from here. The repo is now audited, hardened, and locally verified; the goal going forward is to expand the operating surface carefully without reintroducing drift.
+This roadmap captures the current scope-closed state of bridge-db. All originally planned phases are complete or explicitly closed. The project is in steady maintenance.
 
 ## Current Position
 
-- Core MCP server is stable, typed, and test-backed.
-- SQLite schema and migration path are in place.
+- Core MCP server is stable, typed, and test-backed. Schema at v3 (adds FTS5 `content_index`).
+- SQLite schema and migration path are in place; step-wise migrations proven through v1→v2→v3.
+- 20 MCP tools across 8 modules: activity, handoffs, context, snapshots, cost, export, health, recall.
 - Markdown export works as a compatibility layer for file-based clients.
 - Claude.ai direct MCP read and write paths have both been proven locally.
 - The file path remains compatibility infrastructure, not the primary coordination path.
-- A startup sync path now imports Claude.ai-owned file edits into SQLite before Claude Code reads bridge state.
-- Recent audit hardening closed the remaining correctness gaps around handoff clearing, future-schema detection, and degraded health reporting.
-- The repo is currently green at `97` tests with `ruff` and `pyright` also passing.
+- A startup sync path imports Claude.ai-owned file edits into SQLite before Claude Code reads bridge state.
+- Audit hardening closed the correctness gaps around handoff clearing, future-schema detection, degraded health reporting, and latent v1→v2 migration gaps.
+- Phase −1 of the semantic memory arc (FTS5 + `recall`) shipped; subsequent phases closed (see below).
+- Repo green at `115` tests, `ruff` and `pyright` clean.
 
 ## Outcomes We Want
 
@@ -123,9 +125,38 @@ What was done
 - Confirmed the current local Claude Desktop config location.
 - Verified the pre-registration state and captured the exact target config path.
 
-## Recommended Next Task
+## Phase 5 Status
 
-Start Phase 5 operator readiness:
-- add a compact bridge summary/status surface for human operators
-- add a few scenario-style workflow tests that mirror real use across Claude.ai, CC, and Codex
-- keep docs and tool contracts versioned and aligned as new workflows are added
+Completed in the Phase −1 hardening cycle:
+- Compact operator-facing `status` MCP tool and `--status` CLI subcommand shipped.
+- Scenario-style workflow tests across Claude.ai / CC / Codex paths added.
+- Doc and tool-count drift caught and corrected in CLAUDE.md, README, integration-spec.
+
+## Phase −1: Semantic Memory Lexical Layer
+
+Goal: give all three systems a fast "have I seen this before" search over bridge-db content.
+
+Shipped
+- FTS5 `content_index` virtual table mirroring sections, activity, snapshots, handoffs.
+- `recall(query, limit, scope)` MCP tool with bm25 ranking, snippet highlights, source-row previews.
+- OR-semantic query sanitizer so multi-token queries return partial matches rather than requiring every token to co-occur.
+- Every write path hooked (4 tool modules + migration.py + codex_seed.py); auto-prune paths GC orphan FTS rows.
+- `recall_query_log.jsonl` logs every query for usage analysis.
+
+## Phases 0 / 1 / 2 of the Semantic Memory Arc: CLOSED
+
+A dry-run of the 20-query eval set against the live DB showed that **most "missed" queries target content that isn't in `bridge.db`** (it lives in memory files, plan docs, or Notion). Vector/embedding layers would not help — they can't find what isn't indexed. Rather than expand bridge-db into a knowledge store, the project's scope is pinned:
+
+- **bridge.db is a cross-system *state* bridge**, not a knowledge store.
+- Lexical `recall` is sufficient over that scope.
+- If unified recall across memory / plans / Notion becomes a priority, it will be a *separate* project.
+
+Historical artifacts kept for reference: `bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md` (and its v2 predecessor), `eval-set-handoff-package.md`, `semantic_quality_set.json`. Read the closure banner at the top of v2.1 for full decision context.
+
+## Steady State
+
+Future work is maintenance-only:
+- Keep docs and tool contracts aligned when MCP surfaces change.
+- Watch for WAL bloat if activity volume rises; run `PRAGMA wal_checkpoint(TRUNCATE)` if it exceeds a few MB.
+- Apply security/dependency updates to `mcp`, `aiosqlite`, `pydantic`.
+- Reopen the roadmap only if a concrete new cross-system coordination need surfaces — not to expand scope into knowledge search.

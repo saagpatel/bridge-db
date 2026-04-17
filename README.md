@@ -10,9 +10,9 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
 - Direct Claude.ai MCP read and write paths have both been validated locally.
 - Startup sync from the bridge markdown file is the chosen fallback strategy; Phase 3 closed with a "no live watcher for now" decision.
 - Recent hardening closed the remaining audit findings around duplicate handoff clearing, future-schema rejection, and health signaling for missing fallback state.
-- Phase −1 of the semantic memory layer shipped: `content_index` FTS5 vtable mirrors all content tables, `recall(query, limit, scope)` exposes it via MCP. See [bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md](bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md).
-- Local verification is currently green: `110` tests passing, `ruff` clean, `pyright` clean.
-- The next sensible phase is operator readiness and scenario-style workflow coverage, not more cleanup.
+- Phase −1 of the semantic memory arc shipped and is the **final layer**: `content_index` FTS5 vtable mirrors all content tables, `recall(query, limit, scope)` exposes it via MCP with OR-semantic multi-token queries. Vector/embedding phases were closed after a dry-run showed that "missed" queries targeted content not actually in `bridge.db`. See the closure banner at the top of [bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md](bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md).
+- Local verification is currently green: `115` tests passing, `ruff` clean, `pyright` clean.
+- Project is in steady maintenance. Scope is pinned to cross-system *state* coordination; it is not a knowledge store.
 
 ## Architecture
 

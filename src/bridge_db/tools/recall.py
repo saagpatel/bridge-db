@@ -24,14 +24,20 @@ RECALL_LOG_PATH = config.AUDIT_LOG_PATH.parent / "recall_query_log.jsonl"
 
 
 def _sanitize_fts5_query(q: str) -> str:
-    """Strip FTS5 special characters and collapse whitespace.
+    """Normalize free-form input into a bm25-friendly FTS5 MATCH expression.
 
-    FTS5 treats " ( ) * : - ^ as operators. User-facing `recall` should accept
-    free-form strings; sanitizing gives an AND-of-terms behavior without
-    surprising syntax errors on hyphens like "bridge-db".
+    FTS5 treats " ( ) * : - ^ as operators. We strip them, then join multi-token
+    queries with OR so bm25 can rank rows by how many terms they hit — rather
+    than requiring every term to appear in the same row (the default AND).
+    Single-token queries pass through unchanged. Empty input returns "".
     """
     cleaned = re.sub(r"[^\w\s]", " ", q, flags=re.UNICODE)
-    return " ".join(cleaned.split())
+    tokens = cleaned.split()
+    if not tokens:
+        return ""
+    if len(tokens) == 1:
+        return tokens[0]
+    return " OR ".join(tokens)
 
 
 def _log_recall(query: str, scope: str, limit: int, n_results: int, caller: str | None) -> None:

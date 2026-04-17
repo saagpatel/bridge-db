@@ -1,5 +1,28 @@
 # bridge-db Semantic Memory Layer — Implementation Plan (v2.1)
 
+> **⛔ CLOSED 2026-04-17 — Path B chosen. Phases 0/1/2 will not be built.**
+>
+> A post-Phase-−1 dry-run against the live DB through the 20-query eval set
+> exposed that **12 of 20 queries miss not because FTS5 is too coarse, but
+> because the queried content isn't in `bridge.db` at all.** The missing content
+> lives in memory files (`~/.claude/projects/-Users-d/memory/*.md`), git-tracked
+> plan docs, or Notion — scopes outside bridge-db's current mission. Vector
+> search can't find what isn't indexed, so Phases 0–1 as written would consume
+> ~2 weeks to produce near-identical hit rates to the FTS5 layer already shipped.
+>
+> **Decision:** keep bridge-db's scope as cross-system *state* coordination
+> (handoffs, snapshots, activity, four Claude.ai-owned context sections).
+> Ship Phase −1 as the final layer. If unified recall across memory / plans /
+> Notion becomes a priority later, it's a separate project, not an extension
+> of bridge-db.
+>
+> **Kept as frozen historical record** (do NOT treat as live TODOs):
+> this document, the v2 predecessor, `eval-set-handoff-package.md`, and
+> `semantic_quality_set.json`. Current project state is in `CLAUDE.md` and
+> `ROADMAP.md`.
+>
+> ---
+
 > **Revision notes (v2.1, 2026-04-17):** Rewritten from v2 after (a) agreeing to the "take all six" set of design changes in discussion, and (b) a full ground-truth pass over the current repo that invalidated several v2 assumptions. v2 is superseded — not amended. The changes are substantial enough that a diff would mislead.
 
 ## What changed vs v2
