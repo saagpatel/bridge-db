@@ -47,7 +47,7 @@ Verified on 2026-04-15.
 - Claude.ai read access is confirmed with a successful `mcp__bridge_db__health()` call after restart.
 - Claude.ai direct write behavior has been proven through bridge-db MCP tools.
 - Startup sync plus export has been verified end to end.
-- Latest local repo verification is green: `136` tests, `ruff` clean, `pyright` clean.
+- Latest local repo verification is green: `137` tests, `ruff` clean, `pyright` clean.
 
 Conclusion
 - The documented registration path is still the correct target path.
