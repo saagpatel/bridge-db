@@ -9,12 +9,21 @@ from bridge_db.db import SCHEMA_VERSION, ensure_schema, open_db
 
 
 async def test_schema_creates_all_tables(db: aiosqlite.Connection) -> None:
+    # FTS5 creates shadow tables (content_index_{data,config,content,docsize,idx})
+    # that are internal; filter them out and assert on user-facing tables.
     cursor = await db.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        """
+        SELECT name FROM sqlite_master
+        WHERE type='table'
+          AND name NOT LIKE 'sqlite_%'
+          AND name NOT LIKE 'content_index_%'
+        ORDER BY name
+        """
     )
     tables = {row[0] for row in await cursor.fetchall()}
     assert tables == {
         "activity_log",
+        "content_index",
         "context_sections",
         "cost_records",
         "pending_handoffs",
@@ -187,6 +196,104 @@ async def test_migration_v1_to_v2(tmp_path: Path) -> None:
     await migrated.commit()
 
     await migrated.close()
+
+
+async def test_migration_v2_to_v3_populates_content_index(tmp_path: Path) -> None:
+    """A v2 DB gains content_index on v3 migration and is backfilled from source rows."""
+    db = await aiosqlite.connect(str(tmp_path / "v2.db"))
+    db.row_factory = aiosqlite.Row
+    await db.executescript("""
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE context_sections (
+            section_name TEXT PRIMARY KEY,
+            owner TEXT NOT NULL,
+            content TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        CREATE TABLE activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            branch TEXT,
+            tags TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        CREATE TABLE system_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            system TEXT NOT NULL,
+            snapshot_date TEXT NOT NULL,
+            data TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        CREATE TABLE pending_handoffs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_name TEXT NOT NULL,
+            project_path TEXT,
+            roadmap_file TEXT,
+            phase TEXT,
+            dispatched_from TEXT NOT NULL DEFAULT 'claude_ai',
+            dispatched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            picked_up_at TEXT,
+            cleared_at TEXT,
+            status TEXT NOT NULL DEFAULT 'pending'
+        );
+        CREATE TABLE cost_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            system TEXT NOT NULL,
+            month TEXT NOT NULL,
+            amount REAL NOT NULL,
+            notes TEXT,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            UNIQUE(system, month)
+        );
+        INSERT INTO context_sections (section_name, owner, content)
+            VALUES ('career', 'claude_ai', 'staff engineer trajectory');
+        INSERT INTO activity_log (source, timestamp, project_name, summary)
+            VALUES ('cc', '2026-04-17', 'bridge-db', 'Phase -1 scaffolding');
+        INSERT INTO system_snapshots (system, snapshot_date, data)
+            VALUES ('cc', '2026-04-17', '{"active_projects":"bridge-db"}');
+        INSERT INTO pending_handoffs (project_name, project_path, phase)
+            VALUES ('bridge-db', '/Users/d/Projects/bridge-db', 'Phase -1');
+        PRAGMA user_version = 2;
+    """)
+    await db.commit()
+    await db.close()
+
+    migrated = await open_db(tmp_path / "v2.db")
+    try:
+        cursor = await migrated.execute("PRAGMA user_version")
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == SCHEMA_VERSION
+
+        for table in ("context_sections", "activity_log", "system_snapshots", "pending_handoffs"):
+            cursor = await migrated.execute(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
+            count_row = await cursor.fetchone()
+            assert count_row is not None
+            assert count_row[0] == 1, f"{table} count changed during migration"
+
+        cursor = await migrated.execute(
+            "SELECT source_type, source_id FROM content_index ORDER BY source_type"
+        )
+        rows = await cursor.fetchall()
+        types_ids = [(r["source_type"], r["source_id"]) for r in rows]
+        assert types_ids == [
+            ("activity", "1"),
+            ("handoff", "1"),
+            ("section", "career"),
+            ("snapshot", "1"),
+        ]
+
+        cursor = await migrated.execute(
+            "SELECT COUNT(*) FROM content_index WHERE content_index MATCH 'bridge'"
+        )
+        match_row = await cursor.fetchone()
+        assert match_row is not None
+        assert match_row[0] >= 2
+    finally:
+        await migrated.close()
 
 
 async def test_ensure_schema_rejects_future_db_version(tmp_path: Path) -> None:
