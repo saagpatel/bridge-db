@@ -151,3 +151,65 @@ async def test_repopulate_is_idempotent(capture: CaptureMCP, db: Any) -> None:
     # One of each seeded type.
     assert total == sum(first.values())
     assert total == 4
+
+
+def test_sanitize_fts5_query_empty_and_stripping() -> None:
+    """Sanitizer normalizes whitespace, strips FTS5 special chars, handles empty."""
+    sanitize = recall_tool._sanitize_fts5_query  # pyright: ignore[reportPrivateUsage]
+    assert sanitize("") == ""
+    assert sanitize("   ") == ""
+    # FTS5 operators stripped
+    assert sanitize("foo()") == "foo"
+    # Hyphens split into tokens and joined by OR (preserves recall on "bridge-db")
+    assert sanitize("bridge-db") == "bridge OR db"
+
+
+def test_sanitize_fts5_query_or_joins_multi_token() -> None:
+    """Single-token passes through; multi-token joined with OR so bm25 ranks partial matches."""
+    sanitize = recall_tool._sanitize_fts5_query  # pyright: ignore[reportPrivateUsage]
+    assert sanitize("handoff") == "handoff"
+    assert sanitize("foo bar baz") == "foo OR bar OR baz"
+
+
+async def test_recall_or_semantics_returns_partial_matches(
+    capture: CaptureMCP, db: Any, tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Multi-token queries must use OR semantics: rows with any term match, not only all terms.
+
+    Regression pin for a bug where the default AND semantics produced 0 hits on any
+    multi-word query unless every token appeared in the same row. bm25 still ranks
+    rows with more matching terms above rows with fewer.
+    """
+    monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", tmp_path / "recall.jsonl")
+
+    ctx = make_ctx(db)
+    # Two activity rows that share NO tokens. Either should surface on a 2-token query.
+    await capture.fns["log_activity"](
+        caller="cc",
+        project_name="alpha-project",
+        summary="alpha only, no other keywords",
+        branch=None,
+        tags=None,
+        timestamp="2026-04-17",
+        ctx=ctx,
+    )
+    await capture.fns["log_activity"](
+        caller="cc",
+        project_name="beta-project",
+        summary="beta only, no other keywords",
+        branch=None,
+        tags=None,
+        timestamp="2026-04-17",
+        ctx=ctx,
+    )
+
+    results = await capture.fns["recall"](
+        query="alpha beta", limit=10, scope="activity", ctx=make_ctx(db)
+    )
+
+    # Under old AND semantics this would be 0 (no single row has both tokens).
+    # Under OR semantics both rows match.
+    source_ids = {r["source_id"] for r in results}
+    assert len(source_ids) >= 2, (
+        f"expected OR semantics to return both partial-match rows, got {len(source_ids)}"
+    )
