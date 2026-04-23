@@ -1,5 +1,11 @@
 # bridge-db Semantic Memory Eval Set — Complete Handoff Package
 
+> **Historical artifact — closed 2026-04-17.**
+> This package is retained only as context for the semantic-memory decision.
+> Do not execute the workflow below unless the bridge-db semantic/vector roadmap is
+> explicitly reopened. The active project scope is FTS5 lexical `recall` plus
+> observability, not semantic/vector search.
+
 > This document contains everything needed to finish the eval set work without returning to the originating chat. Three sections:
 > 1. **Claude Code kickoff prompt** (steps 1-5)
 > 2. **Blind rating workflow** (what you do in Incognito Claude.ai chats)
@@ -15,7 +21,7 @@ Paste this into a fresh Claude Code session at `/Users/d/Projects/bridge-db`:
 
 I'm finishing an eval set for the bridge-db semantic memory layer. You have three jobs, all autonomous. Complete all three before stopping.
 
-**Context:** The eval set exists at `/Users/d/Projects/bridge-db/eval/semantic_quality_set.json` (copy it there from the Claude.ai outputs directory if not present). It has 20 queries drafted. Most have empty `expected_results` arrays that you need to fill in. Two queries (q005 and q015) are intentionally marked `expected_empty: true` — leave those alone.
+**Context:** The historical eval set exists at `/Users/d/Projects/bridge-db/semantic_quality_set.json`. The original workflow expected an `eval/` copy, but that live eval directory was never created because the semantic/vector path was closed. It has 20 drafted queries and intentionally unfilled `expected_results`; leave it frozen unless the roadmap is explicitly reopened.
 
 The methodology is in `/Users/d/Projects/bridge-db/docs/IMPLEMENTATION-PLAN-v2.md` Section 7 if you need reference. Four-tier labels: `must` (clearly answers the query), `should` (strongly relevant), `nice_to_have` (tangentially relevant), `irrelevant` (don't include these in expected_results — absence = irrelevant).
 
@@ -39,10 +45,10 @@ For each of the 20 queries in `semantic_quality_set.json` with `expected_empty: 
 ### Job 2: Update metadata
 
 In the `metadata` block of the JSON:
-1. Replace `"bridge_db_snapshot": "TO_FILL_AT_EVAL_TIME"` with the output of `sha256sum /Users/d/Projects/bridge-db/bridge.db` (just the hash string)
+1. Replace the placeholder `bridge_db_snapshot` value with the output of `sha256sum /Users/d/Projects/bridge-db/bridge.db` (just the hash string)
 2. Leave `inter_rater_agreement` as `null` — it gets filled after blind rating completes
 
-Save the filled JSON to `/Users/d/Projects/bridge-db/eval/semantic_quality_set.json` (overwrite in place).
+Save the filled JSON to `/Users/d/Projects/bridge-db/semantic_quality_set.json` (overwrite in place).
 
 ### Job 3: Generate blind rating prompts
 
@@ -209,7 +215,7 @@ Begin.
 ## APPENDIX: Reference info
 
 **Files Claude Code should create or modify:**
-- `/Users/d/Projects/bridge-db/eval/semantic_quality_set.json` (modify — fill expected_results)
+- `/Users/d/Projects/bridge-db/semantic_quality_set.json` (modify — fill expected_results)
 - `/Users/d/Projects/bridge-db/eval/blind_rating_prompts/q002.md` (create)
 - `/Users/d/Projects/bridge-db/eval/blind_rating_prompts/q008.md` (create)
 - `/Users/d/Projects/bridge-db/eval/blind_rating_prompts/q011.md` (create)
@@ -228,8 +234,8 @@ Begin.
 - `/Users/d/Projects/bridge-db/eval/primary_ratings/q016.json`
 - `/Users/d/Projects/bridge-db/eval/primary_ratings/q018.json`
 
-**Future chat creates:**
-- `/Users/d/Projects/bridge-db/eval/semantic_quality_set_final.json`
+**Future chat would have created:**
+- a finalized semantic quality set JSON under the old eval workflow directory
 
 **Workflow sequence:**
 ```
