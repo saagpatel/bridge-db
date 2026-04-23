@@ -1,44 +1,62 @@
 # Claude.ai Integration Spec
 
-This document describes how Claude.ai interacts with bridge-db — current state, known
-limitations, and the planned path to full DB integration.
+This document describes how Claude.ai interacts with bridge-db — current direct MCP
+usage, the file fallback path, and the remaining limitations.
 
-See `ROADMAP.md` for the execution sequence that turns this target state into phased work, and `OPERATOR-CHECKLIST.md` for the local verification and registration checklist.
+See `ROADMAP.md` for the closed roadmap state, and `OPERATOR-CHECKLIST.md` for the
+local verification and registration checklist.
 
-## Current State (File-Based)
+## Current State
 
-Claude.ai accesses the shared context through the markdown file at
-`~/.claude/projects/-Users-d/memory/claude_ai_context.md` via the Filesystem MCP server.
+Claude.ai has two supported paths:
 
-### What Claude.ai reads:
+- **Primary path:** direct bridge-db MCP tools through Claude Desktop.
+- **Fallback path:** the markdown file at
+  `~/.claude/projects/-Users-d/memory/claude_ai_context.md` via the Filesystem MCP
+  server.
+
+The direct MCP path has been validated locally for read access and owned write
+behavior. The fallback file remains compatibility infrastructure for file-based
+clients and for any Claude.ai workflow that has not moved to direct MCP calls.
+
+### What Claude.ai reads
+
 - Its own sections: Career, Speaking, Research, Capabilities
 - CC State Snapshot and Codex State Snapshot (read-only)
 - Recent CC Activity and Recent Codex Activity
-- Pending Handoffs (to dispatch work to Claude Code)
+- Pending Handoffs
+- Diagnostics and observability through `health`, `status`, `recall_stats`, and
+  `audit_tail`
 
-### What Claude.ai writes:
-- Updates to Career, Speaking, Research, Capabilities sections (direct Edit tool)
-- Appends to Pending Handoffs when dispatching work via `vibe-code-handoff`
+### What Claude.ai writes
 
-### How it stays in sync:
-- CC skills (`/end`, `sync-bridge`) call `export_bridge_markdown` after every DB write,
-  keeping the markdown file current for Claude.ai reads
-- Claude.ai writes may still go directly to the markdown file via Filesystem MCP
-- Claude Code's `/start` skill now calls `mcp__bridge_db__sync_from_file()` before
+- Updates to Career, Speaking, Research, Capabilities through `update_section`
+- Handoffs through `create_handoff`
+- Compatibility file edits to the same four Claude.ai-owned sections when direct MCP is
+  not used
+
+### How it stays in sync
+
+- Direct MCP writes update SQLite first.
+- Consumers call `export_bridge_markdown` after DB writes to keep the fallback file
+  current.
+- Claude.ai may still edit its owned sections directly in the fallback markdown file.
+- Claude Code's `/start` skill calls `mcp__bridge_db__sync_from_file()` before
   bridge-db reads, importing the four Claude.ai-owned sections from the file into
-  `context_sections`
+  `context_sections`.
 
-**Current limitation:** Claude.ai file edits are synchronized into the DB on the next
-Claude Code startup, not continuously. That closes the export-stomp gap, but it is
-still a startup-triggered sync rather than a live watcher.
+**Current limitation:** fallback file edits are synchronized into the DB on the next
+Claude Code startup or explicit `sync_from_file` call, not continuously. That closes
+the export-stomp gap, but it is still startup-triggered sync rather than a live
+watcher.
 
 ---
 
-## Claude.ai as MCP Client (Future)
+## Claude.ai Direct MCP Path
 
 ### Registration (Claude Desktop)
 
-To give Claude.ai direct DB access, register bridge-db in Claude Desktop's MCP config:
+Register bridge-db in Claude Desktop's MCP config:
 
 ```json
 {
@@ -63,18 +81,17 @@ the read-only `health` and `status` diagnostics, the file-import helper `sync_fr
 the `recall` FTS5 lexical search (Phase −1 of the semantic memory layer), and the
 observability tools `recall_stats` and `audit_tail` over the JSONL logs.
 
-**Prerequisite:** Verify that the Claude Desktop version in use supports custom stdio
-MCP servers with `uv`-based Python launchers. As of mid-2026, Claude Desktop MCP
-support is stable for Node.js servers; Python + uv support may require testing.
+This exact `uv`-based stdio launch path is the documented local target and has been
+validated in the current setup.
 
 ### vibe-code-handoff (updated workflow)
 
-**Current (file-based):**
+**Fallback (file-based):**
 ```
 vibe-code-handoff appends to ## Pending Handoffs section of claude_ai_context.md
 ```
 
-**Target (DB-backed):**
+**Primary (DB-backed):**
 ```python
 mcp__bridge_db__create_handoff(
     caller="claude_ai",
@@ -91,12 +108,12 @@ The handoff appears immediately in the next CC session.
 
 ### weekly-review (updated workflow)
 
-**Current (file-based):**
+**Fallback (file-based):**
 ```
 weekly-review reads claude_ai_context.md via Filesystem MCP
 ```
 
-**Target (DB-backed):**
+**Primary (DB-backed):**
 ```python
 mcp__bridge_db__get_all_sections()          # career, speaking, research, capabilities
 mcp__bridge_db__get_latest_snapshot("cc")   # CC active projects, lessons, patterns
