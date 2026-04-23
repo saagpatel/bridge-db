@@ -12,7 +12,16 @@ import aiosqlite
 import pytest
 from mcp.server.fastmcp import FastMCP
 
+from bridge_db import config
 from bridge_db.db import open_db
+from bridge_db.tools import recall as recall_tool
+
+
+@pytest.fixture(autouse=True)
+def isolate_jsonl_logs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep tests from appending audit or recall events to live operator logs."""
+    monkeypatch.setattr(config, "AUDIT_LOG_PATH", tmp_path / "audit.jsonl")
+    monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", tmp_path / "recall_query_log.jsonl")
 
 
 @pytest.fixture
