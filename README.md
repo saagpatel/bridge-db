@@ -19,8 +19,8 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
 
 ```
 Claude.ai ──────────────────────────────────────────────┐
-  (reads markdown file via Filesystem MCP)              │
-  (future: MCP client via Claude Desktop)               │
+  (direct MCP via Claude Desktop)                       │
+  (fallback: markdown file via Filesystem MCP)          │
                                                          ▼
 CC skills ──► MCP stdio ──► bridge-db process ──► SQLite (WAL)
 Codex      ──► MCP stdio ──► bridge-db process ──►  ~/.local/share/bridge-db/bridge.db
@@ -102,4 +102,4 @@ The current operating model is:
 - [`ROADMAP.md`](ROADMAP.md) — Execution roadmap for the next integration phases
 - [`PHASE-3-DECISION.md`](PHASE-3-DECISION.md) — Architectural decision on watcher vs startup sync
 - [`codex-migration.md`](codex-migration.md) — Per-skill migration instructions for Codex consumers
-- [`integration-spec.md`](integration-spec.md) — Claude.ai integration path (current + future)
+- [`integration-spec.md`](integration-spec.md) — Claude.ai direct MCP and fallback-file integration
