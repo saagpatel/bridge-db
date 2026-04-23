@@ -89,9 +89,9 @@ def test_cli_entrypoints_smoke(flag: str, expected_text: str, tmp_path: Path) ->
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(repo_root / "src")
-    env["DB_PATH"] = str(db_path)
+    env["BRIDGE_DB_PATH"] = str(db_path)
     env["BRIDGE_FILE_PATH"] = str(bridge_path)
-    env["AUDIT_LOG_PATH"] = str(audit_log_path)
+    env["BRIDGE_DB_AUDIT_LOG_PATH"] = str(audit_log_path)
 
     bootstrap = subprocess.run(
         [
@@ -105,7 +105,7 @@ from bridge_db.db import open_db
 
 
 async def main() -> None:
-    db = await open_db(Path(os.environ["DB_PATH"]))
+    db = await open_db(Path(os.environ["BRIDGE_DB_PATH"]))
     await db.close()
 
 
@@ -120,6 +120,24 @@ asyncio.run(main())
     )
     assert bootstrap.returncode == 0, bootstrap.stderr
 
+    legacy_env = env.copy()
+    legacy_env.pop("BRIDGE_DB_PATH")
+    legacy_env.pop("BRIDGE_FILE_PATH")
+    legacy_env.pop("BRIDGE_DB_AUDIT_LOG_PATH")
+    legacy_env["HOME"] = str(tmp_path / "legacy-home")
+    legacy_env["DB_PATH"] = str(db_path)
+    legacy_env["AUDIT_LOG_PATH"] = str(audit_log_path)
+
+    legacy_result = subprocess.run(
+        [sys.executable, "-m", "bridge_db", flag],
+        cwd=repo_root,
+        env=legacy_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert legacy_result.returncode != 0
+
     result = subprocess.run(
         [sys.executable, "-m", "bridge_db", flag],
         cwd=repo_root,
@@ -131,3 +149,8 @@ asyncio.run(main())
 
     assert result.returncode == 0, result.stderr
     assert expected_text in result.stdout
+    if flag == "--doctor":
+        assert str(db_path) in result.stdout
+        assert str(audit_log_path) in result.stdout
+    if flag == "--status":
+        assert "contexts=0" in result.stdout
