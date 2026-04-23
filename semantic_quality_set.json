@@ -1,13 +1,15 @@
 {
   "metadata": {
     "created": "2026-04-17",
-    "bridge_db_snapshot": "TO_FILL_AT_EVAL_TIME",
+    "status": "historical_closed",
+    "closure_date": "2026-04-17",
+    "bridge_db_snapshot": "not_filled_historical_artifact",
     "total_queries": 20,
     "rater_primary": "saagar",
     "rater_secondary": "claude-code-blind",
     "inter_rater_sample_size": 5,
     "inter_rater_agreement": null,
-    "notes": "Queries drafted in Claude.ai chat from memory of Saagar's workflows. query_written_before_viewing_db is true for all entries because the drafter (Claude) did not have bridge.db access at drafting time. Expected_results to be filled by Saagar in step 2 after opening bridge.db."
+    "notes": "Historical artifact only. The semantic/vector roadmap was closed after the Phase -1 FTS5 recall dry run showed misses mostly targeted content outside bridge-db scope. expected_results remain empty by design; do not treat this file as live eval work unless the roadmap is explicitly reopened."
   },
   "queries": [
     {
