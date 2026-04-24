@@ -16,3 +16,6 @@ wheels/
 
 # Serena IDE state (local cache + memories)
 .serena/
+
+# Claude Code local runtime (auto-worktrees, session state)
+.claude/
