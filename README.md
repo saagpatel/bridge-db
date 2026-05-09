@@ -13,7 +13,8 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
 - Phase −1 of the semantic memory arc shipped and is the **final layer**: `content_index` FTS5 vtable mirrors all content tables, `recall(query, limit, scope)` exposes it via MCP with OR-semantic multi-token queries. Vector/embedding phases were closed after a dry-run showed that "missed" queries targeted content not actually in `bridge.db`. See the closure banner at the top of [bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md](bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md).
 - **Phase 6 observability shipped (2026-04-17):** `recall_stats` reads the recall query log, `audit_tail` reads the audit log, and `health` now surfaces `wal_size_bytes` + `wal_warning`. All three close half-built feedback loops without expanding scope. See the Phase 6 section in [ROADMAP.md](ROADMAP.md).
 - Shipped-event sync hardening shipped: `confirm_shipped_sync` records downstream proof in `shipped_sync_receipts` before marking a `SHIPPED` activity event `PROCESSED`.
-- Local verification is currently green as of 2026-05-09: `142` tests passing,
+- `health` / `status` also surface `processed_shipped_without_receipt` as a soft drift signal for older or manual `mark_shipped_processed` paths. Prefer `confirm_shipped_sync` for new downstream syncs.
+- Local verification is currently green as of 2026-05-09: `143` tests passing,
   `ruff` clean, `pyright` clean, and live `--doctor` / `--status` checks healthy.
 - Project is in steady maintenance. Scope is pinned to cross-system *state* coordination plus lexical `recall` plus observability; it is not a knowledge store.
 - Dependency maintenance is current; the recent `python-multipart` lockfile bump
@@ -57,7 +58,7 @@ Write tools enforce `caller` ownership, so systems can only write the slices of 
 ## Commands
 
 ```bash
-uv run pytest              # run all tests (142 total)
+uv run pytest              # run all tests (143 total)
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run python -m bridge_db --doctor  # local environment diagnostics

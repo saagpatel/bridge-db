@@ -44,6 +44,18 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     unprocessed_row = await cursor.fetchone()
     unprocessed_shipped_count: int = unprocessed_row[0] if unprocessed_row else 0
 
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM activity_log AS activity "
+        "WHERE EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE value = 'SHIPPED') "
+        "AND EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE value = 'PROCESSED') "
+        "AND NOT EXISTS ("
+        "  SELECT 1 FROM shipped_sync_receipts AS receipt "
+        "  WHERE receipt.activity_id = activity.id"
+        ")"
+    )
+    receiptless_row = await cursor.fetchone()
+    processed_shipped_without_receipt_count: int = receiptless_row[0] if receiptless_row else 0
+
     db_path = config.DB_PATH
     db_exists = db_path.exists()
 
@@ -71,6 +83,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "bridge_file_exists": bridge_file_exists,
         "bridge_file_age_seconds": bridge_file_age_seconds,
         "unprocessed_shipped_count": unprocessed_shipped_count,
+        "processed_shipped_without_receipt_count": processed_shipped_without_receipt_count,
         "wal_size_bytes": wal_size_bytes,
         "wal_warning": wal_warning,
     }
@@ -133,6 +146,9 @@ async def collect_status_summary(db: Any) -> dict[str, Any]:
         "signals": {
             "pending_handoffs": pending_handoffs,
             "unprocessed_shipped": health["unprocessed_shipped_count"],
+            "processed_shipped_without_receipt": health[
+                "processed_shipped_without_receipt_count"
+            ],
         },
         "latest_snapshots": latest_snapshots,
         "latest_activity": latest_activity,

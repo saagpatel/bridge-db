@@ -40,7 +40,7 @@ Checklist
 
 Verified on 2026-05-09.
 
-- `uv run pytest` passes locally with 142 tests.
+- `uv run pytest` passes locally with 143 tests.
 - `uv run pyright` passes locally.
 - `uv run ruff check` passes locally.
 - `uv run python -m bridge_db --doctor` passes locally.
@@ -51,7 +51,7 @@ Verified on 2026-05-09.
 - Claude.ai read access is confirmed with a successful `mcp__bridge_db__health()` call after restart.
 - Claude.ai direct write behavior has been proven through bridge-db MCP tools.
 - Startup sync plus export has been verified end to end.
-- Latest local repo verification is green: `142` tests, `ruff` clean, `pyright` clean.
+- Latest local repo verification is green: `143` tests, `ruff` clean, `pyright` clean.
 - Live status currently reports no pending handoffs and no unprocessed shipped events.
 - Dependabot PR #13 was verified locally against the canonical suite and merged.
 

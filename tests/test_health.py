@@ -77,6 +77,41 @@ async def test_health_unprocessed_shipped_count(
     assert result["unprocessed_shipped_count"] == 1
 
 
+async def test_health_counts_processed_shipped_without_receipts(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
+) -> None:
+    (tmp_path / "test.db").touch()
+    # One legacy-processed event without a receipt and one receipt-backed event.
+    cursor = await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary, tags) "
+        "VALUES ('cc', '2026-04-14', 'A', 'S', ?) RETURNING id",
+        (json.dumps(["SHIPPED", "PROCESSED"]),),
+    )
+    receiptless_row = await cursor.fetchone()
+    assert receiptless_row is not None
+    receiptless_id = int(receiptless_row[0])
+    cursor = await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary, tags) "
+        "VALUES ('cc', '2026-04-14', 'B', 'S', ?) RETURNING id",
+        (json.dumps(["SHIPPED", "PROCESSED"]),),
+    )
+    receipted_row = await cursor.fetchone()
+    assert receipted_row is not None
+    receipted_id = int(receipted_row[0])
+    await db.execute(
+        "INSERT INTO shipped_sync_receipts "
+        "(activity_id, downstream_system, downstream_ref, synced_by) "
+        "VALUES (?, 'notion', 'https://notion.so/example', 'codex')",
+        (receipted_id,),
+    )
+    await db.commit()
+
+    result = await fns["health"](ctx=make_ctx(db))
+
+    assert receiptless_id != receipted_id
+    assert result["processed_shipped_without_receipt_count"] == 1
+
+
 async def test_health_bridge_file_info(
     db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -134,6 +169,7 @@ async def test_status_returns_compact_operator_summary(
     assert result["row_counts"]["context_sections"] == 1
     assert result["signals"]["pending_handoffs"] == 0
     assert result["signals"]["unprocessed_shipped"] == 1
+    assert result["signals"]["processed_shipped_without_receipt"] == 0
     assert result["latest_snapshots"]["cc"] == "2026-04-17"
     assert result["latest_activity"]["cc"] == "2026-04-17 (bridge-db)"
 

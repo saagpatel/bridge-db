@@ -5,7 +5,7 @@ SQLite-backed MCP server for cross-system state sharing between Claude.ai, Claud
 ## Commands
 
 ```bash
-uv run pytest              # run all tests (142 total)
+uv run pytest              # run all tests (143 total)
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run ruff check --fix    # lint + auto-fix
@@ -19,7 +19,7 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 
 - **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=5000`). Schema at v4 — adds `content_index` FTS5 vtable mirroring all source rows for lexical search, plus `shipped_sync_receipts` for downstream proof before shipped events are marked processed.
 - **MCP transport**: stdio (stdout = JSON-RPC, all logging → stderr)
-- **23 MCP tools** across 9 modules: activity, handoffs, context, snapshots, cost, export, health, recall (FTS5 lexical search; Phase −1 of the semantic memory layer), audit (read-side observability over the JSONL audit + recall query logs).
+- **23 MCP tools** across 9 modules: activity, handoffs, context, snapshots, cost, export, health, recall (FTS5 lexical search; Phase −1 of the semantic memory layer), audit (read-side observability over the JSONL audit + recall query logs). `health` / `status` include soft signals for pending handoffs, unprocessed shipped events, receiptless processed shipped events, WAL size, and bridge-file freshness.
 - **Context access**: `get_db(ctx)` helper casts lifespan context to `aiosqlite.Connection`
 - **Tool registration**: `CaptureMCP` pattern in tests — decorators capture raw async fns
 - **FTS5 invariant**: every write path that touches `context_sections`, `activity_log`, `system_snapshots`, or `pending_handoffs` calls `upsert_fts_entry` / `gc_fts_orphans` from [db.py](src/bridge_db/db.py) in the same transaction. Auto-prune paths in `log_activity` and `save_snapshot` GC orphan FTS rows.
@@ -46,7 +46,8 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 - Phase −1 of the semantic memory layer (FTS5 + `recall`) is shipped and is the **final layer**. A post-shipping dry run through the 20-query eval set showed that most query "misses" reflect content not living in `bridge.db` (it's in memory files, plan docs, Notion), so vector/embedding layers wouldn't help. Scope closed — see the closure banner at the top of [bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md](bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md).
 - Phase 6 observability shipped (2026-04-17, PRs #6 + #7): `recall_stats` (read-side of the recall query log), `audit_tail` (read-side of the audit log), and `wal_size_bytes` + `wal_warning` in `health`. Shared `iter_jsonl` helper in `audit.py`. These extend existing state, not scope.
 - Shipped-event sync hardening is in place: `confirm_shipped_sync` requires a downstream system/ref, stores a receipt, then adds the `PROCESSED` tag. `mark_shipped_processed` remains as a compatibility path, but the receipt-backed tool is preferred for bridge-sync work.
-- Latest verification on 2026-05-09: `142` tests green; `ruff` and `pyright` clean;
+- `processed_shipped_without_receipt` is now visible in `health` / `status` so operators can spot legacy/manual processed shipped events without treating them as bridge health failures.
+- Latest verification on 2026-05-09: `143` tests green; `ruff` and `pyright` clean;
   `--doctor` and `--status` report healthy live bridge state.
 - The project is now in a steady maintenance state. Scope: cross-system *state* coordination (handoffs, snapshots, activity, four Claude.ai-owned context sections) + lexical `recall` over that content + observability over the JSONL logs.
 
@@ -87,7 +88,7 @@ bridge-db is an active local project in the /Users/d/Projects portfolio.
 
 ## Current State
 
-This project is in steady-state maintenance. The codebase is stable, the DB is live, core features are shipped and documented, and observability over the two JSONL logs is now closed (was a half-built feedback loop). 23 MCP tools across 9 modules, 142 tests green, pyright + ruff clean. Scope is explicitly pinned to cross-system *state* coordination plus lexical `recall`, shipped-event sync receipts, plus observability — expansion into a knowledge store is ruled out.
+This project is in steady-state maintenance. The codebase is stable, the DB is live, core features are shipped and documented, and observability over the two JSONL logs is now closed (was a half-built feedback loop). 23 MCP tools across 9 modules, 143 tests green, pyright + ruff clean. Scope is explicitly pinned to cross-system *state* coordination plus lexical `recall`, shipped-event sync receipts, plus observability — expansion into a knowledge store is ruled out.
 
 ## Stack
 
@@ -96,12 +97,12 @@ This project is in steady-state maintenance. The codebase is stable, the DB is l
 - **Database**: SQLite via `aiosqlite`
 - **Type checking**: pyright (strict)
 - **Lint**: ruff
-- **Test**: pytest (142 tests)
+- **Test**: pytest (143 tests)
 
 ## How To Run
 
 ```bash
-uv run pytest              # run all tests (142 total)
+uv run pytest              # run all tests (143 total)
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run ruff check --fix    # lint + auto-fix
