@@ -60,11 +60,11 @@ Three PRs on top of the FTS5 closure:
 
 ## Recent maintenance log (2026-05-09)
 
-- Live bridge status is healthy: schema v3, bridge file present, no pending handoffs, no unprocessed shipped events after syncing shipped event `1459` to the `personal-ops` Notion row and marking it `PROCESSED`.
+- Live bridge status is healthy: schema v4, bridge file present, no pending handoffs, no unprocessed shipped events, and bridge-sync now prefers receipt-backed `confirm_shipped_sync` after downstream Notion proof.
 - Dependabot PR #13 (`python-multipart` 0.0.26 -> 0.0.27 in `uv.lock`) was checked out, verified locally with the full canonical suite, and merged.
 - Local verification remains green: `uv run pytest`, `uv run pyright`, `uv run ruff check`, `uv run python -m bridge_db --doctor`, and `uv run python -m bridge_db --status`.
 
-If resuming: project is idle. Any new work should respect the closed-scope banner in the semantic-memory plan. Next maintenance tasks (low priority): dogfood `confirm_shipped_sync`, watch for Notion OS / personal-ops caller volume changes, and keep docs aligned with any MCP surface changes.
+If resuming: project is idle. Any new work should respect the closed-scope banner in the semantic-memory plan. Next maintenance tasks (low priority): watch the next scheduled bridge-sync run for a receipt-backed shipped-event confirmation, watch for Notion OS / personal-ops caller volume changes, and keep docs aligned with any MCP surface changes.
 
 ## Registration
 
