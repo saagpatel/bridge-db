@@ -9,7 +9,7 @@ import aiosqlite
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Full DDL for current schema (initial create on a fresh DB)
 _SCHEMA_DDL = """
@@ -69,12 +69,43 @@ CREATE TABLE IF NOT EXISTS cost_records (
     UNIQUE(system, month)
 );
 
+CREATE TABLE IF NOT EXISTS shipped_sync_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_id INTEGER NOT NULL UNIQUE,
+    downstream_system TEXT NOT NULL,
+    downstream_ref TEXT NOT NULL,
+    synced_by TEXT NOT NULL CHECK(synced_by IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+    synced_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    notes TEXT,
+    FOREIGN KEY(activity_id) REFERENCES activity_log(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_shipped_sync_downstream
+    ON shipped_sync_receipts(downstream_system, downstream_ref);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS content_index USING fts5(
     source_type UNINDEXED,
     source_id UNINDEXED,
     text,
     tokenize = 'porter unicode61 remove_diacritics 2'
 );
+"""
+
+# Migration from v3 → v4: add shipped-event sync receipts.
+_MIGRATION_V3_TO_V4 = """
+CREATE TABLE IF NOT EXISTS shipped_sync_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_id INTEGER NOT NULL UNIQUE,
+    downstream_system TEXT NOT NULL,
+    downstream_ref TEXT NOT NULL,
+    synced_by TEXT NOT NULL CHECK(synced_by IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+    synced_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    notes TEXT,
+    FOREIGN KEY(activity_id) REFERENCES activity_log(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_shipped_sync_downstream
+    ON shipped_sync_receipts(downstream_system, downstream_ref);
 """
 
 # Migration from v2 → v3: add content_index FTS5 virtual table.
@@ -211,6 +242,13 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
             await db.execute(f"PRAGMA user_version = {current_version}")
             await db.commit()
             logger.info("Schema migrated to v3")
+        elif current_version == 3:
+            logger.info("Migrating schema v3 → v4")
+            await db.executescript(_MIGRATION_V3_TO_V4)
+            current_version = 4
+            await db.execute(f"PRAGMA user_version = {current_version}")
+            await db.commit()
+            logger.info("Schema migrated to v4")
         else:
             raise RuntimeError(f"No migration path defined from v{current_version}")
 

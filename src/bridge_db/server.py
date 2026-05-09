@@ -43,6 +43,7 @@ mcp = FastMCP(
     instructions=(
         "SQLite-backed bridge for shared state between Claude.ai, Claude Code, and Codex. "
         "Use log_activity/get_recent_activity for session activity, "
+        "get_shipped_events/confirm_shipped_sync/mark_shipped_processed for shipped-event sync, "
         "create_handoff/get_pending_handoffs for project handoffs, "
         "save_snapshot/get_latest_snapshot for system state, "
         "update_section/get_section/get_all_sections/sync_from_file for long-lived context "
