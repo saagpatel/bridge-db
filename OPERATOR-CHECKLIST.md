@@ -90,6 +90,24 @@ To confirm the Claude.ai file-write safety net is active:
 Status
 - Verified in this cleanup cycle.
 
+## Steady-State Observability Habit
+
+Use these read-only checks when bridge-db is healthy but you want to confirm the
+coordination layer is still earning its keep:
+
+1. After Bridge Syncs or shipped-event reconciliation, run
+   `mcp__bridge_db__audit_tail(limit=10)` and confirm new shipped events use
+   `confirm_shipped_sync` with downstream proof instead of bare
+   `mark_shipped_processed`.
+2. If shipped-event drift is suspected, run
+   `mcp__bridge_db__audit_tail(tool="confirm_shipped_sync", limit=10)` and
+   `uv run python -m bridge_db --status`.
+3. Use `mcp__bridge_db__recall_stats(days=7)` only to evaluate recall over
+   bridge-owned state: sections, activity, snapshots, and handoffs.
+4. Do not treat recall misses for repo docs, Notion pages, memory files, or
+   planning artifacts as bridge-db bugs. Those sources are intentionally outside
+   the DB; bridge-db is a state bridge, not a general knowledge store.
+
 ## Failure Clues
 
 - If Claude.ai cannot see the tools, check whether the `mcpServers` block was added to the correct config file.
