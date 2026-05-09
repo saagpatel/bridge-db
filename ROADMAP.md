@@ -15,7 +15,7 @@ This roadmap captures the current scope-closed state of bridge-db. All originall
 - Phase −1 of the semantic memory arc (FTS5 + `recall`) shipped; subsequent phases closed (see below).
 - Phase 6 observability shipped: `recall_stats`, `audit_tail`, and WAL-size health metric (see below).
 - Shipped-event sync hardening shipped: `confirm_shipped_sync` records downstream proof before marking shipped activity as processed.
-- Repo green at `142` tests, `ruff` and `pyright` clean.
+- Repo green at `143` tests, `ruff` and `pyright` clean.
 
 ## Outcomes We Want
 

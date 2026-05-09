@@ -111,7 +111,9 @@ async def run_status() -> bool:
     print(
         "  Signals:"
         f" pending_handoffs={summary['signals']['pending_handoffs']},"
-        f" unprocessed_shipped={summary['signals']['unprocessed_shipped']}"
+        f" unprocessed_shipped={summary['signals']['unprocessed_shipped']},"
+        " processed_shipped_without_receipt="
+        f"{summary['signals']['processed_shipped_without_receipt']}"
     )
     print(
         "  Latest snapshots:"
