@@ -4,9 +4,9 @@ This roadmap captures the current scope-closed state of bridge-db. All originall
 
 ## Current Position
 
-- Core MCP server is stable, typed, and test-backed. Schema at v3 (adds FTS5 `content_index`).
-- SQLite schema and migration path are in place; step-wise migrations proven through v1→v2→v3.
-- 22 MCP tools across 9 modules: activity, handoffs, context, snapshots, cost, export, health, recall, audit.
+- Core MCP server is stable, typed, and test-backed. Schema at v4 (adds FTS5 `content_index` plus shipped-event sync receipts).
+- SQLite schema and migration path are in place; step-wise migrations proven through v1→v2→v3→v4.
+- 23 MCP tools across 9 modules: activity, handoffs, context, snapshots, cost, export, health, recall, audit.
 - Markdown export works as a compatibility layer for file-based clients.
 - Claude.ai direct MCP read and write paths have both been proven locally.
 - The file path remains compatibility infrastructure, not the primary coordination path.
@@ -14,7 +14,8 @@ This roadmap captures the current scope-closed state of bridge-db. All originall
 - Audit hardening closed the correctness gaps around handoff clearing, future-schema detection, degraded health reporting, and latent v1→v2 migration gaps.
 - Phase −1 of the semantic memory arc (FTS5 + `recall`) shipped; subsequent phases closed (see below).
 - Phase 6 observability shipped: `recall_stats`, `audit_tail`, and WAL-size health metric (see below).
-- Repo green at `137` tests, `ruff` and `pyright` clean.
+- Shipped-event sync hardening shipped: `confirm_shipped_sync` records downstream proof before marking shipped activity as processed.
+- Repo green at `142` tests, `ruff` and `pyright` clean.
 
 ## Outcomes We Want
 
@@ -172,6 +173,7 @@ Scope note
 
 Future work is maintenance-only:
 - Keep docs and tool contracts aligned when MCP surfaces change.
+- Prefer `confirm_shipped_sync` over raw `mark_shipped_processed` whenever a shipped event was synced to a downstream system.
 - Watch for WAL bloat via `health.wal_warning` (>10 MiB). Run `PRAGMA wal_checkpoint(TRUNCATE)` if needed.
 - Apply security/dependency updates to `mcp`, `aiosqlite`, `pydantic`.
 - Reopen the roadmap only if a concrete new cross-system coordination need surfaces — not to expand scope into knowledge search.

@@ -18,6 +18,7 @@ _ROW_COUNT_TABLES = (
     "pending_handoffs",
     "system_snapshots",
     "cost_records",
+    "shipped_sync_receipts",
 )
 _ACTIVITY_SOURCES = ("cc", "codex", "claude_ai", "notion_os", "personal_ops")
 _SNAPSHOT_SYSTEMS = ("cc", "codex")

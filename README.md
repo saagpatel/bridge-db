@@ -2,7 +2,7 @@
 
 SQLite-backed MCP server for shared state across Claude.ai, Claude Code, Codex, and related local ops tools.
 
-bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLite store and 22 MCP tools across state, diagnostics, FTS5 lexical `recall`, and observability over the audit and recall logs. The markdown bridge file is regenerated from the DB via `export_bridge_markdown` and remains available as a fallback for file-based clients.
+bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLite store and 23 MCP tools across state, diagnostics, FTS5 lexical `recall`, shipped-event sync receipts, and observability over the audit and recall logs. The markdown bridge file is regenerated from the DB via `export_bridge_markdown` and remains available as a fallback for file-based clients.
 
 ## Current State
 
@@ -12,12 +12,12 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
 - Recent hardening closed the remaining audit findings around duplicate handoff clearing, future-schema rejection, and health signaling for missing fallback state.
 - Phase −1 of the semantic memory arc shipped and is the **final layer**: `content_index` FTS5 vtable mirrors all content tables, `recall(query, limit, scope)` exposes it via MCP with OR-semantic multi-token queries. Vector/embedding phases were closed after a dry-run showed that "missed" queries targeted content not actually in `bridge.db`. See the closure banner at the top of [bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md](bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md).
 - **Phase 6 observability shipped (2026-04-17):** `recall_stats` reads the recall query log, `audit_tail` reads the audit log, and `health` now surfaces `wal_size_bytes` + `wal_warning`. All three close half-built feedback loops without expanding scope. See the Phase 6 section in [ROADMAP.md](ROADMAP.md).
-- Local verification is currently green as of 2026-05-09: `137` tests passing,
+- Shipped-event sync hardening shipped: `confirm_shipped_sync` records downstream proof in `shipped_sync_receipts` before marking a `SHIPPED` activity event `PROCESSED`.
+- Local verification is currently green as of 2026-05-09: `142` tests passing,
   `ruff` clean, `pyright` clean, and live `--doctor` / `--status` checks healthy.
 - Project is in steady maintenance. Scope is pinned to cross-system *state* coordination plus lexical `recall` plus observability; it is not a knowledge store.
-- Current maintenance watch: one small Dependabot PR is open for a transitive
-  `python-multipart` lockfile bump; local tests, type checking, and lint passed
-  on that branch on 2026-05-09.
+- Dependency maintenance is current; the recent `python-multipart` lockfile bump
+  was merged before the shipped-event sync hardening work.
 
 ## Architecture
 
@@ -38,11 +38,11 @@ Codex      ──► MCP stdio ──► bridge-db process ──►  ~/.local/s
 
 No shared daemon. Each MCP client spawns its own `bridge-db` process via stdio. WAL mode + `PRAGMA busy_timeout=5000` handles concurrent writes safely.
 
-## Tools (22)
+## Tools (23)
 
 | Module | Tools |
 |---|---|
-| activity | `log_activity`, `get_recent_activity`, `get_shipped_events`, `mark_shipped_processed` |
+| activity | `log_activity`, `get_recent_activity`, `get_shipped_events`, `confirm_shipped_sync`, `mark_shipped_processed` |
 | handoffs | `create_handoff`, `get_pending_handoffs`, `pick_up_handoff`, `clear_handoff` |
 | context | `update_section`, `get_section`, `get_all_sections`, `sync_from_file` |
 | snapshots | `save_snapshot`, `get_latest_snapshot` |
@@ -57,7 +57,7 @@ Write tools enforce `caller` ownership, so systems can only write the slices of 
 ## Commands
 
 ```bash
-uv run pytest              # run all tests (137 total)
+uv run pytest              # run all tests (142 total)
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run python -m bridge_db --doctor  # local environment diagnostics

@@ -105,7 +105,8 @@ async def run_status() -> bool:
         f" activity={summary['row_counts']['activity_log']},"
         f" handoffs={summary['row_counts']['pending_handoffs']},"
         f" snapshots={summary['row_counts']['system_snapshots']},"
-        f" costs={summary['row_counts']['cost_records']}"
+        f" costs={summary['row_counts']['cost_records']},"
+        f" shipped_receipts={summary['row_counts']['shipped_sync_receipts']}"
     )
     print(
         "  Signals:"
