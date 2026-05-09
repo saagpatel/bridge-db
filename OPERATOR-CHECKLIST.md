@@ -38,7 +38,7 @@ Checklist
 
 ## Current Verified Local State
 
-Verified on 2026-04-23.
+Verified on 2026-05-09.
 
 - `uv run pytest` passes locally with 137 tests.
 - `uv run pyright` passes locally.
@@ -52,6 +52,9 @@ Verified on 2026-04-23.
 - Claude.ai direct write behavior has been proven through bridge-db MCP tools.
 - Startup sync plus export has been verified end to end.
 - Latest local repo verification is green: `137` tests, `ruff` clean, `pyright` clean.
+- Live status currently reports no pending handoffs and no unprocessed shipped events.
+- Dependabot PR #13 was verified locally against the canonical suite; merge remains
+  the only open dependency-maintenance follow-through.
 
 Conclusion
 - The documented registration path is still the correct target path.

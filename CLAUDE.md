@@ -45,7 +45,8 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 - Recent audit hardening closed the remaining correctness gaps around duplicate handoff clearing, future-schema mismatch handling, and degraded health reporting.
 - Phase −1 of the semantic memory layer (FTS5 + `recall`) is shipped and is the **final layer**. A post-shipping dry run through the 20-query eval set showed that most query "misses" reflect content not living in `bridge.db` (it's in memory files, plan docs, Notion), so vector/embedding layers wouldn't help. Scope closed — see the closure banner at the top of [bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md](bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md).
 - Phase 6 observability shipped (2026-04-17, PRs #6 + #7): `recall_stats` (read-side of the recall query log), `audit_tail` (read-side of the audit log), and `wal_size_bytes` + `wal_warning` in `health`. Shared `iter_jsonl` helper in `audit.py`. These extend existing state, not scope.
-- Latest verification on 2026-04-23: `137` tests green; `ruff` and `pyright` clean.
+- Latest verification on 2026-05-09: `137` tests green; `ruff` and `pyright` clean;
+  `--doctor` and `--status` report healthy live bridge state.
 - The project is now in a steady maintenance state. Scope: cross-system *state* coordination (handoffs, snapshots, activity, four Claude.ai-owned context sections) + lexical `recall` over that content + observability over the JSONL logs.
 
 ## Recent session log (2026-04-17)
@@ -56,7 +57,13 @@ Three PRs on top of the FTS5 closure:
 - **PR #6** — Observability feature: added `recall_stats`, `audit_tail` (new `tools/audit.py` module), WAL size in `health`, shared `iter_jsonl` helper. Tool count 20→22 across 9 modules.
 - **PR #7** — Post-merge polish: server.py `instructions=` string advertises the new tools, regression test pinning `audit_tail` behavior for externally-edited records without `ts`, operator checklist smoke list includes the observability tools.
 
-If resuming: project is idle. Any new work should respect the closed-scope banner in the semantic-memory plan. Next maintenance tasks (low priority): dep updates, watch for Notion OS / personal-ops caller volume changes.
+## Recent maintenance log (2026-05-09)
+
+- Live bridge status is healthy: schema v3, bridge file present, no pending handoffs, no unprocessed shipped events after syncing shipped event `1459` to the `personal-ops` Notion row and marking it `PROCESSED`.
+- Dependabot PR #13 (`python-multipart` 0.0.26 -> 0.0.27 in `uv.lock`) was checked out and verified locally with the full canonical suite. It remains open until the merge path is available.
+- Local verification remains green: `uv run pytest`, `uv run pyright`, `uv run ruff check`, `uv run python -m bridge_db --doctor`, and `uv run python -m bridge_db --status`.
+
+If resuming: project is idle. Any new work should respect the closed-scope banner in the semantic-memory plan. Next maintenance tasks (low priority): merge the verified dependency PR when allowed, watch for Notion OS / personal-ops caller volume changes, and keep docs aligned with any MCP surface changes.
 
 ## Registration
 
