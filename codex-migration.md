@@ -22,7 +22,8 @@ After registration, bridge-db tools appear as `bridge-db__log_activity`, etc.
 | `bridge-db__log_activity` | `"codex"` | Log a session activity entry |
 | `bridge-db__get_recent_activity` | — | Read recent activity (CC + Codex) |
 | `bridge-db__get_shipped_events` | — | Get SHIPPED-tagged events |
-| `bridge-db__mark_shipped_processed` | — | Mark entries as PROCESSED after Notion sync |
+| `bridge-db__confirm_shipped_sync` | `"codex"` | Record downstream proof, then mark one SHIPPED entry PROCESSED |
+| `bridge-db__mark_shipped_processed` | — | Compatibility-only processed marker for legacy/manual paths |
 | `bridge-db__create_handoff` | `"claude_ai"` | Create a project handoff (Claude.ai only) |
 | `bridge-db__get_pending_handoffs` | — | List pending handoffs |
 | `bridge-db__pick_up_handoff` | `"codex"` | Mark handoff as active |
@@ -75,8 +76,19 @@ bridge-db__get_recent_activity(source="cc", limit=10)
 ```
 bridge-db__get_shipped_events(unprocessed_only=True)
 # ... sync to Notion ...
-bridge-db__mark_shipped_processed(activity_ids=[...])
+bridge-db__confirm_shipped_sync(
+    caller="codex",
+    activity_id=event_id,
+    downstream_system="notion",
+    downstream_ref=confirmed_notion_page_id_or_url,
+    notes="Status=Shipped; Pipeline Stage=Post-Build Review Done; Date Updated=YYYY-MM-DD"
+)
 ```
+
+Only append the secondary processed-ships ledger key after
+`confirm_shipped_sync` succeeds. If bridge-db is unavailable and the workflow is
+running from the markdown fallback path, keep using the JSON ledger as the only
+dedupe surface.
 
 **Fallback:** If bridge-db unavailable, read/write `claude_ai_context.md` directly (existing behavior).
 
