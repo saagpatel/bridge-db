@@ -76,7 +76,7 @@ Register bridge-db in Claude Desktop's MCP config:
 }
 ```
 
-This gives Claude.ai access to all 22 MCP tools under `mcp__bridge_db__*`, including
+This gives Claude.ai access to all 23 MCP tools under `mcp__bridge_db__*`, including
 the read-only `health` and `status` diagnostics, the file-import helper `sync_from_file`,
 the `recall` FTS5 lexical search (Phase −1 of the semantic memory layer), and the
 observability tools `recall_stats` and `audit_tail` over the JSONL logs.
@@ -120,6 +120,7 @@ mcp__bridge_db__get_latest_snapshot("cc")   # CC active projects, lessons, patte
 mcp__bridge_db__get_latest_snapshot("codex") # Codex infrastructure state
 mcp__bridge_db__get_recent_activity(limit=20) # mixed CC + Codex activity feed
 mcp__bridge_db__get_shipped_events(unprocessed_only=False) # shipped projects
+mcp__bridge_db__confirm_shipped_sync(...) # record downstream proof, then mark processed
 mcp__bridge_db__get_cost_history()          # cost trend
 ```
 

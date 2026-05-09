@@ -27,6 +27,7 @@ async def test_schema_creates_all_tables(db: aiosqlite.Connection) -> None:
         "context_sections",
         "cost_records",
         "pending_handoffs",
+        "shipped_sync_receipts",
         "system_snapshots",
     }
 
@@ -38,6 +39,7 @@ async def test_schema_creates_indexes(db: aiosqlite.Connection) -> None:
     assert "idx_activity_timestamp" in indexes
     assert "idx_snapshot_system" in indexes
     assert "idx_handoff_status" in indexes
+    assert "idx_shipped_sync_downstream" in indexes
 
 
 async def test_pragma_wal_mode(db: aiosqlite.Connection) -> None:
@@ -198,8 +200,8 @@ async def test_migration_v1_to_v2(tmp_path: Path) -> None:
     await migrated.close()
 
 
-async def test_migration_v2_to_v3_populates_content_index(tmp_path: Path) -> None:
-    """A v2 DB gains content_index on v3 migration and is backfilled from source rows."""
+async def test_migration_v2_to_current_populates_content_index(tmp_path: Path) -> None:
+    """A v2 DB gains current tables and backfills content_index from source rows."""
     db = await aiosqlite.connect(str(tmp_path / "v2.db"))
     db.row_factory = aiosqlite.Row
     await db.executescript("""
@@ -274,6 +276,11 @@ async def test_migration_v2_to_v3_populates_content_index(tmp_path: Path) -> Non
             assert count_row is not None
             assert count_row[0] == 1, f"{table} count changed during migration"
 
+        cursor = await migrated.execute("SELECT COUNT(*) FROM shipped_sync_receipts")
+        receipt_row = await cursor.fetchone()
+        assert receipt_row is not None
+        assert receipt_row[0] == 0
+
         cursor = await migrated.execute(
             "SELECT source_type, source_id FROM content_index ORDER BY source_type"
         )
@@ -292,6 +299,99 @@ async def test_migration_v2_to_v3_populates_content_index(tmp_path: Path) -> Non
         match_row = await cursor.fetchone()
         assert match_row is not None
         assert match_row[0] >= 2
+    finally:
+        await migrated.close()
+
+
+async def test_migration_v3_to_v4_adds_shipped_sync_receipts(tmp_path: Path) -> None:
+    """A v3 DB gains receipt storage without changing existing activity rows."""
+    db = await aiosqlite.connect(str(tmp_path / "v3.db"))
+    db.row_factory = aiosqlite.Row
+    await db.executescript("""
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE context_sections (
+            section_name TEXT PRIMARY KEY,
+            owner TEXT NOT NULL,
+            content TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        CREATE TABLE activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            branch TEXT,
+            tags TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        CREATE TABLE system_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            system TEXT NOT NULL,
+            snapshot_date TEXT NOT NULL,
+            data TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        CREATE TABLE pending_handoffs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_name TEXT NOT NULL,
+            project_path TEXT,
+            roadmap_file TEXT,
+            phase TEXT,
+            dispatched_from TEXT NOT NULL DEFAULT 'claude_ai',
+            dispatched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            picked_up_at TEXT,
+            cleared_at TEXT,
+            status TEXT NOT NULL DEFAULT 'pending'
+        );
+        CREATE TABLE cost_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            system TEXT NOT NULL,
+            month TEXT NOT NULL,
+            amount REAL NOT NULL,
+            notes TEXT,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            UNIQUE(system, month)
+        );
+        CREATE VIRTUAL TABLE content_index USING fts5(
+            source_type UNINDEXED,
+            source_id UNINDEXED,
+            text,
+            tokenize = 'porter unicode61 remove_diacritics 2'
+        );
+        INSERT INTO activity_log (source, timestamp, project_name, summary, tags)
+            VALUES ('codex', '2026-05-09', 'personal-ops', 'merged PR set', '["SHIPPED"]');
+        PRAGMA user_version = 3;
+    """)
+    await db.commit()
+    await db.close()
+
+    migrated = await open_db(tmp_path / "v3.db")
+    try:
+        cursor = await migrated.execute("PRAGMA user_version")
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == SCHEMA_VERSION
+
+        cursor = await migrated.execute("SELECT COUNT(*) FROM activity_log")
+        activity_row = await cursor.fetchone()
+        assert activity_row is not None
+        assert activity_row[0] == 1
+
+        await migrated.execute(
+            """
+            INSERT INTO shipped_sync_receipts (
+                activity_id, downstream_system, downstream_ref, synced_by
+            )
+            VALUES (1, 'notion', 'page-123', 'codex')
+            """
+        )
+        await migrated.commit()
+
+        cursor = await migrated.execute("SELECT downstream_ref FROM shipped_sync_receipts")
+        receipt = await cursor.fetchone()
+        assert receipt is not None
+        assert receipt["downstream_ref"] == "page-123"
     finally:
         await migrated.close()
 

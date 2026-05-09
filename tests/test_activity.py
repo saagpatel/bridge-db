@@ -104,6 +104,7 @@ async def test_get_shipped_events(db: aiosqlite.Connection, fns: dict[str, Any])
     assert len(shipped) == 1
     assert shipped[0]["project_name"] == "A"
     assert "SHIPPED" in shipped[0]["tags"]
+    assert shipped[0]["sync_receipt"] is None
 
 
 async def test_get_shipped_events_unprocessed_only(
@@ -148,6 +149,139 @@ async def test_mark_shipped_processed_empty_raises(
     ctx = make_ctx(db)
     with pytest.raises(ToolError):
         await fns["mark_shipped_processed"](activity_ids=[], ctx=ctx)
+
+
+async def test_confirm_shipped_sync_requires_downstream_proof(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await fns["log_activity"](caller="cc", project_name="A", summary="s", tags=["SHIPPED"], ctx=ctx)
+    cursor = await db.execute("SELECT id FROM activity_log")
+    row = await cursor.fetchone()
+    assert row is not None
+
+    with pytest.raises(ToolError, match="downstream_ref"):
+        await fns["confirm_shipped_sync"](
+            caller="codex",
+            activity_id=row["id"],
+            downstream_system="notion",
+            downstream_ref=" ",
+            ctx=ctx,
+        )
+
+
+async def test_confirm_shipped_sync_rejects_non_shipped_event(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await fns["log_activity"](caller="cc", project_name="A", summary="s", ctx=ctx)
+    cursor = await db.execute("SELECT id FROM activity_log")
+    row = await cursor.fetchone()
+    assert row is not None
+
+    with pytest.raises(ToolError, match="not tagged SHIPPED"):
+        await fns["confirm_shipped_sync"](
+            caller="codex",
+            activity_id=row["id"],
+            downstream_system="notion",
+            downstream_ref="page-123",
+            ctx=ctx,
+        )
+
+
+async def test_confirm_shipped_sync_records_receipt_and_marks_processed(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bridge_path = tmp_path / "bridge.md"
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge_path)
+
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="codex",
+        project_name="personal-ops",
+        summary="SHIPPED wrapper cleanup",
+        tags=["SHIPPED"],
+        ctx=ctx,
+    )
+    cursor = await db.execute("SELECT id FROM activity_log")
+    row = await cursor.fetchone()
+    assert row is not None
+    activity_id = row["id"]
+
+    result = await fns["confirm_shipped_sync"](
+        caller="codex",
+        activity_id=activity_id,
+        downstream_system="notion",
+        downstream_ref="35bc21f1-caf0-81cb-9426-dd264ef668b2",
+        notes="Updated personal-ops portfolio row",
+        ctx=ctx,
+    )
+
+    assert result["ok"] is True
+    assert result["processed_added"] is True
+    assert result["downstream_system"] == "notion"
+
+    cursor = await db.execute(
+        """
+        SELECT a.tags, r.downstream_system, r.downstream_ref, r.synced_by, r.notes
+        FROM activity_log AS a
+        JOIN shipped_sync_receipts AS r ON r.activity_id = a.id
+        WHERE a.id = ?
+        """,
+        (activity_id,),
+    )
+    receipt = await cursor.fetchone()
+    assert receipt is not None
+    assert json.loads(receipt["tags"]) == ["SHIPPED", "PROCESSED"]
+    assert receipt["downstream_system"] == "notion"
+    assert receipt["downstream_ref"] == "35bc21f1-caf0-81cb-9426-dd264ef668b2"
+    assert receipt["synced_by"] == "codex"
+    assert receipt["notes"] == "Updated personal-ops portfolio row"
+
+    shipped = await fns["get_shipped_events"](ctx=ctx)
+    assert shipped[0]["sync_receipt"]["downstream_ref"] == (
+        "35bc21f1-caf0-81cb-9426-dd264ef668b2"
+    )
+    assert bridge_path.exists()
+
+
+async def test_confirm_shipped_sync_is_idempotent_and_can_refresh_receipt(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await fns["log_activity"](caller="cc", project_name="A", summary="s", tags=["SHIPPED"], ctx=ctx)
+    cursor = await db.execute("SELECT id FROM activity_log")
+    row = await cursor.fetchone()
+    assert row is not None
+    activity_id = row["id"]
+
+    first = await fns["confirm_shipped_sync"](
+        caller="codex",
+        activity_id=activity_id,
+        downstream_system="notion",
+        downstream_ref="page-1",
+        ctx=ctx,
+    )
+    second = await fns["confirm_shipped_sync"](
+        caller="codex",
+        activity_id=activity_id,
+        downstream_system="notion",
+        downstream_ref="page-2",
+        ctx=ctx,
+    )
+
+    assert first["processed_added"] is True
+    assert second["processed_added"] is False
+
+    cursor = await db.execute("SELECT COUNT(*) FROM shipped_sync_receipts")
+    count_row = await cursor.fetchone()
+    assert count_row is not None
+    assert count_row[0] == 1
+
+    cursor = await db.execute("SELECT downstream_ref FROM shipped_sync_receipts")
+    receipt = await cursor.fetchone()
+    assert receipt is not None
+    assert receipt["downstream_ref"] == "page-2"
 
 
 async def test_log_activity_prunes_to_retention_limit(
