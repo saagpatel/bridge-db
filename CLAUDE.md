@@ -49,7 +49,7 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 - Shipped-event sync hardening is in place: `confirm_shipped_sync` requires a downstream system/ref, stores a receipt, then adds the `PROCESSED` tag. `mark_shipped_processed` remains as a compatibility path, but the receipt-backed tool is preferred for bridge-sync work.
 - `processed_shipped_without_receipt` is now visible in `health` / `status` so operators can spot legacy/manual processed shipped events without treating them as bridge health failures.
 - `uv run python -m bridge_db --dogfood` is the repeatable read-only pass for post-sync checks: status signals, WAL warning, recall usage, and shipped-sync audit details.
-- Latest verification on 2026-05-09: `146` tests green; `ruff` and `pyright` clean;
+- Latest verification on 2026-05-10: `146` tests green; `ruff` and `pyright` clean;
   `--doctor`, `--status`, and `--dogfood` report healthy live bridge state.
 - The project is now in a steady maintenance state. Scope: cross-system *state* coordination (handoffs, snapshots, activity, four Claude.ai-owned context sections) + lexical `recall` over that content + observability over the JSONL logs.
 
@@ -67,9 +67,15 @@ Three PRs on top of the FTS5 closure:
 - Dependabot PR #13 (`python-multipart` 0.0.26 -> 0.0.27 in `uv.lock`) was checked out, verified locally with the full canonical suite, and merged.
 - Local verification remains green: `uv run pytest`, `uv run pyright`, `uv run ruff check`, `uv run python -m bridge_db --doctor`, `uv run python -m bridge_db --status`, and `uv run python -m bridge_db --dogfood`.
 - A post-sync review checklist now lives in `POST-SYNC-REVIEW.md`. Use it after scheduled Bridge Syncs or shipped-event reconciliation to prove DB state, markdown export freshness, scheduled-run evidence, and scorecard updates without relying on chat memory.
-- Dependency drift is currently a maintenance watch item, not an emergency: `uv tree --outdated` reports small patch/minor drift in `mcp`, `pydantic`, `pydantic-core`, `pydantic-settings`, `sse-starlette`, `packaging`, `ruff`, and a larger transitive `cryptography` update. Handle this in a dedicated PR after bridge-sync burn-in evidence is clean.
+- Dependency drift was handled in PR #20 (`chore(deps): refresh bridge-db lockfile`) and merged to `main` as `0ee0ecf`. The latest `uv tree --outdated` pass resolves to the refreshed package tree without a remaining tracked update list.
 
-If resuming: project is idle except for the scheduled bridge-sync burn-in review and the dependency watch item above. Any new work should respect the closed-scope banner in the semantic-memory plan. Next maintenance tasks (low priority): finish the post-sync review from `POST-SYNC-REVIEW.md`, watch for Notion OS / personal-ops caller volume changes, and keep docs aligned with any MCP surface changes.
+## Recent maintenance log (2026-05-10)
+
+- The scheduled Bridge Sync and post-run review were completed with clean bridge-db proof: no pending handoffs, no unprocessed shipped events, no processed shipped events missing receipts, and a fresh markdown export.
+- The one-time `bridge-sync-burn-in-review` heartbeat was retired after the review and is now paused with no next run scheduled.
+- The active automation contract table was updated so it no longer lists the retired heartbeat; operating-layer checks returned to 14 active scheduled automations and 0 active heartbeats.
+
+If resuming: project is idle in steady maintenance. Any new work should respect the closed-scope banner in the semantic-memory plan. Next maintenance tasks (low priority): watch for downstream caller volume changes, keep docs aligned with any MCP surface changes, and use `POST-SYNC-REVIEW.md` after future scheduled Bridge Syncs.
 
 ## Registration
 
