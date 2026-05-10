@@ -102,9 +102,13 @@ coordination layer is still earning its keep:
 2. If shipped-event drift is suspected, run
    `mcp__bridge_db__audit_tail(tool="confirm_shipped_sync", limit=10)` and
    `uv run python -m bridge_db --status`.
-3. Use `mcp__bridge_db__recall_stats(days=7)` only to evaluate recall over
+3. If a compatibility `mark_shipped_processed` row appears, inspect its
+   `detail` field for the requested `activity_ids`, `updated_ids`, and
+   `missing_ids`, then confirm `status` still reports
+   `processed_shipped_without_receipt=0`.
+4. Use `mcp__bridge_db__recall_stats(days=7)` only to evaluate recall over
    bridge-owned state: sections, activity, snapshots, and handoffs.
-4. Do not treat recall misses for repo docs, Notion pages, memory files, or
+5. Do not treat recall misses for repo docs, Notion pages, memory files, or
    planning artifacts as bridge-db bugs. Those sources are intentionally outside
    the DB; bridge-db is a state bridge, not a general knowledge store.
 
