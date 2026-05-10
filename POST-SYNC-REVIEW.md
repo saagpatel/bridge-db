@@ -84,13 +84,11 @@ Classify results before upgrading:
 - safe patch refresh: small patch updates with no schema or MCP contract impact
 - dedicated PR: runtime or transitive updates that affect MCP transport,
   validation, crypto, or server behavior
-- defer: any update that would distract from validating bridge-sync burn-in
+- defer: any update that would distract from proving bridge-db/export health
 
-As of the current maintenance pass, dependency drift is small but real:
-`mcp` 1.27.0 -> 1.27.1, `pydantic` 2.13.3 -> 2.13.4,
-`pydantic-core` 2.46.3 -> 2.46.4, `pydantic-settings` 2.14.0 -> 2.14.1,
-`sse-starlette` 3.3.4 -> 3.4.2, `packaging` 26.1 -> 26.2,
-`ruff` 0.15.11 -> 0.15.12, and `cryptography` 46.0.7 -> 48.0.0.
+As of the 2026-05-10 maintenance pass, the prior dependency drift was handled
+in PR #20 and `uv tree --outdated` resolves to the refreshed package tree
+without a remaining tracked update list.
 
 ## Closeout
 
