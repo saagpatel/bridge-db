@@ -12,6 +12,7 @@ uv run pyright
 uv run ruff check
 uv run python -m bridge_db --doctor
 uv run python -m bridge_db --status
+uv run python -m bridge_db --dogfood
 ```
 
 Expected result
@@ -20,6 +21,7 @@ Expected result
 - Lint passes.
 - Doctor reports the DB file, schema, bridge file, and audit log as healthy.
 - Status prints a compact operator-facing summary of bridge health, counts, and latest signals.
+- Dogfood prints the read-only post-sync observability summary: status signals, WAL state, recall usage, and shipped-sync audit details.
 - The `health` MCP tool should report `ok=True` only when the DB, schema, and fallback bridge file are all present.
 
 ## Claude.ai Registration Check
@@ -40,7 +42,7 @@ Checklist
 
 Verified on 2026-05-09.
 
-- `uv run pytest` passes locally with 143 tests.
+- `uv run pytest` passes locally with 146 tests.
 - `uv run pyright` passes locally.
 - `uv run ruff check` passes locally.
 - `uv run python -m bridge_db --doctor` passes locally.
@@ -51,7 +53,7 @@ Verified on 2026-05-09.
 - Claude.ai read access is confirmed with a successful `mcp__bridge_db__health()` call after restart.
 - Claude.ai direct write behavior has been proven through bridge-db MCP tools.
 - Startup sync plus export has been verified end to end.
-- Latest local repo verification is green: `143` tests, `ruff` clean, `pyright` clean.
+- Latest local repo verification is green: `146` tests, `ruff` clean, `pyright` clean.
 - Live status currently reports no pending handoffs and no unprocessed shipped events.
 - Dependabot PR #13 was verified locally against the canonical suite and merged.
 
@@ -94,6 +96,14 @@ Status
 
 Use these read-only checks when bridge-db is healthy but you want to confirm the
 coordination layer is still earning its keep:
+
+Fast path:
+
+```bash
+uv run python -m bridge_db --dogfood
+```
+
+Manual equivalent:
 
 1. After Bridge Syncs or shipped-event reconciliation, run
    `mcp__bridge_db__audit_tail(limit=10)` and confirm new shipped events use

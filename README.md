@@ -14,8 +14,8 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
 - **Phase 6 observability shipped (2026-04-17):** `recall_stats` reads the recall query log, `audit_tail` reads the audit log, and `health` now surfaces `wal_size_bytes` + `wal_warning`. All three close half-built feedback loops without expanding scope. See the Phase 6 section in [ROADMAP.md](ROADMAP.md).
 - Shipped-event sync hardening shipped: `confirm_shipped_sync` records downstream proof in `shipped_sync_receipts` before marking a `SHIPPED` activity event `PROCESSED`.
 - `health` / `status` also surface `processed_shipped_without_receipt` as a soft drift signal for older or manual `mark_shipped_processed` paths. Prefer `confirm_shipped_sync` for new downstream syncs.
-- Local verification is currently green as of 2026-05-09: `143` tests passing,
-  `ruff` clean, `pyright` clean, and live `--doctor` / `--status` checks healthy.
+- Local verification is currently green as of 2026-05-09: `146` tests passing,
+  `ruff` clean, `pyright` clean, and live `--doctor` / `--status` / `--dogfood` checks healthy.
 - Project is in steady maintenance. Scope is pinned to cross-system *state* coordination plus lexical `recall` plus observability; it is not a knowledge store.
 - Dependency maintenance is current; the recent `python-multipart` lockfile bump
   was merged before the shipped-event sync hardening work.
@@ -58,11 +58,12 @@ Write tools enforce `caller` ownership, so systems can only write the slices of 
 ## Commands
 
 ```bash
-uv run pytest              # run all tests (143 total)
+uv run pytest              # run all tests (146 total)
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run python -m bridge_db --doctor  # local environment diagnostics
 uv run python -m bridge_db --status  # compact operator summary
+uv run python -m bridge_db --dogfood # read-only observability dogfood pass
 uv run python -m bridge_db          # start MCP server (stdio)
 uv run python -m bridge_db.migration  # migrate from bridge markdown
 ```
@@ -88,6 +89,7 @@ args = ["run", "--directory", "~/Projects/bridge-db", "python", "-m", "bridge_db
 - Retention: 50 activity entries per source, 10 snapshots per system
 - Health check: `health` MCP tool or `uv run python -m bridge_db --doctor`
 - Operator summary: `uv run python -m bridge_db --status`
+- Dogfood pass: `uv run python -m bridge_db --dogfood` bundles the status, WAL, recall, and shipped-sync audit checks used after bridge-sync runs
 - Migration: `uv run python -m bridge_db.migration` (idempotent — safe to re-run)
 
 ## Startup Sync
