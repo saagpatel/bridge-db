@@ -12,6 +12,33 @@ from bridge_db.audit import iter_jsonl
 logger = logging.getLogger("bridge_db.tools.audit")
 
 
+def collect_audit_tail(
+    *,
+    limit: int = 50,
+    caller: str | None = None,
+    tool: str | None = None,
+    since: str | None = None,
+    ok: bool | None = None,
+) -> list[dict[str, Any]]:
+    """Return recent audit events, newest first, with optional filters."""
+    matched: list[dict[str, Any]] = []
+    for record in iter_jsonl(config.AUDIT_LOG_PATH):
+        if caller is not None and record.get("caller") != caller:
+            continue
+        if tool is not None and record.get("tool") != tool:
+            continue
+        if ok is not None and record.get("ok") is not ok:
+            continue
+        if since is not None:
+            ts = record.get("ts")
+            if not isinstance(ts, str) or ts < since:
+                continue
+        matched.append(record)
+
+    matched.sort(key=lambda r: r.get("ts") or "", reverse=True)
+    return matched[:limit]
+
+
 def register(mcp: FastMCP) -> None:
     @mcp.tool()
     async def audit_tail(
@@ -39,19 +66,4 @@ def register(mcp: FastMCP) -> None:
         are skipped. Timestamps are ISO8601 UTC; `since` compares as string,
         which matches temporal order for that format.
         """
-        matched: list[dict[str, Any]] = []
-        for record in iter_jsonl(config.AUDIT_LOG_PATH):
-            if caller is not None and record.get("caller") != caller:
-                continue
-            if tool is not None and record.get("tool") != tool:
-                continue
-            if ok is not None and record.get("ok") is not ok:
-                continue
-            if since is not None:
-                ts = record.get("ts")
-                if not isinstance(ts, str) or ts < since:
-                    continue
-            matched.append(record)
-
-        matched.sort(key=lambda r: r.get("ts") or "", reverse=True)
-        return matched[:limit]
+        return collect_audit_tail(limit=limit, caller=caller, tool=tool, since=since, ok=ok)

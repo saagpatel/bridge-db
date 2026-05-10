@@ -60,6 +60,58 @@ def _log_recall(query: str, scope: str, limit: int, n_results: int, caller: str 
         logger.debug("recall log write failed", exc_info=True)
 
 
+def collect_recall_stats(days: int = 7) -> dict[str, Any]:
+    """Roll up recall query log usage over the last `days` days."""
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
+
+    total = 0
+    misses = 0
+    empty = 0
+    scope_counter: Counter[str] = Counter()
+    query_counts: Counter[str] = Counter()
+    query_result_sums: dict[str, int] = defaultdict(int)
+
+    for record in iter_jsonl(RECALL_LOG_PATH):
+        ts = record.get("ts")
+        if not isinstance(ts, str) or ts < cutoff:
+            continue
+        total += 1
+        n_results = record.get("n_results", 0)
+        if not isinstance(n_results, int):
+            n_results = 0
+        if n_results == 0:
+            misses += 1
+        query = record.get("query", "")
+        if not isinstance(query, str) or not query.strip():
+            empty += 1
+        else:
+            query_counts[query] += 1
+            query_result_sums[query] += n_results
+        scope = record.get("scope")
+        if isinstance(scope, str):
+            scope_counter[scope] += 1
+
+    top_queries = [
+        {
+            "query": q,
+            "count": c,
+            "avg_results": round(query_result_sums[q] / c, 2),
+        }
+        for q, c in query_counts.most_common(10)
+    ]
+
+    miss_rate = round(misses / total, 4) if total else 0.0
+
+    return {
+        "window_days": days,
+        "total_queries": total,
+        "miss_rate": miss_rate,
+        "empty_query_count": empty,
+        "top_queries": top_queries,
+        "scope_breakdown": dict(scope_counter),
+    }
+
+
 async def _preview_for(db: Any, source_type: str, source_id: str) -> str:
     """Return a short preview string for a result, joined from the source row.
 
@@ -179,51 +231,4 @@ def register(mcp: FastMCP) -> None:
         top queries by count, and per-scope usage. Empty-string queries are
         counted separately so they don't distort the top-queries ranking.
         """
-        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
-
-        total = 0
-        misses = 0
-        empty = 0
-        scope_counter: Counter[str] = Counter()
-        query_counts: Counter[str] = Counter()
-        query_result_sums: dict[str, int] = defaultdict(int)
-
-        for record in iter_jsonl(RECALL_LOG_PATH):
-            ts = record.get("ts")
-            if not isinstance(ts, str) or ts < cutoff:
-                continue
-            total += 1
-            n_results = record.get("n_results", 0)
-            if not isinstance(n_results, int):
-                n_results = 0
-            if n_results == 0:
-                misses += 1
-            query = record.get("query", "")
-            if not isinstance(query, str) or not query.strip():
-                empty += 1
-            else:
-                query_counts[query] += 1
-                query_result_sums[query] += n_results
-            scope = record.get("scope")
-            if isinstance(scope, str):
-                scope_counter[scope] += 1
-
-        top_queries = [
-            {
-                "query": q,
-                "count": c,
-                "avg_results": round(query_result_sums[q] / c, 2),
-            }
-            for q, c in query_counts.most_common(10)
-        ]
-
-        miss_rate = round(misses / total, 4) if total else 0.0
-
-        return {
-            "window_days": days,
-            "total_queries": total,
-            "miss_rate": miss_rate,
-            "empty_query_count": empty,
-            "top_queries": top_queries,
-            "scope_breakdown": dict(scope_counter),
-        }
+        return collect_recall_stats(days)

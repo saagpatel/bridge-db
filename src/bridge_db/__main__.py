@@ -1,9 +1,10 @@
-"""Entry point: python -m bridge_db [--doctor|--status]"""
+"""Entry point: python -m bridge_db [--doctor|--status|--dogfood]"""
 
 import argparse
 import asyncio
 import sys
 from datetime import UTC
+from typing import Any
 
 
 async def _run_doctor() -> bool:
@@ -124,10 +125,86 @@ async def run_status() -> bool:
     return bool(summary["ok"])
 
 
+def _latest_detail(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "none"
+    detail = rows[0].get("detail")
+    return str(detail) if detail is not None else "none"
+
+
+def _has_detailed_mark_audit(rows: list[dict[str, Any]]) -> bool:
+    if not rows:
+        return True
+    detail = str(rows[0].get("detail") or "")
+    return all(token in detail for token in ("activity_ids=", "updated_ids=", "missing_ids="))
+
+
+async def run_dogfood() -> bool:
+    """Run the read-only bridge observability dogfood checklist."""
+    from bridge_db import config
+    from bridge_db.db import open_db
+    from bridge_db.tools.audit import collect_audit_tail
+    from bridge_db.tools.health import collect_health_metrics, collect_status_summary
+    from bridge_db.tools.recall import collect_recall_stats
+
+    db = await open_db(config.DB_PATH)
+    try:
+        summary = await collect_status_summary(db)
+        health = await collect_health_metrics(db)
+    finally:
+        await db.close()
+
+    recent_audit = collect_audit_tail(limit=10)
+    recent_confirm = collect_audit_tail(tool="confirm_shipped_sync", limit=10)
+    recent_mark = collect_audit_tail(tool="mark_shipped_processed", limit=10)
+    recall = collect_recall_stats(days=7)
+    mark_detail_is_current = _has_detailed_mark_audit(recent_mark)
+
+    print("bridge-db dogfood")
+    print(f"  Overall: {summary['overall']}")
+    print(
+        "  Signals:"
+        f" pending_handoffs={summary['signals']['pending_handoffs']},"
+        f" unprocessed_shipped={summary['signals']['unprocessed_shipped']},"
+        " processed_shipped_without_receipt="
+        f"{summary['signals']['processed_shipped_without_receipt']}"
+    )
+    print(
+        "  WAL:"
+        f" size_bytes={health['wal_size_bytes']}, warning={health['wal_warning']}"
+    )
+    print(
+        "  Recall:"
+        f" queries_7d={recall['total_queries']},"
+        f" miss_rate={recall['miss_rate']},"
+        f" scopes={recall['scope_breakdown']}"
+    )
+    print(f"  Recent audit rows checked: {len(recent_audit)}")
+    print(f"  Latest confirm_shipped_sync: {_latest_detail(recent_confirm)}")
+    print(f"  Latest mark_shipped_processed: {_latest_detail(recent_mark)}")
+    print(
+        "  Compatibility audit detail:"
+        f" {'current' if mark_detail_is_current else 'legacy terse detail observed'}"
+    )
+
+    return bool(
+        summary["ok"]
+        and summary["signals"]["pending_handoffs"] == 0
+        and summary["signals"]["unprocessed_shipped"] == 0
+        and summary["signals"]["processed_shipped_without_receipt"] == 0
+        and not health["wal_warning"]
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="bridge-db")
     parser.add_argument("--doctor", action="store_true", help="Run diagnostics and exit")
     parser.add_argument("--status", action="store_true", help="Print a compact bridge summary")
+    parser.add_argument(
+        "--dogfood",
+        action="store_true",
+        help="Run the read-only bridge observability dogfood checklist",
+    )
     args, _ = parser.parse_known_args()
 
     if args.doctor:
@@ -135,6 +212,9 @@ def main() -> None:
         sys.exit(0 if ok else 1)
     if args.status:
         ok = asyncio.run(run_status())
+        sys.exit(0 if ok else 1)
+    if args.dogfood:
+        ok = asyncio.run(run_dogfood())
         sys.exit(0 if ok else 1)
 
     from bridge_db.server import mcp
