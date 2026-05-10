@@ -1,5 +1,6 @@
 """Tests for the bridge-db CLI helpers."""
 
+import json
 import os
 import subprocess
 import sys
@@ -8,7 +9,8 @@ from pathlib import Path
 import pytest
 
 import bridge_db.config as cfg
-from bridge_db.__main__ import run_status
+import bridge_db.tools.recall as recall_tool
+from bridge_db.__main__ import run_dogfood, run_status
 from bridge_db.db import open_db
 
 
@@ -73,11 +75,84 @@ async def test_run_status_reports_degraded_when_bridge_file_missing(
     assert "exists=False, age=missing" in captured
 
 
+@pytest.mark.asyncio
+async def test_run_dogfood_reports_read_only_observability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    bridge_path = tmp_path / "claude_ai_context.md"
+    audit_log_path = tmp_path / "audit.jsonl"
+    recall_log_path = tmp_path / "recall_query_log.jsonl"
+    bridge_path.write_text("# bridge\n", encoding="utf-8")
+    audit_log_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2026-04-17T00:00:00Z",
+                        "tool": "confirm_shipped_sync",
+                        "caller": "codex",
+                        "project": "bridge-db",
+                        "ok": True,
+                        "detail": "activity_id=1 downstream=notion:abc",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-04-17T00:01:00Z",
+                        "tool": "mark_shipped_processed",
+                        "caller": None,
+                        "project": None,
+                        "ok": True,
+                        "detail": (
+                            "activity_ids=[1] updated_ids=[1] missing_ids=[] updated=1/1"
+                        ),
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    recall_log_path.write_text(
+        json.dumps(
+            {
+                "ts": "2026-04-17T00:02:00Z",
+                "query": "bridge-db",
+                "scope": "activity",
+                "limit": 10,
+                "n_results": 1,
+                "caller": None,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    monkeypatch.setattr(cfg, "BRIDGE_FILE_PATH", bridge_path)
+    monkeypatch.setattr(cfg, "AUDIT_LOG_PATH", audit_log_path)
+    monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", recall_log_path)
+
+    db = await open_db(db_path)
+    await db.close()
+
+    ok = await run_dogfood()
+    captured = capsys.readouterr().out
+
+    assert ok is True
+    assert "bridge-db dogfood" in captured
+    assert "processed_shipped_without_receipt=0" in captured
+    assert "Latest confirm_shipped_sync: activity_id=1 downstream=notion:abc" in captured
+    assert "Compatibility audit detail: current" in captured
+
+
 @pytest.mark.parametrize(
     ("flag", "expected_text"),
     [
         ("--status", "bridge-db status"),
         ("--doctor", "DB opens (WAL + schema)"),
+        ("--dogfood", "bridge-db dogfood"),
     ],
 )
 def test_cli_entrypoints_smoke(flag: str, expected_text: str, tmp_path: Path) -> None:
