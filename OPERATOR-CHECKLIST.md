@@ -122,6 +122,27 @@ Manual equivalent:
    planning artifacts as bridge-db bugs. Those sources are intentionally outside
    the DB; bridge-db is a state bridge, not a general knowledge store.
 
+## Post-Sync Review
+
+Use [POST-SYNC-REVIEW.md](POST-SYNC-REVIEW.md) after scheduled Bridge Syncs,
+manual shipped-event reconciliation, or a bridge-sync burn-in heartbeat.
+
+Minimum clean proof:
+
+1. `uv run python -m bridge_db --status` reports healthy state.
+2. `uv run python -m bridge_db --dogfood` reports no pending handoffs, no
+   unprocessed shipped events, no receiptless processed shipped events, and no
+   WAL warning.
+3. `mcp__bridge_db__export_bridge_markdown()` returns `ok=true` and a nonzero
+   byte count.
+4. A follow-up status check shows the markdown bridge file is fresh.
+5. Scheduled automation output is classified from runtime/session evidence, not
+   from config or inventory alone.
+
+If a scheduled bridge-sync session lacks a clean final report, keep that fact
+visible while grounding the project verdict in live bridge-db status, health,
+dogfood, shipped-event, and export proof.
+
 ## Failure Clues
 
 - If Claude.ai cannot see the tools, check whether the `mcpServers` block was added to the correct config file.

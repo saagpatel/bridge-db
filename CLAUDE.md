@@ -66,8 +66,10 @@ Three PRs on top of the FTS5 closure:
 - Live bridge status is healthy: schema v4, bridge file present, no pending handoffs, no unprocessed shipped events, and bridge-sync now prefers receipt-backed `confirm_shipped_sync` after downstream Notion proof.
 - Dependabot PR #13 (`python-multipart` 0.0.26 -> 0.0.27 in `uv.lock`) was checked out, verified locally with the full canonical suite, and merged.
 - Local verification remains green: `uv run pytest`, `uv run pyright`, `uv run ruff check`, `uv run python -m bridge_db --doctor`, `uv run python -m bridge_db --status`, and `uv run python -m bridge_db --dogfood`.
+- A post-sync review checklist now lives in `POST-SYNC-REVIEW.md`. Use it after scheduled Bridge Syncs or shipped-event reconciliation to prove DB state, markdown export freshness, scheduled-run evidence, and scorecard updates without relying on chat memory.
+- Dependency drift is currently a maintenance watch item, not an emergency: `uv tree --outdated` reports small patch/minor drift in `mcp`, `pydantic`, `pydantic-core`, `pydantic-settings`, `sse-starlette`, `packaging`, `ruff`, and a larger transitive `cryptography` update. Handle this in a dedicated PR after bridge-sync burn-in evidence is clean.
 
-If resuming: project is idle. Any new work should respect the closed-scope banner in the semantic-memory plan. Next maintenance tasks (low priority): watch the next scheduled bridge-sync run for a receipt-backed shipped-event confirmation, watch for Notion OS / personal-ops caller volume changes, and keep docs aligned with any MCP surface changes.
+If resuming: project is idle except for the scheduled bridge-sync burn-in review and the dependency watch item above. Any new work should respect the closed-scope banner in the semantic-memory plan. Next maintenance tasks (low priority): finish the post-sync review from `POST-SYNC-REVIEW.md`, watch for Notion OS / personal-ops caller volume changes, and keep docs aligned with any MCP surface changes.
 
 ## Registration
 

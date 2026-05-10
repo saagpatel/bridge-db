@@ -17,8 +17,11 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
 - Local verification is currently green as of 2026-05-09: `146` tests passing,
   `ruff` clean, `pyright` clean, and live `--doctor` / `--status` / `--dogfood` checks healthy.
 - Project is in steady maintenance. Scope is pinned to cross-system *state* coordination plus lexical `recall` plus observability; it is not a knowledge store.
-- Dependency maintenance is current; the recent `python-multipart` lockfile bump
-  was merged before the shipped-event sync hardening work.
+- Dependency maintenance has a small live watch item from `uv tree --outdated`:
+  patch/minor drift exists in `mcp`, `pydantic`, `pydantic-core`,
+  `pydantic-settings`, `sse-starlette`, `packaging`, `ruff`, and
+  `cryptography`. Treat this as a dedicated maintenance PR after the
+  bridge-sync burn-in review, not as urgent feature work.
 
 ## Architecture
 
@@ -106,6 +109,7 @@ The current operating model is:
 ## Docs
 
 - [`OPERATOR-CHECKLIST.md`](OPERATOR-CHECKLIST.md) — Local verification and Claude.ai registration checklist
+- [`POST-SYNC-REVIEW.md`](POST-SYNC-REVIEW.md) — Bridge-sync and shipped-event post-run evidence checklist
 - [`ROADMAP.md`](ROADMAP.md) — Execution roadmap for the next integration phases
 - [`PHASE-3-DECISION.md`](PHASE-3-DECISION.md) — Architectural decision on watcher vs startup sync
 - [`codex-migration.md`](codex-migration.md) — Per-skill migration instructions for Codex consumers
