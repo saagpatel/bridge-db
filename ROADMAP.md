@@ -175,5 +175,7 @@ Future work is maintenance-only:
 - Keep docs and tool contracts aligned when MCP surfaces change.
 - Prefer `confirm_shipped_sync` over raw `mark_shipped_processed` whenever a shipped event was synced to a downstream system.
 - Watch for WAL bloat via `health.wal_warning` (>10 MiB). Run `PRAGMA wal_checkpoint(TRUNCATE)` if needed.
-- Apply security/dependency updates to `mcp`, `aiosqlite`, `pydantic`.
+- Apply security/dependency updates in dedicated maintenance PRs. Current drift
+  should be triaged with `uv tree --outdated`; patch/minor updates are welcome
+  after bridge-sync burn-in evidence is clean.
 - Reopen the roadmap only if a concrete new cross-system coordination need surfaces — not to expand scope into knowledge search.
