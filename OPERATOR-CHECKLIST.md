@@ -40,7 +40,7 @@ Checklist
 
 ## Current Verified Local State
 
-Verified on 2026-05-09.
+Verified on 2026-05-10.
 
 - `uv run pytest` passes locally with 146 tests.
 - `uv run pyright` passes locally.
@@ -56,11 +56,14 @@ Verified on 2026-05-09.
 - Latest local repo verification is green: `146` tests, `ruff` clean, `pyright` clean.
 - Live status currently reports no pending handoffs and no unprocessed shipped events.
 - Dependabot PR #13 was verified locally against the canonical suite and merged.
+- Bridge Sync burn-in review is complete and the one-time heartbeat is retired.
+- `POST-SYNC-REVIEW.md` is the checklist to use after future scheduled Bridge
+  Syncs or shipped-event reconciliation.
 
 Conclusion
 - The documented registration path is still the correct target path.
 - The local environment is now configured for Claude Desktop to launch `bridge-db`.
-- The main cleanup and hardening cycle is complete.
+- The main cleanup, hardening, and burn-in review cycle is complete.
 - The current operating model is: direct MCP first, startup sync for Claude.ai-owned file fallback, and exported markdown as compatibility infrastructure.
 
 ## Recommended First Claude.ai Smoke Test
