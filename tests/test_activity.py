@@ -133,14 +133,51 @@ async def test_mark_shipped_processed_idempotent(
 
     result1 = await fns["mark_shipped_processed"](activity_ids=[activity_id], ctx=ctx)
     assert result1["updated"] == 1
+    assert result1["activity_ids"] == [activity_id]
+    assert result1["updated_ids"] == [activity_id]
+    assert result1["missing_ids"] == []
 
     result2 = await fns["mark_shipped_processed"](activity_ids=[activity_id], ctx=ctx)
     assert result2["updated"] == 0
+    assert result2["activity_ids"] == [activity_id]
+    assert result2["updated_ids"] == []
+    assert result2["missing_ids"] == []
 
     cursor2 = await db.execute("SELECT tags FROM activity_log WHERE id = ?", (activity_id,))
     row2 = await cursor2.fetchone()
     assert row2 is not None
     assert json.loads(row2["tags"]).count("PROCESSED") == 1
+
+
+async def test_mark_shipped_processed_audit_names_activity_ids(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Compatibility processing audit rows should be enough to review what was touched."""
+    audit_path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(config, "AUDIT_LOG_PATH", audit_path)
+
+    ctx = make_ctx(db)
+    await fns["log_activity"](caller="cc", project_name="A", summary="s", tags=["SHIPPED"], ctx=ctx)
+    cursor = await db.execute("SELECT id FROM activity_log")
+    row = await cursor.fetchone()
+    assert row is not None
+    activity_id = row["id"]
+    missing_id = activity_id + 999
+
+    result = await fns["mark_shipped_processed"](
+        activity_ids=[activity_id, missing_id], ctx=ctx
+    )
+
+    assert result["updated"] == 1
+    assert result["activity_ids"] == [activity_id, missing_id]
+    assert result["updated_ids"] == [activity_id]
+    assert result["missing_ids"] == [missing_id]
+    audit_lines = audit_path.read_text(encoding="utf-8").splitlines()
+    audit_record = json.loads(audit_lines[-1])
+    assert audit_record["tool"] == "mark_shipped_processed"
+    assert f"activity_ids=[{activity_id}, {missing_id}]" in audit_record["detail"]
+    assert f"updated_ids=[{activity_id}]" in audit_record["detail"]
+    assert f"missing_ids=[{missing_id}]" in audit_record["detail"]
 
 
 async def test_mark_shipped_processed_empty_raises(

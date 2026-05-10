@@ -124,6 +124,11 @@ mcp__bridge_db__confirm_shipped_sync(...) # record downstream proof, then mark p
 mcp__bridge_db__get_cost_history()          # cost trend
 ```
 
+`mark_shipped_processed` remains a compatibility path only. If it appears in
+`audit_tail`, use the audit `detail` field (`activity_ids`, `updated_ids`,
+`missing_ids`) plus `status.processed_shipped_without_receipt` to confirm no
+receipt-backed shipped event was bypassed.
+
 ### update_section (Claude.ai writes)
 
 When Claude.ai edits Career, Speaking, Research, or Capabilities sections:
