@@ -246,6 +246,8 @@ def register(mcp: FastMCP) -> None:
 
         db = get_db(ctx)
         updated = 0
+        updated_ids: list[int] = []
+        missing_ids: list[int] = []
 
         # Tags are not indexed in content_index (see fts_text_for_activity), so
         # updating tags does not require re-indexing. If fts_text_for_activity
@@ -255,6 +257,7 @@ def register(mcp: FastMCP) -> None:
             row = await cursor.fetchone()
             if row is None:
                 logger.warning("mark_shipped_processed: id %d not found, skipping", activity_id)
+                missing_ids.append(activity_id)
                 continue
             current_tags: list[str] = json.loads(row["tags"])
             if "PROCESSED" not in current_tags:
@@ -264,6 +267,7 @@ def register(mcp: FastMCP) -> None:
                     (json.dumps(current_tags), activity_id),
                 )
                 updated += 1
+                updated_ids.append(activity_id)
 
         await db.commit()
 
@@ -274,10 +278,20 @@ def register(mcp: FastMCP) -> None:
             None,
             None,
             ok=True,
-            detail=f"updated {updated}/{len(activity_ids)}",
+            detail=(
+                f"activity_ids={activity_ids} updated_ids={updated_ids} "
+                f"missing_ids={missing_ids} updated={updated}/{len(activity_ids)}"
+            ),
         )
         logger.info("mark_shipped_processed: updated %d/%d entries", updated, len(activity_ids))
-        return {"ok": True, "updated": updated, "total": len(activity_ids)}
+        return {
+            "ok": True,
+            "updated": updated,
+            "total": len(activity_ids),
+            "activity_ids": activity_ids,
+            "updated_ids": updated_ids,
+            "missing_ids": missing_ids,
+        }
 
     @mcp.tool()
     async def confirm_shipped_sync(
