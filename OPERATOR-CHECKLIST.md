@@ -40,13 +40,15 @@ Checklist
 
 ## Current Verified Local State
 
-Verified on 2026-05-10.
+Routine verifier refreshed on 2026-05-16. Claude Desktop registration details
+below remain from the earlier integration verification.
 
 - `uv run pytest` passes locally with 146 tests.
 - `uv run pyright` passes locally.
 - `uv run ruff check` passes locally.
 - `uv run python -m bridge_db --doctor` passes locally.
 - `uv run python -m bridge_db --status` reports healthy bridge state.
+- `uv run python -m bridge_db --dogfood` reports a clean shipped-event queue.
 - Claude Desktop config exists at `~/Library/Application Support/Claude/claude_desktop_config.json`.
 - That config now contains an `mcpServers.bridge-db` registration pointing at this repo.
 - The config file parses as valid JSON after the change.

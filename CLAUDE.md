@@ -49,7 +49,7 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 - Shipped-event sync hardening is in place: `confirm_shipped_sync` requires a downstream system/ref, stores a receipt, then adds the `PROCESSED` tag. `mark_shipped_processed` remains as a compatibility path, but the receipt-backed tool is preferred for bridge-sync work.
 - `processed_shipped_without_receipt` is now visible in `health` / `status` so operators can spot legacy/manual processed shipped events without treating them as bridge health failures.
 - `uv run python -m bridge_db --dogfood` is the repeatable read-only pass for post-sync checks: status signals, WAL warning, recall usage, and shipped-sync audit details.
-- Latest verification on 2026-05-10: `146` tests green; `ruff` and `pyright` clean;
+- Latest verification on 2026-05-16: `146` tests green; `ruff` and `pyright` clean;
   `--doctor`, `--status`, and `--dogfood` report healthy live bridge state.
 - The project is now in a steady maintenance state. Scope: cross-system *state* coordination (handoffs, snapshots, activity, four Claude.ai-owned context sections) + lexical `recall` over that content + observability over the JSONL logs.
 
@@ -67,7 +67,7 @@ Three PRs on top of the FTS5 closure:
 - Dependabot PR #13 (`python-multipart` 0.0.26 -> 0.0.27 in `uv.lock`) was checked out, verified locally with the full canonical suite, and merged.
 - Local verification remains green: `uv run pytest`, `uv run pyright`, `uv run ruff check`, `uv run python -m bridge_db --doctor`, `uv run python -m bridge_db --status`, and `uv run python -m bridge_db --dogfood`.
 - A post-sync review checklist now lives in `POST-SYNC-REVIEW.md`. Use it after scheduled Bridge Syncs or shipped-event reconciliation to prove DB state, markdown export freshness, scheduled-run evidence, and scorecard updates without relying on chat memory.
-- Dependency drift was handled in PR #20 (`chore(deps): refresh bridge-db lockfile`) and merged to `main` as `0ee0ecf`. The latest `uv tree --outdated` pass resolves to the refreshed package tree without a remaining tracked update list.
+- Dependency drift was handled in PR #20 (`chore(deps): refresh bridge-db lockfile`) and merged to `main` as `0ee0ecf`. A newer 2026-05-16 `uv tree --outdated` probe shows fresh low-priority drift (`idna`, `python-multipart`, `sse-starlette`, `uvicorn`, `ruff`); treat that as a separate dependency-maintenance pass because several are MCP/runtime-adjacent.
 
 ## Recent maintenance log (2026-05-10)
 
@@ -75,7 +75,13 @@ Three PRs on top of the FTS5 closure:
 - The one-time `bridge-sync-burn-in-review` heartbeat was retired after the review and is now paused with no next run scheduled.
 - The active automation contract table was updated so it no longer lists the retired heartbeat; operating-layer checks returned to 14 active scheduled automations and 0 active heartbeats.
 
-If resuming: project is idle in steady maintenance. Any new work should respect the closed-scope banner in the semantic-memory plan. Next maintenance tasks (low priority): watch for downstream caller volume changes, keep docs aligned with any MCP surface changes, and use `POST-SYNC-REVIEW.md` after future scheduled Bridge Syncs.
+## Recent maintenance log (2026-05-16)
+
+- Reconciled 7 unprocessed `SHIPPED` activity events to Notion proof using receipt-backed `confirm_shipped_sync`; `shipped_sync_receipts` is now 20 and `unprocessed_shipped=0`.
+- Updated existing Notion targets for `personal-ops` and `notification-hub`, and created minimal Local Portfolio rows for `claude-code-harness` and `SecondBrain` because no exact rows existed.
+- Refreshed the markdown bridge mirror with `export_bridge_markdown`; `--status`, `--doctor`, `--dogfood`, `pytest`, `pyright`, and `ruff` are all green after the reconciliation.
+
+If resuming: project is idle in steady maintenance. Any new work should respect the closed-scope banner in the semantic-memory plan. Next maintenance tasks (low priority): watch for downstream caller volume changes, keep docs aligned with any MCP surface changes, use `POST-SYNC-REVIEW.md` after future scheduled Bridge Syncs, and triage the 2026-05-16 dependency drift in a dedicated pass.
 
 ## Registration
 
