@@ -23,18 +23,19 @@ ruff + pyright clean. Phases 0-6 all shipped.
 
 Only `origin` (`saagpatel/bridge-db`). Clean migration state.
 
-`origin/main`:
+`origin/main` at the 2026-05-16 maintenance checkpoint:
 
-- Tip: `91c38a0` Merge pull request #22 from saagpatel/codex/bridge-db-operator-checklist-refresh
+- Tip: `13f2352` docs: add portfolio disposition for operator-tool cluster #5 (#23)
 - Recent maintenance cadence:
+  - `13f2352` docs: add portfolio disposition for operator-tool cluster #5
   - `91c38a0` Merge: operator checklist refresh
   - `f8717cc` docs: refresh bridge-db operator checklist
   - `78095b2` Merge: maintenance state refresh
   - `b615615` docs: refresh bridge-db maintenance state
   - `0ee0ecf` chore(deps): refresh bridge-db lockfile
   - `766b5cd` docs: add post-sync review checklist
-- **No `pyproject.toml` for PyPI publishing** declared — local
-  `uv tool install` or `uv sync` workflow
+- `pyproject.toml` exists for local package metadata and tooling, but no public
+  PyPI publishing workflow is declared; use the local `uv` workflow.
 - Repo tree includes:
   - `src/` (Python source for 23 MCP tools)
   - `tests/` (146 tests)
@@ -208,9 +209,9 @@ unlikely).
 
 | Field | Value |
 |---|---|
-| `origin/main` tip | `91c38a0` Merge pull request #22 (operator checklist refresh) |
+| `origin/main` tip | `13f2352` docs: add portfolio disposition for operator-tool cluster #5 |
 | Default branch | `main` |
-| Build system | Python 3.11+ + uv + SQLite (WAL mode) + MCP stdio |
+| Build system | Python 3.12+ + uv + SQLite (WAL mode) + MCP stdio |
 | Distribution | **MCP stdio** spawned per client |
 | Audience | **Operator self** (Claude.ai + Claude Code + Codex three-way bridge) |
 | Test count | **146 tests passing** |

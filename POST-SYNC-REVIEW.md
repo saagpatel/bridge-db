@@ -86,9 +86,11 @@ Classify results before upgrading:
   validation, crypto, or server behavior
 - defer: any update that would distract from proving bridge-db/export health
 
-As of the 2026-05-10 maintenance pass, the prior dependency drift was handled
-in PR #20 and `uv tree --outdated` resolves to the refreshed package tree
-without a remaining tracked update list.
+As of the 2026-05-16 maintenance pass, the prior dependency drift handled in
+PR #20 remains closed, but a fresh `uv tree --outdated` probe shows new
+low-priority drift (`idna`, `python-multipart`, `sse-starlette`, `uvicorn`,
+`ruff`). Treat runtime or MCP-adjacent updates as a dedicated dependency pass,
+not as part of shipped-event reconciliation.
 
 ## Closeout
 
