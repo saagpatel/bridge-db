@@ -49,6 +49,8 @@ below remain from the earlier integration verification.
 - `uv run python -m bridge_db --doctor` passes locally.
 - `uv run python -m bridge_db --status` reports healthy bridge state.
 - `uv run python -m bridge_db --dogfood` reports a clean shipped-event queue.
+- `claude mcp list` reports `bridge-db` connected through this repo.
+- Codex config includes the `mcp_servers.bridge-db` registration for this repo.
 - Claude Desktop config exists at `~/Library/Application Support/Claude/claude_desktop_config.json`.
 - That config now contains an `mcpServers.bridge-db` registration pointing at this repo.
 - The config file parses as valid JSON after the change.
