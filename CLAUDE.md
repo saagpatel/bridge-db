@@ -67,7 +67,7 @@ Three PRs on top of the FTS5 closure:
 - Dependabot PR #13 (`python-multipart` 0.0.26 -> 0.0.27 in `uv.lock`) was checked out, verified locally with the full canonical suite, and merged.
 - Local verification remains green: `uv run pytest`, `uv run pyright`, `uv run ruff check`, `uv run python -m bridge_db --doctor`, `uv run python -m bridge_db --status`, and `uv run python -m bridge_db --dogfood`.
 - A post-sync review checklist now lives in `POST-SYNC-REVIEW.md`. Use it after scheduled Bridge Syncs or shipped-event reconciliation to prove DB state, markdown export freshness, scheduled-run evidence, and scorecard updates without relying on chat memory.
-- Dependency drift was handled in PR #20 (`chore(deps): refresh bridge-db lockfile`) and merged to `main` as `0ee0ecf`. A newer 2026-05-16 `uv tree --outdated` probe shows fresh low-priority drift (`idna`, `python-multipart`, `sse-starlette`, `uvicorn`, `ruff`); treat that as a separate dependency-maintenance pass because several are MCP/runtime-adjacent.
+- Dependency drift was handled in PR #20 (`chore(deps): refresh bridge-db lockfile`) and merged to `main` as `0ee0ecf`. A follow-up 2026-05-16 dependency pass refreshed the lockfile for `idna`, `python-multipart`, `sse-starlette`, `uvicorn`, and `ruff`; the post-refresh `uv tree --outdated` probe has no remaining tracked drift.
 
 ## Recent maintenance log (2026-05-10)
 
@@ -80,8 +80,9 @@ Three PRs on top of the FTS5 closure:
 - Reconciled 7 unprocessed `SHIPPED` activity events to Notion proof using receipt-backed `confirm_shipped_sync`; `shipped_sync_receipts` is now 20 and `unprocessed_shipped=0`.
 - Updated existing Notion targets for `personal-ops` and `notification-hub`, and created minimal Local Portfolio rows for `claude-code-harness` and `SecondBrain` because no exact rows existed.
 - Refreshed the markdown bridge mirror with `export_bridge_markdown`; `--status`, `--doctor`, `--dogfood`, `pytest`, `pyright`, and `ruff` are all green after the reconciliation.
+- Refreshed dependency drift in `uv.lock` for `idna`, `python-multipart`, `sse-starlette`, `uvicorn`, and `ruff`; `uv tree --outdated` is clean afterward and the full verifier remains green.
 
-If resuming: project is idle in steady maintenance. Any new work should respect the closed-scope banner in the semantic-memory plan. Next maintenance tasks (low priority): watch for downstream caller volume changes, keep docs aligned with any MCP surface changes, use `POST-SYNC-REVIEW.md` after future scheduled Bridge Syncs, and triage the 2026-05-16 dependency drift in a dedicated pass.
+If resuming: project is idle in steady maintenance. Any new work should respect the closed-scope banner in the semantic-memory plan. Next maintenance tasks (low priority): watch for downstream caller volume changes, keep docs aligned with any MCP surface changes, use `POST-SYNC-REVIEW.md` after future scheduled Bridge Syncs, and periodically re-check MCP client integration after client or MCP package changes.
 
 ## Registration
 

@@ -18,14 +18,14 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
   `ruff` clean, `pyright` clean, and live `--doctor` / `--status` / `--dogfood` checks healthy.
 - Project is in steady maintenance. Scope is pinned to cross-system *state* coordination plus lexical `recall` plus observability; it is not a knowledge store.
 - The Bridge Sync burn-in heartbeat has been retired after a clean post-run
-  review. Dependency refresh PR #20 is merged; the latest dependency probe now
-  shows low-priority patch/runtime drift to triage separately from bridge-sync
-  cleanup.
+  review. Dependency refresh PR #20 is merged, and the 2026-05-16 dependency
+  refresh updated the lockfile for current patch/runtime drift.
 - 2026-05-16 checkpoint: bridge-db is idle in steady maintenance. The shipped-event
-  queue was reconciled to Notion proof, `shipped_sync_receipts` is at 20 rows,
-  `unprocessed_shipped=0`, and the markdown bridge mirror is fresh. Use
-  `POST-SYNC-REVIEW.md` after future Bridge Sync runs and keep new work scoped
-  to real cross-system state coordination needs.
+  queue was reconciled to Notion proof, dependency drift was refreshed,
+  `shipped_sync_receipts` is at 20 rows, `unprocessed_shipped=0`, and the
+  markdown bridge mirror is fresh. Use `POST-SYNC-REVIEW.md` after future
+  Bridge Sync runs and keep new work scoped to real cross-system state
+  coordination needs.
 
 ## Architecture
 

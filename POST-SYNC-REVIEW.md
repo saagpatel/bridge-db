@@ -87,10 +87,10 @@ Classify results before upgrading:
 - defer: any update that would distract from proving bridge-db/export health
 
 As of the 2026-05-16 maintenance pass, the prior dependency drift handled in
-PR #20 remains closed, but a fresh `uv tree --outdated` probe shows new
-low-priority drift (`idna`, `python-multipart`, `sse-starlette`, `uvicorn`,
-`ruff`). Treat runtime or MCP-adjacent updates as a dedicated dependency pass,
-not as part of shipped-event reconciliation.
+PR #20 remains closed, and the follow-up lockfile refresh for `idna`,
+`python-multipart`, `sse-starlette`, `uvicorn`, and `ruff` leaves
+`uv tree --outdated` clean. Treat future runtime or MCP-adjacent updates as a
+dedicated dependency pass, not as part of shipped-event reconciliation.
 
 ## Closeout
 
