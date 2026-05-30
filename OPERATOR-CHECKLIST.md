@@ -74,7 +74,7 @@ below remain from the earlier integration verification.
 - Claude.ai read access is confirmed with a successful `mcp__bridge_db__health()` call after restart.
 - Claude.ai direct write behavior has been proven through bridge-db MCP tools.
 - Startup sync plus export has been verified end to end.
-- Latest local repo verification is green: `147` tests, `ruff` clean, `pyright` clean.
+- Latest local repo verification is green: `148` tests, `ruff` clean, `pyright` clean.
 - Live status currently reports no pending handoffs and no unprocessed shipped events.
 - Dependency drift was refreshed through PR #27 after Dependabot PRs #25 and #26 were superseded.
 - Bridge Sync burn-in review is complete and the one-time heartbeat is retired.
@@ -144,9 +144,34 @@ Manual equivalent:
    bridge-owned state: sections, activity, snapshots, and handoffs.
 5. Confirm `uv run python -m bridge_db --status` reports `fts_missing=0` and
    `fts_orphaned=0` before trusting recall results after unusual writes.
-6. Do not treat recall misses for repo docs, Notion pages, memory files, or
+6. After a Claude Code session ends, confirm the newest `CC session ended` row is
+   indexed:
+
+   ```bash
+   sqlite3 /Users/d/.local/share/bridge-db/bridge.db \
+     "PRAGMA query_only=ON; SELECT a.id, a.timestamp, a.project_name, CASE WHEN ci.source_id IS NULL THEN 0 ELSE 1 END AS indexed FROM activity_log a LEFT JOIN content_index ci ON ci.source_type='activity' AND ci.source_id=CAST(a.id AS TEXT) WHERE a.source='cc' AND a.summary LIKE 'CC session ended%' ORDER BY a.id DESC LIMIT 3;"
+   ```
+
+   Expected result: the newest row has `indexed=1`, and `--status` still reports
+   `fts_missing=0`.
+7. Do not treat recall misses for repo docs, Notion pages, memory files, or
    planning artifacts as bridge-db bugs. Those sources are intentionally outside
    the DB; bridge-db is a state bridge, not a general knowledge store.
+
+## Retention And Receipts
+
+Activity retention and shipped-sync receipts answer different questions:
+
+- `activity_log` keeps the latest 50 rows per source for ordinary activity
+  writes. This is a convenience retention policy for recent context, not a
+  proof ledger.
+- `shipped_sync_receipts` is the downstream proof ledger for shipped events that
+  were confirmed through `confirm_shipped_sync`.
+- Claude Code SessionEnd logging uses `--log-session-boundary`; that path adds
+  an FTS row and intentionally does not run activity retention pruning.
+- If activity counts move, verify health through `--status`, `--dogfood`,
+  `processed_shipped_without_receipt=0`, and `fts_missing=0` before assuming
+  shipped-sync proof is broken.
 
 ## Post-Sync Review
 
