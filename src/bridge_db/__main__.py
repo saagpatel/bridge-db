@@ -3,7 +3,7 @@
 import argparse
 import asyncio
 import sys
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -262,6 +262,48 @@ async def run_rebuild_content_index() -> bool:
     return bool(metrics["ok"])
 
 
+async def run_log_session_boundary(
+    project_name: str, duration_minutes: str | None = None, timestamp: str | None = None
+) -> bool:
+    """Log a Claude Code session boundary through the normal activity + FTS path."""
+    from bridge_db import config
+    from bridge_db.audit import log_audit
+    from bridge_db.db import collect_fts_index_metrics, insert_activity_row, open_db
+
+    ts = timestamp or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    summary = "CC session ended"
+    if duration_minutes:
+        summary = f"CC session ended ({duration_minutes}min)"
+
+    db = await open_db(config.DB_PATH)
+    try:
+        activity_id = await insert_activity_row(
+            db,
+            source="cc",
+            timestamp=ts,
+            project_name=project_name,
+            summary=summary,
+            tags=["session-boundary"],
+        )
+        await db.commit()
+        metrics = await collect_fts_index_metrics(db)
+    finally:
+        await db.close()
+
+    log_audit(
+        "log_session_boundary",
+        "cc",
+        project_name,
+        ok=bool(metrics["ok"]),
+        detail=f"activity_id={activity_id} fts_missing={metrics['missing']}",
+    )
+    print("bridge-db session boundary")
+    print(f"  Logged: activity_id={activity_id}, project={project_name}")
+    print(f"  FTS: {_fts_detail(metrics)}")
+    print(f"  Overall: {'healthy' if metrics['ok'] else 'degraded'}")
+    return bool(metrics["ok"])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="bridge-db")
     parser.add_argument("--doctor", action="store_true", help="Run diagnostics and exit")
@@ -276,6 +318,15 @@ def main() -> None:
         action="store_true",
         help="Rebuild the FTS content_index from source tables and verify it",
     )
+    parser.add_argument(
+        "--log-session-boundary",
+        metavar="PROJECT_NAME",
+        help="Log a Claude Code session-boundary activity entry through the FTS-safe path",
+    )
+    parser.add_argument(
+        "--duration-minutes",
+        help="Optional duration value for --log-session-boundary",
+    )
     args, _ = parser.parse_known_args()
 
     if args.doctor:
@@ -289,6 +340,11 @@ def main() -> None:
         sys.exit(0 if ok else 1)
     if args.rebuild_content_index:
         ok = asyncio.run(run_rebuild_content_index())
+        sys.exit(0 if ok else 1)
+    if args.log_session_boundary:
+        ok = asyncio.run(
+            run_log_session_boundary(args.log_session_boundary, args.duration_minutes)
+        )
         sys.exit(0 if ok else 1)
 
     from bridge_db.server import mcp

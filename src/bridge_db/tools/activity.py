@@ -12,10 +12,8 @@ from pydantic import Field
 from bridge_db import config
 from bridge_db.audit import log_audit
 from bridge_db.db import (
-    fts_text_for_activity,
-    gc_fts_orphans,
     get_db,
-    upsert_fts_entry,
+    insert_activity_row,
 )
 from bridge_db.models import ACTIVITY_SOURCES, CallerID, invalid_source_error
 
@@ -61,38 +59,16 @@ def register(mcp: FastMCP) -> None:
         """Log a session activity entry. Auto-prunes to the most recent 50 entries per source."""
         db = get_db(ctx)
         ts = timestamp or str(date.today())
-        tags_json = json.dumps(tags or [])
-
-        cursor = await db.execute(
-            """
-            INSERT INTO activity_log (source, timestamp, project_name, summary, branch, tags)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (caller, ts, project_name, summary, branch, tags_json),
+        await insert_activity_row(
+            db,
+            source=caller,
+            timestamp=ts,
+            project_name=project_name,
+            summary=summary,
+            branch=branch,
+            tags=tags,
+            retention_limit=config.ACTIVITY_RETENTION_PER_SOURCE,
         )
-        activity_id = cursor.lastrowid
-
-        if activity_id is not None:
-            await upsert_fts_entry(
-                db,
-                "activity",
-                str(activity_id),
-                fts_text_for_activity(project_name, summary, branch),
-            )
-
-        # Prune to retention limit per source
-        await db.execute(
-            """
-            DELETE FROM activity_log
-            WHERE source = ? AND id NOT IN (
-                SELECT id FROM activity_log WHERE source = ?
-                ORDER BY created_at DESC LIMIT ?
-            )
-            """,
-            (caller, caller, config.ACTIVITY_RETENTION_PER_SOURCE),
-        )
-        # Drop FTS rows for any source row that the prune removed.
-        await gc_fts_orphans(db, "activity")
         await db.commit()
 
         log_audit("log_activity", caller, project_name, ok=True)

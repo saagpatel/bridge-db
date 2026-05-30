@@ -5,7 +5,7 @@ SQLite-backed MCP server for cross-system state sharing between Claude.ai, Claud
 ## Commands
 
 ```bash
-uv run pytest              # run all tests (147 total)
+uv run pytest              # run all tests (148 total)
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run ruff check --fix    # lint + auto-fix
@@ -13,6 +13,7 @@ uv run python -m bridge_db --doctor  # local environment diagnostics
 uv run python -m bridge_db --status  # compact operator summary
 uv run python -m bridge_db --dogfood # read-only observability dogfood pass
 uv run python -m bridge_db --rebuild-content-index  # repair FTS recall index drift
+uv run python -m bridge_db --log-session-boundary bridge-db  # FTS-safe CC hook logging
 uv run python -m bridge_db          # start MCP server (stdio)
 uv run python -m bridge_db.migration  # migrate from bridge markdown
 ```
@@ -34,7 +35,7 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 - Export trigger: consumers call `export_bridge_markdown` explicitly after writes
 - Startup sync trigger: Claude Code `/start` now calls `sync_from_file` before bridge reads so Claude.ai-owned file edits are imported into SQLite first
 - Logging: `logging.basicConfig(stream=sys.stderr)` — never stdout
-- Diagnostics: MCP `health` and `status` tools plus CLI `--doctor`, `--status`, `--dogfood`, and the CLI-only `--rebuild-content-index` repair path
+- Diagnostics: MCP `health` and `status` tools plus CLI `--doctor`, `--status`, `--dogfood`, the CLI-only `--rebuild-content-index` repair path, and `--log-session-boundary` for Claude Code SessionEnd hook writes
 
 ## Current project state
 
@@ -90,6 +91,7 @@ Three PRs on top of the FTS5 closure:
 - Refreshed dependency drift in `uv.lock` and raised dev dependency floors for `pytest-asyncio` and `ruff`; the full verifier remains green.
 - `--status`, `--doctor`, and `--dogfood` report healthy live bridge state with a fresh markdown mirror and no WAL warning.
 - FTS health hardening is in place: `health` / `status` / `--dogfood` now surface `fts_missing` and `fts_orphaned`, and `--rebuild-content-index` is the CLI-only repair path when drift is detected.
+- Claude Code's SessionEnd hook must use `uv run --directory /Users/d/Projects/bridge-db python -m bridge_db --log-session-boundary <project>` so session-boundary activity rows get FTS entries through the normal bridge-db write path. This hook-specific path intentionally does not run activity retention pruning.
 
 If resuming: project is idle in steady maintenance. Any new work should respect the closed-scope banner in the semantic-memory plan. Next maintenance tasks (low priority): watch for downstream caller volume changes, keep docs aligned with any MCP surface changes, use `POST-SYNC-REVIEW.md` after future scheduled Bridge Syncs, and periodically re-check MCP client integration after client or MCP package changes.
 
@@ -114,7 +116,7 @@ bridge-db is an active local project in the /Users/d/Projects portfolio.
 
 ## Current State
 
-This project is in steady-state maintenance. The codebase is stable, the DB is live, core features are shipped and documented, and observability over the two JSONL logs is now closed (was a half-built feedback loop). 23 MCP tools across 9 modules, 147 tests green, pyright + ruff clean. Scope is explicitly pinned to cross-system *state* coordination plus lexical `recall`, shipped-event sync receipts, plus observability — expansion into a knowledge store is ruled out.
+This project is in steady-state maintenance. The codebase is stable, the DB is live, core features are shipped and documented, and observability over the two JSONL logs is now closed (was a half-built feedback loop). 23 MCP tools across 9 modules, 148 tests green, pyright + ruff clean. Scope is explicitly pinned to cross-system *state* coordination plus lexical `recall`, shipped-event sync receipts, plus observability — expansion into a knowledge store is ruled out.
 
 ## Stack
 
@@ -123,12 +125,12 @@ This project is in steady-state maintenance. The codebase is stable, the DB is l
 - **Database**: SQLite via `aiosqlite`
 - **Type checking**: pyright (strict)
 - **Lint**: ruff
-- **Test**: pytest (147 tests)
+- **Test**: pytest (148 tests)
 
 ## How To Run
 
 ```bash
-uv run pytest              # run all tests (147 total)
+uv run pytest              # run all tests (148 total)
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run ruff check --fix    # lint + auto-fix
@@ -136,6 +138,7 @@ uv run python -m bridge_db --doctor  # local environment diagnostics
 uv run python -m bridge_db --status  # compact operator summary
 uv run python -m bridge_db --dogfood # read-only observability dogfood pass
 uv run python -m bridge_db --rebuild-content-index  # repair FTS recall index drift
+uv run python -m bridge_db --log-session-boundary bridge-db  # FTS-safe CC hook logging
 uv run python -m bridge_db          # start MCP server (stdio)
 uv run python -m bridge_db.migration  # migrate from bridge markdown
 ```
