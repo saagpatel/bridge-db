@@ -9,7 +9,13 @@ import pytest
 from conftest import CaptureMCP, make_ctx
 
 from bridge_db import config
-from bridge_db.db import SCHEMA_VERSION
+from bridge_db.db import (
+    SCHEMA_VERSION,
+    fts_text_for_activity,
+    fts_text_for_section,
+    fts_text_for_snapshot,
+    upsert_fts_entry,
+)
 from bridge_db.tools import health as mod
 
 
@@ -49,11 +55,15 @@ async def test_health_row_counts_reflect_data(
     await db.commit()
     ctx = make_ctx(db)
     result = await fns["health"](ctx=ctx)
+    assert result["ok"] is False
     assert result["row_counts"]["activity_log"] == 1
     assert result["row_counts"]["context_sections"] == 0
     assert result["row_counts"]["pending_handoffs"] == 0
     assert result["row_counts"]["system_snapshots"] == 0
     assert result["row_counts"]["cost_records"] == 0
+    assert result["fts_index"]["ok"] is False
+    assert result["fts_index"]["missing"] == 1
+    assert result["fts_index"]["orphaned"] == 0
 
 
 async def test_health_unprocessed_shipped_count(
@@ -150,14 +160,34 @@ async def test_status_returns_compact_operator_summary(
         "INSERT INTO context_sections (section_name, owner, content) VALUES (?, ?, ?)",
         ("career", "claude_ai", "Career notes"),
     )
+    await upsert_fts_entry(
+        db,
+        "section",
+        "career",
+        fts_text_for_section("career", "Career notes"),
+    )
     await db.execute(
         "INSERT INTO system_snapshots (system, snapshot_date, data) VALUES (?, ?, ?)",
         ("cc", "2026-04-17", '{"active_projects":"- bridge-db"}'),
     )
-    await db.execute(
+    await upsert_fts_entry(
+        db,
+        "snapshot",
+        "1",
+        fts_text_for_snapshot('{"active_projects":"- bridge-db"}'),
+    )
+    cursor = await db.execute(
         "INSERT INTO activity_log (source, timestamp, project_name, summary, tags) "
-        "VALUES ('cc', '2026-04-17', 'bridge-db', 'checked operator status', ?)",
+        "VALUES ('cc', '2026-04-17', 'bridge-db', 'checked operator status', ?) RETURNING id",
         (json.dumps(["SHIPPED"]),),
+    )
+    activity_row = await cursor.fetchone()
+    assert activity_row is not None
+    await upsert_fts_entry(
+        db,
+        "activity",
+        str(activity_row[0]),
+        fts_text_for_activity("bridge-db", "checked operator status", None),
     )
     await db.commit()
 
@@ -170,6 +200,9 @@ async def test_status_returns_compact_operator_summary(
     assert result["signals"]["pending_handoffs"] == 0
     assert result["signals"]["unprocessed_shipped"] == 1
     assert result["signals"]["processed_shipped_without_receipt"] == 0
+    assert result["signals"]["fts_missing"] == 0
+    assert result["signals"]["fts_orphaned"] == 0
+    assert result["fts_index"]["ok"] is True
     assert result["latest_snapshots"]["cc"] == "2026-04-17"
     assert result["latest_activity"]["cc"] == "2026-04-17 (bridge-db)"
 

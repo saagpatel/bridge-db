@@ -191,11 +191,13 @@ Regardless of how Claude.ai accesses bridge-db, these ownership rules hold:
 | career, speaking, research, capabilities | claude_ai only | all |
 | cc_snapshot, cc_activity | cc only | all |
 | codex_snapshot, codex_activity | codex only | all |
-| pending_handoffs | claude_ai (create), cc (clear) | all |
-| cost_records | cc, codex (own system) | all |
+| pending_handoffs | claude_ai (create), cc/codex (pick up and clear) | all |
+| cost_records | cc, codex, notion_os, personal_ops (own system) | all |
 
 The `update_section` tool enforces this at the DB layer — no path bypasses it
-(file-based writes are the current exception, handled by the file watcher future work).
+for MCP writes. Compatibility file edits are limited to Claude.ai-owned sections
+and are imported through `sync_from_file` on Claude Code startup or explicit call;
+the live watcher remains deferred.
 
 ---
 

@@ -8,7 +8,7 @@ README: "Project is in steady maintenance. Scope is pinned to
 cross-system *state* coordination plus lexical `recall` plus
 observability; it is not a knowledge store"). **Fifth
 operator-tool / dogfood cluster member**; introduces new
-sub-shape: **MCP-server-distributed**. 146 tests passing.
+sub-shape: **MCP-server-distributed**. 147 tests passing.
 ruff + pyright clean. Phases 0-6 all shipped.
 
 > Disposition uses strict `origin/main` verification.
@@ -38,7 +38,7 @@ Only `origin` (`saagpatel/bridge-db`). Clean migration state.
   PyPI publishing workflow is declared; use the local `uv` workflow.
 - Repo tree includes:
   - `src/` (Python source for 23 MCP tools)
-  - `tests/` (146 tests)
+  - `tests/` (147 tests)
   - `OPERATOR-CHECKLIST.md` + `POST-SYNC-REVIEW.md` + `ROADMAP.md`
     + `PHASE-3-DECISION.md` (operator-authored governance)
   - `integration-spec.md` + `codex-migration.md`
@@ -66,7 +66,7 @@ sections (career / speaking / research / capabilities) + system
 snapshots + handoffs + cost tracking + **FTS5 lexical `recall`**
 + observability (`audit_tail`, `recall_stats`, `health`, `status`)
 + markdown export for file-based clients. Phases 0-6 all
-shipped (Phase 6 observability shipped 2026-04-17). 146 tests
+shipped (Phase 6 observability shipped 2026-04-17). 147 tests
 passing. ruff + pyright clean. **Operator-declared steady
 maintenance** with scope pinned to cross-system state coordination
 + lexical recall + observability.
@@ -116,7 +116,7 @@ Release Frozen because:
   sufficient)
 - Scope explicitly pinned: "**not a knowledge store**" —
   operator has decided what bridge-db is for and isn't expanding
-- 146 tests passing + ruff + pyright clean — no in-flight feature
+- 147 tests passing + ruff + pyright clean — no in-flight feature
   work
 - Recent commits are docs/checklist/lockfile refresh, not
   features
@@ -148,6 +148,7 @@ trigger. Operational concerns:
    bridge-db integration after MCP major version updates.
 2. **SQLite WAL mode monitoring** — `wal_size_bytes` +
    `wal_warning` surface via `health` tool catch WAL growth;
+   FTS index integrity checks catch recall drift;
    verify alert thresholds.
 3. **`shipped_sync_receipts` audit** — `processed_shipped_without_receipt`
    soft drift signal catches older paths. Periodically clean.
@@ -196,7 +197,7 @@ unlikely).
    operator-authored governance.
 4. Verify all three MCP client integrations still functional
    (Claude.ai via Desktop, CC via skills, Codex via stdio).
-5. Run `uv sync && pytest` — expect 146 tests passing.
+5. Run `uv sync && pytest` — expect 147 tests passing.
 6. Run `ruff check` + `pyright` — expect clean.
 7. Run `--doctor`, `--status`, `--dogfood` checks — expect
    healthy.
@@ -214,7 +215,7 @@ unlikely).
 | Build system | Python 3.12+ + uv + SQLite (WAL mode) + MCP stdio |
 | Distribution | **MCP stdio** spawned per client |
 | Audience | **Operator self** (Claude.ai + Claude Code + Codex three-way bridge) |
-| Test count | **146 tests passing** |
+| Test count | **147 tests passing** |
 | Tools | **23 MCP tools** (activity, recent activity, shipped events, sections, snapshots, handoffs, cost, recall, audit_tail, recall_stats, health, status, export_bridge_markdown, sync_from_file) |
 | Phases shipped | 0-6 (Phase 6 observability shipped 2026-04-17; Phase −1 semantic memory arc closed) |
 | Data lifecycle | `~/.local/share/bridge-db/bridge.db` (SQLite WAL) + markdown export fallback |

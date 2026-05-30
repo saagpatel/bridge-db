@@ -31,9 +31,21 @@ Expected clean signals:
 - `pending_handoffs=0`
 - `unprocessed_shipped=0`
 - `processed_shipped_without_receipt=0`
+- `fts_missing=0`
+- `fts_orphaned=0`
 - `wal_warning=False`
 - latest shipped-sync audit rows use `confirm_shipped_sync` with downstream
   proof, not only `mark_shipped_processed`
+
+If FTS drift appears, run:
+
+```bash
+uv run python -m bridge_db --rebuild-content-index
+uv run python -m bridge_db --status
+uv run python -m bridge_db --dogfood
+```
+
+Do not repair `content_index` through ad hoc SQL.
 
 Then refresh the compatibility mirror through MCP:
 
@@ -108,4 +120,5 @@ uv run python -m bridge_db --dogfood
 ```
 
 Close the review only when repo checks are green, bridge-db proof is fresh, and
-scheduled-output evidence has been classified honestly.
+scheduled-output evidence has been classified honestly. A clean dogfood pass must
+include no shipped-event drift, no receipt gaps, no FTS index drift, and no WAL warning.
