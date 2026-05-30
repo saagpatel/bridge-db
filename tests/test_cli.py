@@ -232,3 +232,4 @@ asyncio.run(main())
         assert str(audit_log_path) in result.stdout
     if flag == "--status":
         assert "contexts=0" in result.stdout
+        assert "Attention:" not in result.stdout
