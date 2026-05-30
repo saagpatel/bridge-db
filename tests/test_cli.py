@@ -52,6 +52,8 @@ async def test_run_status_reports_healthy_summary(
     assert "contexts=1" in captured
     assert "pending_handoffs=0" in captured
     assert "unprocessed_shipped=1" in captured
+    assert "Attention: unprocessed_shipped=1" in captured
+    assert "dogfood will fail until cleared" in captured
     assert "cc=2026-04-17" in captured
     assert '"cc": "2026-04-17 (bridge-db)"' in captured
 
@@ -73,6 +75,7 @@ async def test_run_status_reports_degraded_when_bridge_file_missing(
     assert ok is False
     assert "Overall: degraded" in captured
     assert "exists=False, age=missing" in captured
+    assert "Attention: bridge health is degraded" in captured
 
 
 @pytest.mark.asyncio

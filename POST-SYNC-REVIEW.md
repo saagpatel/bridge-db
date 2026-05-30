@@ -17,13 +17,17 @@ scope.
 Run from this repo:
 
 ```bash
+git fetch --prune origin
+git status --short --branch
 uv run python -m bridge_db --status
 uv run python -m bridge_db --dogfood
 ```
 
 Expected clean signals:
 
+- local `main` is current with `origin/main`
 - `Overall: healthy`
+- no `Attention:` line in `--status`
 - `pending_handoffs=0`
 - `unprocessed_shipped=0`
 - `processed_shipped_without_receipt=0`
@@ -86,11 +90,9 @@ Classify results before upgrading:
   validation, crypto, or server behavior
 - defer: any update that would distract from proving bridge-db/export health
 
-As of the 2026-05-16 maintenance pass, the prior dependency drift handled in
-PR #20 remains closed, and the follow-up lockfile refresh for `idna`,
-`python-multipart`, `sse-starlette`, `uvicorn`, and `ruff` leaves
-`uv tree --outdated` clean. Treat future runtime or MCP-adjacent updates as a
-dedicated dependency pass, not as part of shipped-event reconciliation.
+As of the 2026-05-30 maintenance pass, the latest dependency drift was handled
+in PR #27. Treat future runtime or MCP-adjacent updates as a dedicated
+dependency pass, not as part of shipped-event reconciliation.
 
 ## Closeout
 
