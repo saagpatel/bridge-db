@@ -4,7 +4,20 @@ Use this checklist when verifying that bridge-db is ready for local use and that
 
 ## Local Verification
 
-Run these commands from the repo root:
+First confirm the checkout is current with GitHub:
+
+```bash
+git fetch --prune origin
+git status --short --branch
+git rev-parse HEAD origin/main
+```
+
+Expected result
+- Local `main` is not behind `origin/main`.
+- `HEAD` and `origin/main` match before declaring repo state current.
+- Merged local or remote work branches are treated as cleanup candidates.
+
+Then run these commands from the repo root:
 
 ```bash
 uv run pytest
@@ -21,6 +34,7 @@ Expected result
 - Lint passes.
 - Doctor reports the DB file, schema, bridge file, and audit log as healthy.
 - Status prints a compact operator-facing summary of bridge health, counts, and latest signals.
+- Status prints an `Attention:` line when bridge health is degraded or queue/receipt signals need follow-up.
 - Dogfood prints the read-only post-sync observability summary: status signals, WAL state, recall usage, and shipped-sync audit details.
 - The `health` MCP tool should report `ok=True` only when the DB, schema, and fallback bridge file are all present.
 
@@ -40,7 +54,7 @@ Checklist
 
 ## Current Verified Local State
 
-Routine verifier refreshed on 2026-05-16. Claude Desktop registration details
+Routine verifier refreshed on 2026-05-30. Claude Desktop registration details
 below remain from the earlier integration verification.
 
 - `uv run pytest` passes locally with 146 tests.
@@ -59,7 +73,7 @@ below remain from the earlier integration verification.
 - Startup sync plus export has been verified end to end.
 - Latest local repo verification is green: `146` tests, `ruff` clean, `pyright` clean.
 - Live status currently reports no pending handoffs and no unprocessed shipped events.
-- Dependabot PR #13 was verified locally against the canonical suite and merged.
+- Dependency drift was refreshed through PR #27 after Dependabot PRs #25 and #26 were superseded.
 - Bridge Sync burn-in review is complete and the one-time heartbeat is retired.
 - `POST-SYNC-REVIEW.md` is the checklist to use after future scheduled Bridge
   Syncs or shipped-event reconciliation.
