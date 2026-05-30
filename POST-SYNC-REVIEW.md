@@ -36,6 +36,8 @@ Expected clean signals:
 - `wal_warning=False`
 - latest shipped-sync audit rows use `confirm_shipped_sync` with downstream
   proof, not only `mark_shipped_processed`
+- if a Claude Code session ended since the last review, the newest
+  `CC session ended` row has a matching `content_index` row
 
 If FTS drift appears, run:
 
@@ -46,6 +48,16 @@ uv run python -m bridge_db --dogfood
 ```
 
 Do not repair `content_index` through ad hoc SQL.
+
+For a quick SessionEnd hook spot-check, run:
+
+```bash
+sqlite3 ~/.local/share/bridge-db/bridge.db \
+  "PRAGMA query_only=ON; SELECT a.id, a.timestamp, a.project_name, CASE WHEN ci.source_id IS NULL THEN 0 ELSE 1 END AS indexed FROM activity_log a LEFT JOIN content_index ci ON ci.source_type='activity' AND ci.source_id=CAST(a.id AS TEXT) WHERE a.source='cc' AND a.summary LIKE 'CC session ended%' ORDER BY a.id DESC LIMIT 3;"
+```
+
+Expected result: newest rows show `indexed=1`. If not, run the rebuild command
+above and audit the SessionEnd hook path before closing the review.
 
 Then refresh the compatibility mirror through MCP:
 

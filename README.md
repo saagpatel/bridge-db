@@ -103,6 +103,11 @@ args = ["run", "--directory", "~/Projects/bridge-db", "python", "-m", "bridge_db
 - Session boundary logging: Claude Code's SessionEnd hook should call `uv run --directory ~/Projects/bridge-db python -m bridge_db --log-session-boundary <project>` rather than writing SQLite directly; this path adds the FTS row and does not run activity retention pruning
 - Migration: `uv run python -m bridge_db.migration` (idempotent — safe to re-run)
 
+`activity_log` retention and shipped-sync receipts are separate surfaces:
+activity rows are recent context, while `shipped_sync_receipts` is the proof
+ledger for downstream shipped-event syncs. Treat `processed_shipped_without_receipt=0`
+and `fts_missing=0` as the primary clean signals, not raw row counts alone.
+
 ## Startup Sync
 
 Claude.ai may still write its owned sections directly to the bridge markdown file. To keep those edits from being overwritten on the next export, `sync_from_file` imports the four Claude.ai-owned sections (`career`, `speaking`, `research`, `capabilities`) from `BRIDGE_FILE_PATH` into `context_sections` before bridge consumers read from SQLite.
@@ -118,6 +123,7 @@ The current operating model is:
 
 - [`OPERATOR-CHECKLIST.md`](OPERATOR-CHECKLIST.md) — Local verification and Claude.ai registration checklist
 - [`POST-SYNC-REVIEW.md`](POST-SYNC-REVIEW.md) — Bridge-sync and shipped-event post-run evidence checklist
+- [`docs/EXTERNAL-WRITER-AUDIT.md`](docs/EXTERNAL-WRITER-AUDIT.md) — Direct bridge-db writer audit outside the repo
 - [`ROADMAP.md`](ROADMAP.md) — Execution roadmap for the next integration phases
 - [`PHASE-3-DECISION.md`](PHASE-3-DECISION.md) — Architectural decision on watcher vs startup sync
 - [`codex-migration.md`](codex-migration.md) — Per-skill migration instructions for Codex consumers
