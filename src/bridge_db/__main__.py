@@ -76,6 +76,15 @@ async def _run_doctor() -> bool:
     return all_ok
 
 
+def _fts_detail(fts_index: dict[str, Any]) -> str:
+    return (
+        f"expected={fts_index['expected']},"
+        f" indexed={fts_index['indexed']},"
+        f" missing={fts_index['missing']},"
+        f" orphaned={fts_index['orphaned']}"
+    )
+
+
 async def run_status() -> bool:
     """Print a compact operator-facing bridge status summary."""
     from bridge_db import config
@@ -114,8 +123,11 @@ async def run_status() -> bool:
         f" pending_handoffs={summary['signals']['pending_handoffs']},"
         f" unprocessed_shipped={summary['signals']['unprocessed_shipped']},"
         " processed_shipped_without_receipt="
-        f"{summary['signals']['processed_shipped_without_receipt']}"
+        f"{summary['signals']['processed_shipped_without_receipt']},"
+        f" fts_missing={summary['signals']['fts_missing']},"
+        f" fts_orphaned={summary['signals']['fts_orphaned']}"
     )
+    print(f"  FTS: {_fts_detail(summary['fts_index'])}")
     attention = _status_attention(summary)
     if attention:
         print(f"  Attention: {attention}")
@@ -143,6 +155,10 @@ def _status_attention(summary: dict[str, Any]) -> str | None:
             "processed_shipped_without_receipt="
             f"{signals['processed_shipped_without_receipt']}"
         )
+    if signals["fts_missing"]:
+        notes.append(f"fts_missing={signals['fts_missing']}")
+    if signals["fts_orphaned"]:
+        notes.append(f"fts_orphaned={signals['fts_orphaned']}")
     if not notes:
         return None
     return "; ".join(notes) + " — dogfood will fail until cleared"
@@ -196,6 +212,7 @@ async def run_dogfood() -> bool:
         "  WAL:"
         f" size_bytes={health['wal_size_bytes']}, warning={health['wal_warning']}"
     )
+    print(f"  FTS: {_fts_detail(health['fts_index'])}")
     print(
         "  Recall:"
         f" queries_7d={recall['total_queries']},"
@@ -215,8 +232,34 @@ async def run_dogfood() -> bool:
         and summary["signals"]["pending_handoffs"] == 0
         and summary["signals"]["unprocessed_shipped"] == 0
         and summary["signals"]["processed_shipped_without_receipt"] == 0
+        and health["fts_index"]["ok"]
         and not health["wal_warning"]
     )
+
+
+async def run_rebuild_content_index() -> bool:
+    """Rebuild FTS content_index and verify it matches source tables."""
+    from bridge_db import config
+    from bridge_db.db import collect_fts_index_metrics, open_db, repopulate_content_index
+
+    db = await open_db(config.DB_PATH)
+    try:
+        counts = await repopulate_content_index(db)
+        metrics = await collect_fts_index_metrics(db)
+    finally:
+        await db.close()
+
+    print("bridge-db content_index rebuild")
+    print(
+        "  Rebuilt:"
+        f" sections={counts['section']},"
+        f" activity={counts['activity']},"
+        f" snapshots={counts['snapshot']},"
+        f" handoffs={counts['handoff']}"
+    )
+    print(f"  FTS: {_fts_detail(metrics)}")
+    print(f"  Overall: {'healthy' if metrics['ok'] else 'degraded'}")
+    return bool(metrics["ok"])
 
 
 def main() -> None:
@@ -228,6 +271,11 @@ def main() -> None:
         action="store_true",
         help="Run the read-only bridge observability dogfood checklist",
     )
+    parser.add_argument(
+        "--rebuild-content-index",
+        action="store_true",
+        help="Rebuild the FTS content_index from source tables and verify it",
+    )
     args, _ = parser.parse_known_args()
 
     if args.doctor:
@@ -238,6 +286,9 @@ def main() -> None:
         sys.exit(0 if ok else 1)
     if args.dogfood:
         ok = asyncio.run(run_dogfood())
+        sys.exit(0 if ok else 1)
+    if args.rebuild_content_index:
+        ok = asyncio.run(run_rebuild_content_index())
         sys.exit(0 if ok else 1)
 
     from bridge_db.server import mcp

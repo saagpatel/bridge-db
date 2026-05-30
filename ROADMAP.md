@@ -15,7 +15,8 @@ This roadmap captures the current scope-closed state of bridge-db. All originall
 - Phase −1 of the semantic memory arc (FTS5 + `recall`) shipped; subsequent phases closed (see below).
 - Phase 6 observability shipped: `recall_stats`, `audit_tail`, and WAL-size health metric (see below).
 - Shipped-event sync hardening shipped: `confirm_shipped_sync` records downstream proof before marking shipped activity as processed.
-- Repo green at `146` tests, `ruff` and `pyright` clean.
+- FTS index health hardening shipped: `health`, `status`, and `--dogfood` now treat missing/orphaned `content_index` rows as hard recall-health drift, with CLI-only repair through `--rebuild-content-index`.
+- Repo green at `147` tests, `ruff` and `pyright` clean.
 
 ## Outcomes We Want
 
@@ -143,6 +144,7 @@ Shipped
 - `recall(query, limit, scope)` MCP tool with bm25 ranking, snippet highlights, source-row previews.
 - OR-semantic query sanitizer so multi-token queries return partial matches rather than requiring every token to co-occur.
 - Every write path hooked (4 tool modules + migration.py + codex_seed.py); auto-prune paths GC orphan FTS rows.
+- Health/status/dogfood compare source tables with `content_index` so recall drift is visible before operators rely on stale search results.
 - `recall_query_log.jsonl` logs every query for usage analysis.
 
 ## Phases 0 / 1 / 2 of the Semantic Memory Arc: CLOSED
@@ -163,6 +165,7 @@ Shipped (PRs #6, #7)
 - `recall_stats(days=7)` — analytical roll-up over `recall_query_log.jsonl`: total queries, miss_rate, top_queries (top 10 by count, empty queries separated), scope_breakdown, empty_query_count. Answers "is recall earning its keep?".
 - `audit_tail(limit, caller, tool, since, ok)` — new `tools/audit.py` module; operational tail over `audit.jsonl`, newest-first, tolerant of malformed lines and missing-`ts` records.
 - `health`: adds `wal_size_bytes` and `wal_warning` (soft signal above `config.WAL_SIZE_WARN_BYTES`, default 10 MiB). Does **not** fold into `ok`.
+- `health`: includes FTS index integrity metrics (`expected`, `indexed`, `missing`, `orphaned`, per source). Unlike WAL, FTS drift does fold into `ok` because it violates the recall mirror invariant.
 - Shared `iter_jsonl` helper in `audit.py` for tolerant JSONL reads (dict-only, malformed-line-skip, missing-file-empty).
 - Server instructions string updated to advertise `recall`, `recall_stats`, and `audit_tail`.
 
@@ -175,6 +178,7 @@ Future work is maintenance-only:
 - Keep docs and tool contracts aligned when MCP surfaces change.
 - Prefer `confirm_shipped_sync` over raw `mark_shipped_processed` whenever a shipped event was synced to a downstream system.
 - Watch for WAL bloat via `health.wal_warning` (>10 MiB). Run `PRAGMA wal_checkpoint(TRUNCATE)` if needed.
+- Watch for FTS drift via `status.signals.fts_missing` and `status.signals.fts_orphaned`. Run `uv run python -m bridge_db --rebuild-content-index` if drift appears, then rerun `--status` and `--dogfood`.
 - Apply future security/dependency updates in dedicated maintenance PRs. The
   2026-05-30 dependency refresh is complete, and the retired Bridge Sync
   burn-in heartbeat is no longer an active maintenance gate.

@@ -10,8 +10,14 @@ import pytest
 
 import bridge_db.config as cfg
 import bridge_db.tools.recall as recall_tool
-from bridge_db.__main__ import run_dogfood, run_status
-from bridge_db.db import open_db
+from bridge_db.__main__ import run_dogfood, run_rebuild_content_index, run_status
+from bridge_db.db import (
+    fts_text_for_activity,
+    fts_text_for_section,
+    fts_text_for_snapshot,
+    open_db,
+    upsert_fts_entry,
+)
 
 
 @pytest.mark.asyncio
@@ -31,14 +37,36 @@ async def test_run_status_reports_healthy_summary(
             "INSERT INTO context_sections (section_name, owner, content) VALUES (?, ?, ?)",
             ("career", "claude_ai", "Career notes"),
         )
-        await db.execute(
+        await upsert_fts_entry(
+            db,
+            "section",
+            "career",
+            fts_text_for_section("career", "Career notes"),
+        )
+        cursor = await db.execute(
             "INSERT INTO system_snapshots (system, snapshot_date, data) VALUES (?, ?, ?)",
             ("cc", "2026-04-17", '{"active_projects":"- bridge-db"}'),
         )
-        await db.execute(
+        snapshot_id = cursor.lastrowid
+        assert snapshot_id is not None
+        await upsert_fts_entry(
+            db,
+            "snapshot",
+            str(snapshot_id),
+            fts_text_for_snapshot('{"active_projects":"- bridge-db"}'),
+        )
+        cursor = await db.execute(
             "INSERT INTO activity_log (source, timestamp, project_name, summary, tags) "
             "VALUES (?, ?, ?, ?, ?)",
             ("cc", "2026-04-17", "bridge-db", "checked operator status", '["SHIPPED"]'),
+        )
+        activity_id = cursor.lastrowid
+        assert activity_id is not None
+        await upsert_fts_entry(
+            db,
+            "activity",
+            str(activity_id),
+            fts_text_for_activity("bridge-db", "checked operator status", None),
         )
         await db.commit()
     finally:
@@ -146,8 +174,45 @@ async def test_run_dogfood_reports_read_only_observability(
     assert ok is True
     assert "bridge-db dogfood" in captured
     assert "processed_shipped_without_receipt=0" in captured
+    assert "FTS: expected=0, indexed=0, missing=0, orphaned=0" in captured
     assert "Latest confirm_shipped_sync: activity_id=1 downstream=notion:abc" in captured
     assert "Compatibility audit detail: current" in captured
+
+
+@pytest.mark.asyncio
+async def test_rebuild_content_index_repairs_and_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    bridge_path = tmp_path / "claude_ai_context.md"
+    bridge_path.write_text("# bridge\n", encoding="utf-8")
+
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    monkeypatch.setattr(cfg, "BRIDGE_FILE_PATH", bridge_path)
+
+    db = await open_db(db_path)
+    try:
+        await db.execute(
+            "INSERT INTO activity_log (source, timestamp, project_name, summary) "
+            "VALUES ('cc', '2026-04-17', 'bridge-db', 'unindexed activity')"
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    assert await run_status() is False
+    degraded = capsys.readouterr().out
+    assert "fts_missing=1" in degraded
+
+    assert await run_rebuild_content_index() is True
+    rebuilt = capsys.readouterr().out
+    assert "activity=1" in rebuilt
+    assert "missing=0" in rebuilt
+    assert "Overall: healthy" in rebuilt
+
+    assert await run_rebuild_content_index() is True
+    idempotent = capsys.readouterr().out
+    assert "expected=1, indexed=1, missing=0, orphaned=0" in idempotent
 
 
 @pytest.mark.parametrize(
@@ -230,6 +295,8 @@ asyncio.run(main())
     if flag == "--doctor":
         assert str(db_path) in result.stdout
         assert str(audit_log_path) in result.stdout
+        assert "23 MCP tools" in (repo_root / "README.md").read_text(encoding="utf-8")
+        assert "147 tests" in (repo_root / "CLAUDE.md").read_text(encoding="utf-8")
     if flag == "--status":
         assert "contexts=0" in result.stdout
         assert "Attention:" not in result.stdout
