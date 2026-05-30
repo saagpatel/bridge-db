@@ -8,7 +8,7 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 
 from bridge_db import config
-from bridge_db.db import SCHEMA_VERSION, get_db
+from bridge_db.db import SCHEMA_VERSION, collect_fts_index_metrics, get_db
 
 logger = logging.getLogger("bridge_db.tools.health")
 
@@ -70,8 +70,10 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         mtime = bridge_path.stat().st_mtime
         bridge_file_age_seconds = datetime.now(UTC).timestamp() - mtime
 
+    fts_index = await collect_fts_index_metrics(db)
+
     # WAL size is a soft signal — do not fold it into `ok`.
-    ok = db_exists and schema_version == SCHEMA_VERSION and bridge_file_exists
+    ok = db_exists and schema_version == SCHEMA_VERSION and bridge_file_exists and fts_index["ok"]
 
     return {
         "ok": ok,
@@ -86,6 +88,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "processed_shipped_without_receipt_count": processed_shipped_without_receipt_count,
         "wal_size_bytes": wal_size_bytes,
         "wal_warning": wal_warning,
+        "fts_index": fts_index,
     }
 
 
@@ -149,7 +152,10 @@ async def collect_status_summary(db: Any) -> dict[str, Any]:
             "processed_shipped_without_receipt": health[
                 "processed_shipped_without_receipt_count"
             ],
+            "fts_missing": health["fts_index"]["missing"],
+            "fts_orphaned": health["fts_index"]["orphaned"],
         },
+        "fts_index": health["fts_index"],
         "latest_snapshots": latest_snapshots,
         "latest_activity": latest_activity,
         "latest_activity_json": json.dumps(latest_activity, sort_keys=True),

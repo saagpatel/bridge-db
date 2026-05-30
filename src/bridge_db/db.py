@@ -358,6 +358,87 @@ async def gc_fts_orphans(db: aiosqlite.Connection, source_type: str) -> int:
     return cursor.rowcount or 0
 
 
+_FTS_SOURCE_TABLES = {
+    "section": ("context_sections", "section_name"),
+    "activity": ("activity_log", "id"),
+    "snapshot": ("system_snapshots", "id"),
+    "handoff": ("pending_handoffs", "id"),
+}
+
+
+async def collect_fts_index_metrics(db: aiosqlite.Connection) -> dict[str, Any]:
+    """Return source-vs-FTS consistency metrics for the recall content index."""
+    sources: dict[str, dict[str, int | bool]] = {}
+    total_expected = 0
+    total_indexed = 0
+    total_missing = 0
+    total_orphaned = 0
+
+    for source_type, (table, pk) in _FTS_SOURCE_TABLES.items():
+        cursor = await db.execute(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
+        expected_row = await cursor.fetchone()
+        expected = expected_row[0] if expected_row else 0
+
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM content_index WHERE source_type = ?", (source_type,)
+        )
+        indexed_row = await cursor.fetchone()
+        indexed = indexed_row[0] if indexed_row else 0
+
+        cursor = await db.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM {table} AS source
+            WHERE NOT EXISTS (
+                SELECT 1 FROM content_index AS idx
+                WHERE idx.source_type = ?
+                  AND idx.source_id = CAST(source.{pk} AS TEXT)
+            )
+            """,  # noqa: S608 — table/pk come from a closed literal map
+            (source_type,),
+        )
+        missing_row = await cursor.fetchone()
+        missing = missing_row[0] if missing_row else 0
+
+        cursor = await db.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM content_index AS idx
+            WHERE idx.source_type = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM {table} AS source
+                  WHERE CAST(source.{pk} AS TEXT) = idx.source_id
+              )
+            """,  # noqa: S608 — table/pk come from a closed literal map
+            (source_type,),
+        )
+        orphaned_row = await cursor.fetchone()
+        orphaned = orphaned_row[0] if orphaned_row else 0
+
+        ok = expected == indexed and missing == 0 and orphaned == 0
+        sources[source_type] = {
+            "expected": expected,
+            "indexed": indexed,
+            "missing": missing,
+            "orphaned": orphaned,
+            "ok": ok,
+        }
+
+        total_expected += expected
+        total_indexed += indexed
+        total_missing += missing
+        total_orphaned += orphaned
+
+    return {
+        "ok": all(source["ok"] for source in sources.values()),
+        "expected": total_expected,
+        "indexed": total_indexed,
+        "missing": total_missing,
+        "orphaned": total_orphaned,
+        "sources": sources,
+    }
+
+
 async def repopulate_content_index(db: aiosqlite.Connection) -> dict[str, int]:
     """Rebuild content_index from all source tables. Idempotent — clears first."""
     await db.execute("DELETE FROM content_index")

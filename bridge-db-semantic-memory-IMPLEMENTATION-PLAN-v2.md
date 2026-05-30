@@ -1,5 +1,16 @@
 # bridge-db Semantic Memory Layer — Implementation Plan (v2)
 
+> **SUPERSEDED 2026-04-17 - frozen historical record.**
+>
+> Do not treat this document as live implementation guidance. It was superseded
+> by `bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md`, and the whole
+> semantic/vector arc is now closed. Current project truth lives in
+> `CLAUDE.md`, `README.md`, and `ROADMAP.md`; bridge-db remains scoped to
+> cross-system state coordination plus FTS5 lexical `recall`, shipped-sync
+> receipts, and observability.
+>
+> ---
+
 > **Revision notes (v2, 2026-04-17):** Incorporates deep-dive fixes on chunking
 > methodology (A), hybrid RRF formula lock (B), full scrubber pattern set (C),
 > migration read-during-migration rule (D), eval set methodology overhaul (E),

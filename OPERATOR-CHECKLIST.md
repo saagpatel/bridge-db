@@ -34,9 +34,10 @@ Expected result
 - Lint passes.
 - Doctor reports the DB file, schema, bridge file, and audit log as healthy.
 - Status prints a compact operator-facing summary of bridge health, counts, and latest signals.
-- Status prints an `Attention:` line when bridge health is degraded or queue/receipt signals need follow-up.
-- Dogfood prints the read-only post-sync observability summary: status signals, WAL state, recall usage, and shipped-sync audit details.
-- The `health` MCP tool should report `ok=True` only when the DB, schema, and fallback bridge file are all present.
+- Status prints an `Attention:` line when bridge health is degraded or queue/receipt/FTS signals need follow-up.
+- Dogfood prints the read-only post-sync observability summary: status signals, FTS index state, WAL state, recall usage, and shipped-sync audit details.
+- The `health` MCP tool should report `ok=True` only when the DB, schema, fallback bridge file, and FTS recall index are all healthy.
+- If `fts_missing` or `fts_orphaned` is nonzero, run `uv run python -m bridge_db --rebuild-content-index`, then rerun `--status` and `--dogfood`.
 
 ## Claude.ai Registration Check
 
@@ -57,12 +58,13 @@ Checklist
 Routine verifier refreshed on 2026-05-30. Claude Desktop registration details
 below remain from the earlier integration verification.
 
-- `uv run pytest` passes locally with 146 tests.
+- `uv run pytest` passes locally with 147 tests.
 - `uv run pyright` passes locally.
 - `uv run ruff check` passes locally.
 - `uv run python -m bridge_db --doctor` passes locally.
 - `uv run python -m bridge_db --status` reports healthy bridge state.
 - `uv run python -m bridge_db --dogfood` reports a clean shipped-event queue.
+- `uv run python -m bridge_db --dogfood` reports a clean FTS index (`fts_missing=0`, `fts_orphaned=0`).
 - `claude mcp list` reports `bridge-db` connected through this repo.
 - Codex config includes the `mcp_servers.bridge-db` registration for this repo.
 - Claude Desktop config exists at `/Users/d/Library/Application Support/Claude/claude_desktop_config.json`.
@@ -71,7 +73,7 @@ below remain from the earlier integration verification.
 - Claude.ai read access is confirmed with a successful `mcp__bridge_db__health()` call after restart.
 - Claude.ai direct write behavior has been proven through bridge-db MCP tools.
 - Startup sync plus export has been verified end to end.
-- Latest local repo verification is green: `146` tests, `ruff` clean, `pyright` clean.
+- Latest local repo verification is green: `147` tests, `ruff` clean, `pyright` clean.
 - Live status currently reports no pending handoffs and no unprocessed shipped events.
 - Dependency drift was refreshed through PR #27 after Dependabot PRs #25 and #26 were superseded.
 - Bridge Sync burn-in review is complete and the one-time heartbeat is retired.
@@ -139,7 +141,9 @@ Manual equivalent:
    `processed_shipped_without_receipt=0`.
 4. Use `mcp__bridge_db__recall_stats(days=7)` only to evaluate recall over
    bridge-owned state: sections, activity, snapshots, and handoffs.
-5. Do not treat recall misses for repo docs, Notion pages, memory files, or
+5. Confirm `uv run python -m bridge_db --status` reports `fts_missing=0` and
+   `fts_orphaned=0` before trusting recall results after unusual writes.
+6. Do not treat recall misses for repo docs, Notion pages, memory files, or
    planning artifacts as bridge-db bugs. Those sources are intentionally outside
    the DB; bridge-db is a state bridge, not a general knowledge store.
 
@@ -153,7 +157,7 @@ Minimum clean proof:
 1. `uv run python -m bridge_db --status` reports healthy state.
 2. `uv run python -m bridge_db --dogfood` reports no pending handoffs, no
    unprocessed shipped events, no receiptless processed shipped events, and no
-   WAL warning.
+   FTS drift or WAL warning.
 3. `mcp__bridge_db__export_bridge_markdown()` returns `ok=true` and a nonzero
    byte count.
 4. A follow-up status check shows the markdown bridge file is fresh.
@@ -170,4 +174,5 @@ dogfood, shipped-event, and export proof.
 - Restart Claude Desktop after config changes before assuming registration failed.
 - If the server launches but tools fail, run `uv run python -m bridge_db --doctor` locally again.
 - If `health()` reports `ok: false`, check whether the bridge markdown file is missing or stale before assuming the DB is broken.
+- If `health()` reports FTS drift, run `uv run python -m bridge_db --rebuild-content-index` rather than editing `content_index` manually.
 - If writes succeed but the markdown file looks stale, run `export_bridge_markdown` and re-check the bridge file timestamp.

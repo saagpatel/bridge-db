@@ -10,11 +10,11 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
 - Direct Claude.ai MCP read and write paths have both been validated locally.
 - Startup sync from the bridge markdown file is the chosen fallback strategy; Phase 3 closed with a "no live watcher for now" decision.
 - Recent hardening closed the remaining audit findings around duplicate handoff clearing, future-schema rejection, and health signaling for missing fallback state.
-- Phase −1 of the semantic memory arc shipped and is the **final layer**: `content_index` FTS5 vtable mirrors all content tables, `recall(query, limit, scope)` exposes it via MCP with OR-semantic multi-token queries. Vector/embedding phases were closed after a dry-run showed that "missed" queries targeted content not actually in `bridge.db`. See the closure banner at the top of [bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md](bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md).
+- Phase −1 of the semantic memory arc shipped and is the **final layer**: `content_index` FTS5 vtable mirrors all content tables, `recall(query, limit, scope)` exposes it via MCP with OR-semantic multi-token queries, and health/status now verify that source rows and FTS rows stay aligned. Vector/embedding phases were closed after a dry-run showed that "missed" queries targeted content not actually in `bridge.db`. See the closure banner at the top of [bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md](bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md).
 - **Phase 6 observability shipped (2026-04-17):** `recall_stats` reads the recall query log, `audit_tail` reads the audit log, and `health` now surfaces `wal_size_bytes` + `wal_warning`. All three close half-built feedback loops without expanding scope. See the Phase 6 section in [ROADMAP.md](ROADMAP.md).
 - Shipped-event sync hardening shipped: `confirm_shipped_sync` records downstream proof in `shipped_sync_receipts` before marking a `SHIPPED` activity event `PROCESSED`.
-- `health` / `status` also surface `processed_shipped_without_receipt` as a soft drift signal for older or manual `mark_shipped_processed` paths. Prefer `confirm_shipped_sync` for new downstream syncs.
-- Local verification is currently green as of 2026-05-30: `146` tests passing,
+- `health` / `status` also surface `processed_shipped_without_receipt` as a soft drift signal for older or manual `mark_shipped_processed` paths, and `fts_missing` / `fts_orphaned` as hard recall-index health signals. Prefer `confirm_shipped_sync` for new downstream syncs.
+- Local verification is currently green as of 2026-05-30: `147` tests passing,
   `ruff` clean, `pyright` clean, and live `--doctor` / `--status` / `--dogfood` checks healthy.
 - Project is in steady maintenance. Scope is pinned to cross-system *state* coordination plus lexical `recall` plus observability; it is not a knowledge store.
 - The Bridge Sync burn-in heartbeat has been retired after a clean post-run
@@ -65,12 +65,13 @@ Write tools enforce `caller` ownership, so systems can only write the slices of 
 ## Commands
 
 ```bash
-uv run pytest              # run all tests (146 total)
+uv run pytest              # run all tests (147 total)
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run python -m bridge_db --doctor  # local environment diagnostics
 uv run python -m bridge_db --status  # compact operator summary
 uv run python -m bridge_db --dogfood # read-only observability dogfood pass
+uv run python -m bridge_db --rebuild-content-index  # repair FTS recall index drift
 uv run python -m bridge_db          # start MCP server (stdio)
 uv run python -m bridge_db.migration  # migrate from bridge markdown
 ```
@@ -96,7 +97,8 @@ args = ["run", "--directory", "/Users/d/Projects/bridge-db", "python", "-m", "br
 - Retention: 50 activity entries per source, 10 snapshots per system
 - Health check: `health` MCP tool or `uv run python -m bridge_db --doctor`
 - Operator summary: `uv run python -m bridge_db --status`
-- Dogfood pass: `uv run python -m bridge_db --dogfood` bundles the status, WAL, recall, and shipped-sync audit checks used after bridge-sync runs
+- Dogfood pass: `uv run python -m bridge_db --dogfood` bundles the status, FTS index, WAL, recall, and shipped-sync audit checks used after bridge-sync runs
+- FTS repair: `uv run python -m bridge_db --rebuild-content-index` rebuilds the local `content_index` from source tables when health reports recall-index drift
 - Migration: `uv run python -m bridge_db.migration` (idempotent — safe to re-run)
 
 ## Startup Sync
