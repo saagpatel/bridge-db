@@ -116,6 +116,9 @@ async def run_status() -> bool:
         " processed_shipped_without_receipt="
         f"{summary['signals']['processed_shipped_without_receipt']}"
     )
+    attention = _status_attention(summary)
+    if attention:
+        print(f"  Attention: {attention}")
     print(
         "  Latest snapshots:"
         f" cc={summary['latest_snapshots']['cc']}, codex={summary['latest_snapshots']['codex']}"
@@ -123,6 +126,26 @@ async def run_status() -> bool:
     print(f"  Latest activity: {summary['latest_activity_json']}")
 
     return bool(summary["ok"])
+
+
+def _status_attention(summary: dict[str, Any]) -> str | None:
+    """Return a short operator hint for status signals that need follow-up."""
+    notes: list[str] = []
+    if not summary["ok"]:
+        notes.append("bridge health is degraded")
+    signals = summary["signals"]
+    if signals["pending_handoffs"]:
+        notes.append(f"pending_handoffs={signals['pending_handoffs']}")
+    if signals["unprocessed_shipped"]:
+        notes.append(f"unprocessed_shipped={signals['unprocessed_shipped']}")
+    if signals["processed_shipped_without_receipt"]:
+        notes.append(
+            "processed_shipped_without_receipt="
+            f"{signals['processed_shipped_without_receipt']}"
+        )
+    if not notes:
+        return None
+    return "; ".join(notes) + " — dogfood will fail until cleared"
 
 
 def _latest_detail(rows: list[dict[str, Any]]) -> str:
