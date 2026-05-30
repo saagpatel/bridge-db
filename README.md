@@ -21,11 +21,10 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
   review. The 2026-05-30 dependency refresh updated the lockfile for current
   patch/runtime drift.
 - 2026-05-30 checkpoint: bridge-db is idle in steady maintenance. The shipped-event
-  queue was reconciled to Notion proof, dependency drift was refreshed,
-  `shipped_sync_receipts` is at 32 rows, `unprocessed_shipped=0`, and the
-  markdown bridge mirror is fresh. Use `POST-SYNC-REVIEW.md` after future
-  Bridge Sync runs and keep new work scoped to real cross-system state
-  coordination needs.
+  queue was reconciled to Notion proof, dependency drift was refreshed, and the
+  clean signals are `unprocessed_shipped=0`, `processed_shipped_without_receipt=0`,
+  and `fts_missing=0`. Use `POST-SYNC-REVIEW.md` after future Bridge Sync runs
+  and keep new work scoped to real cross-system state coordination needs.
 
 ## Architecture
 
@@ -65,7 +64,7 @@ Write tools enforce `caller` ownership, so systems can only write the slices of 
 ## Commands
 
 ```bash
-uv run pytest              # run all tests (147 total)
+uv run pytest              # run all tests
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run python -m bridge_db --doctor  # local environment diagnostics
