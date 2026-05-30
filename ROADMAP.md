@@ -176,6 +176,6 @@ Future work is maintenance-only:
 - Prefer `confirm_shipped_sync` over raw `mark_shipped_processed` whenever a shipped event was synced to a downstream system.
 - Watch for WAL bloat via `health.wal_warning` (>10 MiB). Run `PRAGMA wal_checkpoint(TRUNCATE)` if needed.
 - Apply future security/dependency updates in dedicated maintenance PRs. The
-  2026-05-10 dependency refresh is complete, and the retired Bridge Sync
+  2026-05-30 dependency refresh is complete, and the retired Bridge Sync
   burn-in heartbeat is no longer an active maintenance gate.
 - Reopen the roadmap only if a concrete new cross-system coordination need surfaces — not to expand scope into knowledge search.
