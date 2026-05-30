@@ -58,13 +58,14 @@ Checklist
 Routine verifier refreshed on 2026-05-30. Claude Desktop registration details
 below remain from the earlier integration verification.
 
-- `uv run pytest` passes locally with 147 tests.
+- `uv run pytest` passes locally with 148 tests.
 - `uv run pyright` passes locally.
 - `uv run ruff check` passes locally.
 - `uv run python -m bridge_db --doctor` passes locally.
 - `uv run python -m bridge_db --status` reports healthy bridge state.
 - `uv run python -m bridge_db --dogfood` reports a clean shipped-event queue.
 - `uv run python -m bridge_db --dogfood` reports a clean FTS index (`fts_missing=0`, `fts_orphaned=0`).
+- Claude Code SessionEnd logging uses `uv run --directory /Users/d/Projects/bridge-db python -m bridge_db --log-session-boundary <project>` rather than direct SQLite writes.
 - `claude mcp list` reports `bridge-db` connected through this repo.
 - Codex config includes the `mcp_servers.bridge-db` registration for this repo.
 - Claude Desktop config exists at `/Users/d/Library/Application Support/Claude/claude_desktop_config.json`.

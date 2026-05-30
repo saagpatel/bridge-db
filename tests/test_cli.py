@@ -10,11 +10,18 @@ import pytest
 
 import bridge_db.config as cfg
 import bridge_db.tools.recall as recall_tool
-from bridge_db.__main__ import run_dogfood, run_rebuild_content_index, run_status
+from bridge_db.__main__ import (
+    run_dogfood,
+    run_log_session_boundary,
+    run_rebuild_content_index,
+    run_status,
+)
 from bridge_db.db import (
+    collect_fts_index_metrics,
     fts_text_for_activity,
     fts_text_for_section,
     fts_text_for_snapshot,
+    insert_activity_row,
     open_db,
     upsert_fts_entry,
 )
@@ -215,6 +222,89 @@ async def test_rebuild_content_index_repairs_and_is_idempotent(
     assert "expected=1, indexed=1, missing=0, orphaned=0" in idempotent
 
 
+@pytest.mark.asyncio
+async def test_log_session_boundary_uses_fts_safe_activity_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    bridge_path = tmp_path / "claude_ai_context.md"
+    audit_log_path = tmp_path / "audit.jsonl"
+    bridge_path.write_text("# bridge\n", encoding="utf-8")
+
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    monkeypatch.setattr(cfg, "BRIDGE_FILE_PATH", bridge_path)
+    monkeypatch.setattr(cfg, "AUDIT_LOG_PATH", audit_log_path)
+
+    db = await open_db(db_path)
+    try:
+        await insert_activity_row(
+            db,
+            source="cc",
+            timestamp="2026-05-30T11:00:00Z",
+            project_name="older-a",
+            summary="older activity",
+            tags=["SHIPPED"],
+            retention_limit=None,
+        )
+        await insert_activity_row(
+            db,
+            source="cc",
+            timestamp="2026-05-30T11:30:00Z",
+            project_name="older-b",
+            summary="older activity",
+            tags=["SHIPPED"],
+            retention_limit=None,
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    ok = await run_log_session_boundary(
+        "bridge-db", duration_minutes="7", timestamp="2026-05-30T12:00:00Z"
+    )
+    captured = capsys.readouterr().out
+
+    assert ok is True
+    assert "bridge-db session boundary" in captured
+    assert "missing=0" in captured
+
+    db = await open_db(db_path)
+    try:
+        cursor = await db.execute(
+            "SELECT id, source, timestamp, project_name, summary, tags "
+            "FROM activity_log ORDER BY id DESC LIMIT 1"
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row["source"] == "cc"
+        assert row["timestamp"] == "2026-05-30T12:00:00Z"
+        assert row["project_name"] == "bridge-db"
+        assert row["summary"] == "CC session ended (7min)"
+        assert json.loads(row["tags"]) == ["session-boundary"]
+
+        metrics = await collect_fts_index_metrics(db)
+        assert metrics["ok"] is True
+        assert metrics["expected"] == 3
+        assert metrics["indexed"] == 3
+
+        cursor = await db.execute("SELECT COUNT(*) FROM activity_log WHERE source = 'cc'")
+        count_row = await cursor.fetchone()
+        assert count_row is not None
+        assert count_row[0] == 3
+
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM content_index "
+            "WHERE source_type = 'activity' AND source_id = ? "
+            "AND content_index MATCH 'bridge'",
+            (str(row["id"]),),
+        )
+        match_row = await cursor.fetchone()
+        assert match_row is not None
+        assert match_row[0] == 1
+    finally:
+        await db.close()
+
+
 @pytest.mark.parametrize(
     ("flag", "expected_text"),
     [
@@ -296,7 +386,7 @@ asyncio.run(main())
         assert str(db_path) in result.stdout
         assert str(audit_log_path) in result.stdout
         assert "23 MCP tools" in (repo_root / "README.md").read_text(encoding="utf-8")
-        assert "147 tests" in (repo_root / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "148 tests" in (repo_root / "CLAUDE.md").read_text(encoding="utf-8")
     if flag == "--status":
         assert "contexts=0" in result.stdout
         assert "Attention:" not in result.stdout

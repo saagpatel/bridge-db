@@ -16,7 +16,7 @@ This roadmap captures the current scope-closed state of bridge-db. All originall
 - Phase 6 observability shipped: `recall_stats`, `audit_tail`, and WAL-size health metric (see below).
 - Shipped-event sync hardening shipped: `confirm_shipped_sync` records downstream proof before marking shipped activity as processed.
 - FTS index health hardening shipped: `health`, `status`, and `--dogfood` now treat missing/orphaned `content_index` rows as hard recall-health drift, with CLI-only repair through `--rebuild-content-index`.
-- Repo green at `147` tests, `ruff` and `pyright` clean.
+- Repo green at `148` tests, `ruff` and `pyright` clean.
 
 ## Outcomes We Want
 
@@ -145,6 +145,7 @@ Shipped
 - OR-semantic query sanitizer so multi-token queries return partial matches rather than requiring every token to co-occur.
 - Every write path hooked (4 tool modules + migration.py + codex_seed.py); auto-prune paths GC orphan FTS rows.
 - Health/status/dogfood compare source tables with `content_index` so recall drift is visible before operators rely on stale search results.
+- Claude Code SessionEnd hook logging routes through `--log-session-boundary`, keeping session-boundary activity rows on the same FTS-safe write path as MCP `log_activity`.
 - `recall_query_log.jsonl` logs every query for usage analysis.
 
 ## Phases 0 / 1 / 2 of the Semantic Memory Arc: CLOSED
@@ -179,6 +180,7 @@ Future work is maintenance-only:
 - Prefer `confirm_shipped_sync` over raw `mark_shipped_processed` whenever a shipped event was synced to a downstream system.
 - Watch for WAL bloat via `health.wal_warning` (>10 MiB). Run `PRAGMA wal_checkpoint(TRUNCATE)` if needed.
 - Watch for FTS drift via `status.signals.fts_missing` and `status.signals.fts_orphaned`. Run `uv run python -m bridge_db --rebuild-content-index` if drift appears, then rerun `--status` and `--dogfood`.
+- Keep local hooks and external writers on bridge-db CLI/MCP write paths. Do not reintroduce direct `sqlite3` inserts into `activity_log`.
 - Apply future security/dependency updates in dedicated maintenance PRs. The
   2026-05-30 dependency refresh is complete, and the retired Bridge Sync
   burn-in heartbeat is no longer an active maintenance gate.
