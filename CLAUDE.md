@@ -5,7 +5,7 @@ SQLite-backed MCP server for cross-system state sharing between Claude.ai, Claud
 ## Commands
 
 ```bash
-uv run pytest              # run all tests (148 total)
+uv run pytest              # run all tests
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run ruff check --fix    # lint + auto-fix
@@ -51,7 +51,7 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 - Shipped-event sync hardening is in place: `confirm_shipped_sync` requires a downstream system/ref, stores a receipt, then adds the `PROCESSED` tag. `mark_shipped_processed` remains as a compatibility path, but the receipt-backed tool is preferred for bridge-sync work.
 - `processed_shipped_without_receipt` is now visible in `health` / `status` so operators can spot legacy/manual processed shipped events without treating them as bridge health failures. FTS index drift is treated as a hard health failure because `recall` depends on `content_index` mirroring source tables.
 - `uv run python -m bridge_db --dogfood` is the repeatable read-only pass for post-sync checks: status signals, FTS index integrity, WAL warning, recall usage, and shipped-sync audit details.
-- Latest verification on 2026-05-30: `147` tests green; `ruff` and `pyright` clean;
+- Latest verification on 2026-05-30: `148` tests green; `ruff` and `pyright` clean;
   `--doctor`, `--status`, and `--dogfood` report healthy live bridge state.
 - The project is now in a steady maintenance state. Scope: cross-system *state* coordination (handoffs, snapshots, activity, four Claude.ai-owned context sections) + lexical `recall` over that content + observability over the JSONL logs.
 
@@ -87,7 +87,7 @@ Three PRs on top of the FTS5 closure:
 ## Recent maintenance log (2026-05-30)
 
 - Refreshed local `main` to the current GitHub main after PR #24 added Dependabot config.
-- Reconciled the pending `skills-inventory` shipped event to the `Machine Audits` Notion row using receipt-backed `confirm_shipped_sync`; `shipped_sync_receipts` is now 32, `unprocessed_shipped=0`, and `processed_shipped_without_receipt=0`.
+- Reconciled the pending `skills-inventory` shipped event to the `Machine Audits` Notion row using receipt-backed `confirm_shipped_sync`; clean signals are `unprocessed_shipped=0`, `processed_shipped_without_receipt=0`, and `fts_missing=0`.
 - Refreshed dependency drift in `uv.lock` and raised dev dependency floors for `pytest-asyncio` and `ruff`; the full verifier remains green.
 - `--status`, `--doctor`, and `--dogfood` report healthy live bridge state with a fresh markdown mirror and no WAL warning.
 - FTS health hardening is in place: `health` / `status` / `--dogfood` now surface `fts_missing` and `fts_orphaned`, and `--rebuild-content-index` is the CLI-only repair path when drift is detected.
@@ -130,7 +130,7 @@ This project is in steady-state maintenance. The codebase is stable, the DB is l
 ## How To Run
 
 ```bash
-uv run pytest              # run all tests (148 total)
+uv run pytest              # run all tests
 uv run pyright             # type check (strict mode)
 uv run ruff check          # lint
 uv run ruff check --fix    # lint + auto-fix
