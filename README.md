@@ -14,7 +14,7 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
 - **Phase 6 observability shipped (2026-04-17):** `recall_stats` reads the recall query log, `audit_tail` reads the audit log, and `health` now surfaces `wal_size_bytes` + `wal_warning`. All three close half-built feedback loops without expanding scope. See the Phase 6 section in [ROADMAP.md](ROADMAP.md).
 - Shipped-event sync hardening shipped: `confirm_shipped_sync` records downstream proof in `shipped_sync_receipts` before marking a `SHIPPED` activity event `PROCESSED`.
 - `health` / `status` also surface `processed_shipped_without_receipt` as a soft drift signal for older or manual `mark_shipped_processed` paths, and `fts_missing` / `fts_orphaned` as hard recall-index health signals. Prefer `confirm_shipped_sync` for new downstream syncs.
-- Local verification is currently green as of 2026-05-30: `147` tests passing,
+- Local verification is currently green as of 2026-05-30: `148` tests passing,
   `ruff` clean, `pyright` clean, and live `--doctor` / `--status` / `--dogfood` checks healthy.
 - Project is in steady maintenance. Scope is pinned to cross-system *state* coordination plus lexical `recall` plus observability; it is not a knowledge store.
 - The Bridge Sync burn-in heartbeat has been retired after a clean post-run
@@ -72,6 +72,7 @@ uv run python -m bridge_db --doctor  # local environment diagnostics
 uv run python -m bridge_db --status  # compact operator summary
 uv run python -m bridge_db --dogfood # read-only observability dogfood pass
 uv run python -m bridge_db --rebuild-content-index  # repair FTS recall index drift
+uv run python -m bridge_db --log-session-boundary bridge-db  # FTS-safe CC hook logging
 uv run python -m bridge_db          # start MCP server (stdio)
 uv run python -m bridge_db.migration  # migrate from bridge markdown
 ```
@@ -99,6 +100,7 @@ args = ["run", "--directory", "~/Projects/bridge-db", "python", "-m", "bridge_db
 - Operator summary: `uv run python -m bridge_db --status`
 - Dogfood pass: `uv run python -m bridge_db --dogfood` bundles the status, FTS index, WAL, recall, and shipped-sync audit checks used after bridge-sync runs
 - FTS repair: `uv run python -m bridge_db --rebuild-content-index` rebuilds the local `content_index` from source tables when health reports recall-index drift
+- Session boundary logging: Claude Code's SessionEnd hook should call `uv run --directory ~/Projects/bridge-db python -m bridge_db --log-session-boundary <project>` rather than writing SQLite directly; this path adds the FTS row and does not run activity retention pruning
 - Migration: `uv run python -m bridge_db.migration` (idempotent — safe to re-run)
 
 ## Startup Sync

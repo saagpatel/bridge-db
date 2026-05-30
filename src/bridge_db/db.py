@@ -1,5 +1,6 @@
 """Database schema, migrations, and connection setup."""
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, cast
@@ -356,6 +357,52 @@ async def gc_fts_orphans(db: aiosqlite.Connection, source_type: str) -> int:
         (source_type,),
     )
     return cursor.rowcount or 0
+
+
+async def insert_activity_row(
+    db: aiosqlite.Connection,
+    *,
+    source: str,
+    timestamp: str,
+    project_name: str,
+    summary: str,
+    branch: str | None = None,
+    tags: list[str] | None = None,
+    retention_limit: int | None = None,
+) -> int:
+    """Insert an activity row and keep the FTS activity mirror in sync."""
+    cursor = await db.execute(
+        """
+        INSERT INTO activity_log (source, timestamp, project_name, summary, branch, tags)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (source, timestamp, project_name, summary, branch, json.dumps(tags or [])),
+    )
+    activity_id = cursor.lastrowid
+    if activity_id is None:
+        raise RuntimeError("activity_log insert did not return an id")
+
+    await upsert_fts_entry(
+        db,
+        "activity",
+        str(activity_id),
+        fts_text_for_activity(project_name, summary, branch),
+    )
+
+    if retention_limit is not None:
+        await db.execute(
+            """
+            DELETE FROM activity_log
+            WHERE source = ? AND id NOT IN (
+                SELECT id FROM activity_log WHERE source = ?
+                ORDER BY created_at DESC LIMIT ?
+            )
+            """,
+            (source, source, retention_limit),
+        )
+        await gc_fts_orphans(db, "activity")
+
+    return int(activity_id)
 
 
 _FTS_SOURCE_TABLES = {
