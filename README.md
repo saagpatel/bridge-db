@@ -14,15 +14,15 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
 - **Phase 6 observability shipped (2026-04-17):** `recall_stats` reads the recall query log, `audit_tail` reads the audit log, and `health` now surfaces `wal_size_bytes` + `wal_warning`. All three close half-built feedback loops without expanding scope. See the Phase 6 section in [ROADMAP.md](ROADMAP.md).
 - Shipped-event sync hardening shipped: `confirm_shipped_sync` records downstream proof in `shipped_sync_receipts` before marking a `SHIPPED` activity event `PROCESSED`.
 - `health` / `status` also surface `processed_shipped_without_receipt` as a soft drift signal for older or manual `mark_shipped_processed` paths. Prefer `confirm_shipped_sync` for new downstream syncs.
-- Local verification is currently green as of 2026-05-16: `146` tests passing,
+- Local verification is currently green as of 2026-05-30: `146` tests passing,
   `ruff` clean, `pyright` clean, and live `--doctor` / `--status` / `--dogfood` checks healthy.
 - Project is in steady maintenance. Scope is pinned to cross-system *state* coordination plus lexical `recall` plus observability; it is not a knowledge store.
 - The Bridge Sync burn-in heartbeat has been retired after a clean post-run
-  review. Dependency refresh PR #20 is merged, and the 2026-05-16 dependency
-  refresh updated the lockfile for current patch/runtime drift.
-- 2026-05-16 checkpoint: bridge-db is idle in steady maintenance. The shipped-event
+  review. The 2026-05-30 dependency refresh updated the lockfile for current
+  patch/runtime drift.
+- 2026-05-30 checkpoint: bridge-db is idle in steady maintenance. The shipped-event
   queue was reconciled to Notion proof, dependency drift was refreshed,
-  `shipped_sync_receipts` is at 20 rows, `unprocessed_shipped=0`, and the
+  `shipped_sync_receipts` is at 32 rows, `unprocessed_shipped=0`, and the
   markdown bridge mirror is fresh. Use `POST-SYNC-REVIEW.md` after future
   Bridge Sync runs and keep new work scoped to real cross-system state
   coordination needs.

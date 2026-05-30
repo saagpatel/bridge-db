@@ -49,7 +49,7 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 - Shipped-event sync hardening is in place: `confirm_shipped_sync` requires a downstream system/ref, stores a receipt, then adds the `PROCESSED` tag. `mark_shipped_processed` remains as a compatibility path, but the receipt-backed tool is preferred for bridge-sync work.
 - `processed_shipped_without_receipt` is now visible in `health` / `status` so operators can spot legacy/manual processed shipped events without treating them as bridge health failures.
 - `uv run python -m bridge_db --dogfood` is the repeatable read-only pass for post-sync checks: status signals, WAL warning, recall usage, and shipped-sync audit details.
-- Latest verification on 2026-05-16: `146` tests green; `ruff` and `pyright` clean;
+- Latest verification on 2026-05-30: `146` tests green; `ruff` and `pyright` clean;
   `--doctor`, `--status`, and `--dogfood` report healthy live bridge state.
 - The project is now in a steady maintenance state. Scope: cross-system *state* coordination (handoffs, snapshots, activity, four Claude.ai-owned context sections) + lexical `recall` over that content + observability over the JSONL logs.
 
@@ -81,6 +81,13 @@ Three PRs on top of the FTS5 closure:
 - Updated existing Notion targets for `personal-ops` and `notification-hub`, and created minimal Local Portfolio rows for `claude-code-harness` and `SecondBrain` because no exact rows existed.
 - Refreshed the markdown bridge mirror with `export_bridge_markdown`; `--status`, `--doctor`, `--dogfood`, `pytest`, `pyright`, and `ruff` are all green after the reconciliation.
 - Refreshed dependency drift in `uv.lock` for `idna`, `python-multipart`, `sse-starlette`, `uvicorn`, and `ruff`; `uv tree --outdated` is clean afterward and the full verifier remains green.
+
+## Recent maintenance log (2026-05-30)
+
+- Refreshed local `main` to the current GitHub main after PR #24 added Dependabot config.
+- Reconciled the pending `skills-inventory` shipped event to the `Machine Audits` Notion row using receipt-backed `confirm_shipped_sync`; `shipped_sync_receipts` is now 32, `unprocessed_shipped=0`, and `processed_shipped_without_receipt=0`.
+- Refreshed dependency drift in `uv.lock` and raised dev dependency floors for `pytest-asyncio` and `ruff`; the full verifier remains green.
+- `--status`, `--doctor`, and `--dogfood` report healthy live bridge state with a fresh markdown mirror and no WAL warning.
 
 If resuming: project is idle in steady maintenance. Any new work should respect the closed-scope banner in the semantic-memory plan. Next maintenance tasks (low priority): watch for downstream caller volume changes, keep docs aligned with any MCP surface changes, use `POST-SYNC-REVIEW.md` after future scheduled Bridge Syncs, and periodically re-check MCP client integration after client or MCP package changes.
 
