@@ -27,73 +27,23 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 - **Tool registration**: `CaptureMCP` pattern in tests — decorators capture raw async fns
 - **FTS5 invariant**: every write path that touches `context_sections`, `activity_log`, `system_snapshots`, or `pending_handoffs` calls `upsert_fts_entry` / `gc_fts_orphans` from [db.py](src/bridge_db/db.py) in the same transaction. Auto-prune paths in `log_activity` and `save_snapshot` GC orphan FTS rows.
 
-## Key conventions
+## Conventions
 
 - `caller` parameter on write tools enforces ownership (`CallerID = Literal["cc","codex","claude_ai","notion_os","personal_ops"]`)
 - `source`/`system` DB columns map 1:1 from `caller`
 - Activity retention: 50 per source; snapshot retention: 10 per system (auto-pruned on insert)
 - Export trigger: consumers call `export_bridge_markdown` explicitly after writes
-- Startup sync trigger: Claude Code `/start` now calls `sync_from_file` before bridge reads so Claude.ai-owned file edits are imported into SQLite first
+- Startup sync trigger: Claude Code `/start` calls `sync_from_file` before bridge reads so Claude.ai-owned file edits are imported into SQLite first
 - Logging: `logging.basicConfig(stream=sys.stderr)` — never stdout
-- Diagnostics: MCP `health` and `status` tools plus CLI `--doctor`, `--status`, `--dogfood`, the CLI-only `--rebuild-content-index` repair path, and `--log-session-boundary` for Claude Code SessionEnd hook writes
 
-## Current project state
+## Gotchas
 
-- Phase 1 doc and operator-readiness cleanup is complete.
-- Claude Desktop registration is verified locally.
-- Claude.ai read access is verified.
-- Claude.ai direct write behavior is also verified.
-- The Claude.ai file-write overwrite gap is closed: `sync_from_file` is implemented and `/start` runs it before bridge reads.
-- End-to-end verification succeeded from the Claude Desktop side.
-- Recent audit hardening closed the remaining correctness gaps around duplicate handoff clearing, future-schema mismatch handling, and degraded health reporting.
-- Phase −1 of the semantic memory layer (FTS5 + `recall`) is shipped and is the **final layer**. A post-shipping dry run through the 20-query eval set showed that most query "misses" reflect content not living in `bridge.db` (it's in memory files, plan docs, Notion), so vector/embedding layers wouldn't help. Scope closed — see the closure banner at the top of [bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md](bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md).
-- Phase 6 observability shipped (2026-04-17, PRs #6 + #7): `recall_stats` (read-side of the recall query log), `audit_tail` (read-side of the audit log), and `wal_size_bytes` + `wal_warning` in `health`. Shared `iter_jsonl` helper in `audit.py`. These extend existing state, not scope.
-- Shipped-event sync hardening is in place: `confirm_shipped_sync` requires a downstream system/ref, stores a receipt, then adds the `PROCESSED` tag. `mark_shipped_processed` remains as a compatibility path, but the receipt-backed tool is preferred for bridge-sync work.
-- `processed_shipped_without_receipt` is now visible in `health` / `status` so operators can spot legacy/manual processed shipped events without treating them as bridge health failures. FTS index drift is treated as a hard health failure because `recall` depends on `content_index` mirroring source tables.
-- `uv run python -m bridge_db --dogfood` is the repeatable read-only pass for post-sync checks: status signals, FTS index integrity, WAL warning, recall usage, and shipped-sync audit details.
-- Latest verification on 2026-05-30: `148` tests green; `ruff` and `pyright` clean;
-  `--doctor`, `--status`, and `--dogfood` report healthy live bridge state.
-- The project is now in a steady maintenance state. Scope: cross-system *state* coordination (handoffs, snapshots, activity, four Claude.ai-owned context sections) + lexical `recall` over that content + observability over the JSONL logs.
-
-## Recent session log (2026-04-17)
-
-Three PRs on top of the FTS5 closure:
-
-- **PR #5** — README drift fix: tool count 19→20 (missed `recall`), test count 97→115, added `.serena/` to gitignore, deleted stale `HANDOFF.md`.
-- **PR #6** — Observability feature: added `recall_stats`, `audit_tail` (new `tools/audit.py` module), WAL size in `health`, shared `iter_jsonl` helper. Tool count 20→22 across 9 modules.
-- **PR #7** — Post-merge polish: server.py `instructions=` string advertises the new tools, regression test pinning `audit_tail` behavior for externally-edited records without `ts`, operator checklist smoke list includes the observability tools.
-
-## Recent maintenance log (2026-05-09)
-
-- Live bridge status is healthy: schema v4, bridge file present, no pending handoffs, no unprocessed shipped events, and bridge-sync now prefers receipt-backed `confirm_shipped_sync` after downstream Notion proof.
-- Dependabot PR #13 (`python-multipart` 0.0.26 -> 0.0.27 in `uv.lock`) was checked out, verified locally with the full canonical suite, and merged.
-- Local verification remains green: `uv run pytest`, `uv run pyright`, `uv run ruff check`, `uv run python -m bridge_db --doctor`, `uv run python -m bridge_db --status`, and `uv run python -m bridge_db --dogfood`.
-- A post-sync review checklist now lives in `POST-SYNC-REVIEW.md`. Use it after scheduled Bridge Syncs or shipped-event reconciliation to prove DB state, markdown export freshness, scheduled-run evidence, and scorecard updates without relying on chat memory.
-- Dependency drift was handled in PR #20 (`chore(deps): refresh bridge-db lockfile`) and merged to `main` as `0ee0ecf`. A follow-up 2026-05-16 dependency pass refreshed the lockfile for `idna`, `python-multipart`, `sse-starlette`, `uvicorn`, and `ruff`; the post-refresh `uv tree --outdated` probe has no remaining tracked drift.
-
-## Recent maintenance log (2026-05-10)
-
-- The scheduled Bridge Sync and post-run review were completed with clean bridge-db proof: no pending handoffs, no unprocessed shipped events, no processed shipped events missing receipts, and a fresh markdown export.
-- The one-time `bridge-sync-burn-in-review` heartbeat was retired after the review and is now paused with no next run scheduled.
-- The active automation contract table was updated so it no longer lists the retired heartbeat; operating-layer checks returned to 14 active scheduled automations and 0 active heartbeats.
-
-## Recent maintenance log (2026-05-16)
-
-- Reconciled 7 unprocessed `SHIPPED` activity events to Notion proof using receipt-backed `confirm_shipped_sync`; `shipped_sync_receipts` is now 20 and `unprocessed_shipped=0`.
-- Updated existing Notion targets for `personal-ops` and `notification-hub`, and created minimal Local Portfolio rows for `claude-code-harness` and `SecondBrain` because no exact rows existed.
-- Refreshed the markdown bridge mirror with `export_bridge_markdown`; `--status`, `--doctor`, `--dogfood`, `pytest`, `pyright`, and `ruff` are all green after the reconciliation.
-- Refreshed dependency drift in `uv.lock` for `idna`, `python-multipart`, `sse-starlette`, `uvicorn`, and `ruff`; `uv tree --outdated` is clean afterward and the full verifier remains green.
-
-## Recent maintenance log (2026-05-30)
-
-- Refreshed local `main` to the current GitHub main after PR #24 added Dependabot config.
-- Reconciled the pending `skills-inventory` shipped event to the `Machine Audits` Notion row using receipt-backed `confirm_shipped_sync`; clean signals are `unprocessed_shipped=0`, `processed_shipped_without_receipt=0`, and `fts_missing=0`.
-- Refreshed dependency drift in `uv.lock` and raised dev dependency floors for `pytest-asyncio` and `ruff`; the full verifier remains green.
-- `--status`, `--doctor`, and `--dogfood` report healthy live bridge state with a fresh markdown mirror and no WAL warning.
-- FTS health hardening is in place: `health` / `status` / `--dogfood` now surface `fts_missing` and `fts_orphaned`, and `--rebuild-content-index` is the CLI-only repair path when drift is detected.
-- Claude Code's SessionEnd hook must use `uv run --directory /Users/d/Projects/bridge-db python -m bridge_db --log-session-boundary <project>` so session-boundary activity rows get FTS entries through the normal bridge-db write path. This hook-specific path intentionally does not run activity retention pruning.
-
-If resuming: project is idle in steady maintenance. Any new work should respect the closed-scope banner in the semantic-memory plan. Next maintenance tasks (low priority): watch for downstream caller volume changes, keep docs aligned with any MCP surface changes, use `POST-SYNC-REVIEW.md` after future scheduled Bridge Syncs, and periodically re-check MCP client integration after client or MCP package changes.
+- **SessionEnd hook path**: Claude Code's SessionEnd hook must use `uv run --directory /Users/d/Projects/bridge-db python -m bridge_db --log-session-boundary <project>` so session-boundary activity rows get FTS entries through the normal write path. This hook-specific path intentionally does not run activity retention pruning.
+- **Shipped-event sync**: `confirm_shipped_sync` requires a downstream system/ref, stores a receipt, then adds `PROCESSED`. `mark_shipped_processed` is a legacy compatibility path — prefer receipt-backed `confirm_shipped_sync` for bridge-sync work.
+- **Semantic memory scope closed**: FTS5 + `recall` is the final layer (Phase −1). Vector/embedding layers are ruled out — most query misses reflect content not in `bridge.db`. See closure banner in `bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md`.
+- **FTS drift repair**: `--rebuild-content-index` is the CLI-only repair path; FTS index drift is treated as a hard health failure because `recall` depends on `content_index` mirroring source tables.
+- **Post-sync review**: after scheduled Bridge Syncs or shipped-event reconciliation, use `POST-SYNC-REVIEW.md` to verify DB state, markdown export freshness, and scorecard updates.
+- **Dependency drift**: check with `uv tree --outdated`; refresh `uv.lock` and re-run the full verifier to confirm green.
 
 ## Registration
 
