@@ -18,4 +18,7 @@ wheels/
 .serena/
 
 # Claude Code local runtime (auto-worktrees, session state)
-.claude/CLAUDE.md.bak
+.claude/
+
+# Generated CLAUDE.md backup residue
+CLAUDE.md.bak
