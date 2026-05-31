@@ -155,7 +155,8 @@ trigger. Operational concerns:
 4. **`recall` corpus freshness** — FTS5 lexical recall is only
    as good as what's logged via `log_activity` / state sections.
 5. **Dependency refresh cadence** — `uv tree --outdated` pass
-   per the operator's checklist; PR #20 was the last refresh.
+   per the operator's checklist; most recent refresh: 2026-05-30
+   (see CLAUDE.md maintenance log).
 6. **Markdown bridge file regeneration** — `export_bridge_markdown`
    keeps `~/.claude/projects/-Users-d/memory/claude_ai_context.md`
    in sync; used by file-based MCP clients.
