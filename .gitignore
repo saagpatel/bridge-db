@@ -18,4 +18,4 @@ wheels/
 .serena/
 
 # Claude Code local runtime (auto-worktrees, session state)
-.claude/
+.claude/CLAUDE.md.bak
