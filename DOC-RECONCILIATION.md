@@ -77,7 +77,7 @@ Each command documented in README.md and CLAUDE.md was confirmed to exist in the
 | `python -m bridge_db --rebuild-content-index` | `src/bridge_db/__main__.py:316-320` |
 | `python -m bridge_db --log-session-boundary` | `src/bridge_db/__main__.py:321-325` |
 | `python -m bridge_db` (MCP server) | `src/bridge_db/server.py` |
-| `python -m bridge_db.migration` | `src/bridge_db/` (migration module) |
+| `python -m bridge_db.migration` | `src/bridge_db/migration.py` |
 
 ---
 
@@ -106,35 +106,17 @@ Each command documented in README.md and CLAUDE.md was confirmed to exist in the
 
 ---
 
-## Change Made
+## Changes Made
 
-### `docs/PORTFOLIO-DISPOSITION.md` — Dependency refresh reference (drifted → fixed)
-
-**File:** `docs/PORTFOLIO-DISPOSITION.md:157-158`
-
-**Before:**
-```
-5. **Dependency refresh cadence** — `uv tree --outdated` pass
-   per the operator's checklist; PR #20 was the last refresh.
-```
-
-**After:**
-```
-5. **Dependency refresh cadence** — `uv tree --outdated` pass
-   per the operator's checklist; most recent refresh: 2026-05-30
-   (see CLAUDE.md maintenance log).
-```
-
-**Reason:** README.md ("The 2026-05-30 dependency refresh updated the lockfile for current
-patch/runtime drift") and CLAUDE.md (2026-05-30 maintenance log section) both document a
-dependency refresh that post-dates PR #20. The old text implied PR #20 was the most recent,
-which would lead an operator to believe the lockfile was less fresh than it actually is.
+None. All six claims are consistent with the code. The one drifted item from the previous pass
+(2026-05-30, `docs/PORTFOLIO-DISPOSITION.md` dependency-refresh reference) was already fixed by
+commit `9f4d644 docs: reconcile documentation to current code state`.
 
 ---
 
 ## Contradictions for Manual Review
 
-### `pyproject.toml` — Project description omits `notion_os` and `personal_ops`
+### `pyproject.toml:4` — Project description omits `notion_os` and `personal_ops`
 
 **File:** `pyproject.toml:4`
 
@@ -149,12 +131,22 @@ which would lead an operator to believe the lockfile was less fresh than it actu
 description = "SQLite-backed MCP server for cross-system state sharing between Claude.ai, Claude Code, Codex, Notion OS, and personal-ops"
 ```
 
-`pyproject.toml` is not a doc file and was not edited by this pass.
+`pyproject.toml` is not a doc file and was not edited by this pass. Also flagged by the 2026-05-30 pass; still not applied.
+
+### `src/bridge_db/server.py:44` — Server instructions string omits `notion_os` and `personal_ops`
+
+**File:** `src/bridge_db/server.py:44`
+
+**Current:** `"SQLite-backed bridge for shared state between Claude.ai, Claude Code, and Codex. "`
+
+**Code truth:** Same as above — `notion_os` and `personal_ops` are first-class callers per `models.py:6`.
+
+`server.py` is source code and was not edited by this pass.
 
 ---
 
 ## Footer
 
-**Run timestamp:** 2026-05-30 22:55:51 PDT
-**Branch:** docs/truth-up-2026-05-30
-**HEAD sha reconciled against:** e9b553f372949d8865e554404858be0c512128ff
+**Run timestamp:** 2026-06-02 19:55:25 PDT
+**Branch:** docs/truth-up-2026-06-02
+**HEAD sha reconciled against:** 5398178bc80217fafe5fb7d4e42d0801b8479dbd
