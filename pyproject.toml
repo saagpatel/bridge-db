@@ -15,7 +15,7 @@ bridge-db = "bridge_db.__main__:main"
 
 [dependency-groups]
 dev = [
-    "pyright>=1.1.390",
+    "pyright>=1.1.410",
     "pytest>=8",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.15",
