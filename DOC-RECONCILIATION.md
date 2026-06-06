@@ -109,7 +109,7 @@ Each command documented in README.md and CLAUDE.md was confirmed to exist in the
 
 - Updated stale test-count claims from 148 to 155.
 - Updated supported-system wording for Notion OS and personal-ops in package metadata and server instructions.
-- Updated current live-state notes to keep the intentionally pending Veritas handoff visible.
+- Updated current live-state notes to reflect healthy dogfood with no pending handoffs.
 
 ---
 
