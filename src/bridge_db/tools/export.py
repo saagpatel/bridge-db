@@ -15,6 +15,26 @@ logger = logging.getLogger("bridge_db.tools.export")
 _SECTION_ORDER = ["career", "speaking", "research", "capabilities"]
 
 
+def _is_codex_operating_snapshot(data: dict[str, Any]) -> bool:
+    return {"infrastructure", "automation_digest", "active_projects"}.issubset(data)
+
+
+async def _latest_codex_operating_snapshot(db: Any) -> tuple[Any | None, dict[str, Any] | None]:
+    cursor = await db.execute(
+        """
+        SELECT snapshot_date, data
+        FROM system_snapshots
+        WHERE system='codex'
+        ORDER BY created_at DESC, id DESC
+        """
+    )
+    for row in await cursor.fetchall():
+        data: dict[str, Any] = json.loads(row["data"])
+        if _is_codex_operating_snapshot(data):
+            return row, data
+    return None, None
+
+
 async def build_markdown(db: Any) -> str:
     """Assemble the full bridge markdown from all tables."""
     today = str(date.today())
@@ -85,12 +105,8 @@ async def build_markdown(db: Any) -> str:
     ) + "\n"
 
     # --- Codex State Snapshot ---
-    cursor = await db.execute(
-        "SELECT snapshot_date, data FROM system_snapshots WHERE system='codex' ORDER BY created_at DESC LIMIT 1"
-    )
-    codex_snap_row = await cursor.fetchone()
-    if codex_snap_row:
-        cdata: dict[str, Any] = json.loads(codex_snap_row["data"])
+    codex_snap_row, cdata = await _latest_codex_operating_snapshot(db)
+    if codex_snap_row and cdata is not None:
         codex_snapshot_md = (
             f"## Codex State Snapshot\nLast exported: {codex_snap_row['snapshot_date']}\n\n"
         )

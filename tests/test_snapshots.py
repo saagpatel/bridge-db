@@ -1,5 +1,6 @@
 """Tests for snapshot and cost tools."""
 
+import json
 from typing import Any
 
 import aiosqlite
@@ -81,6 +82,42 @@ async def test_save_snapshot_prunes_to_retention(
     row = await cursor.fetchone()
     assert row is not None
     assert row[0] == limit
+
+
+async def test_save_snapshot_prunes_codex_families_independently(
+    db: aiosqlite.Connection, snap_fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    limit = config.SNAPSHOT_RETENTION_PER_SYSTEM
+    for i in range(limit + 2):
+        await snap_fns["save_snapshot"](
+            caller="codex",
+            data={
+                "infrastructure": f"- infra {i}",
+                "automation_digest": f"- automation {i}",
+                "active_projects": f"- project {i}",
+            },
+            ctx=ctx,
+        )
+        await snap_fns["save_snapshot"](
+            caller="codex",
+            data={"consulted_node": {"latest_consultation": f"CN-{i:03d}"}},
+            ctx=ctx,
+        )
+
+    cursor = await db.execute("SELECT data FROM system_snapshots WHERE system='codex'")
+    rows = await cursor.fetchall()
+    operating = 0
+    consulted_node = 0
+    for row in rows:
+        data = json.loads(row["data"])
+        if "consulted_node" in data:
+            consulted_node += 1
+        elif {"infrastructure", "automation_digest", "active_projects"}.issubset(data):
+            operating += 1
+
+    assert operating == limit
+    assert consulted_node == limit
 
 
 # ── Cost ─────────────────────────────────────────────────────────────────────

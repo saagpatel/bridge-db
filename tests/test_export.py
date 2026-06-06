@@ -225,6 +225,39 @@ async def test_export_workflow_reflects_multi_tool_bridge_state(
     assert "$125" in content
 
 
+async def test_export_uses_latest_codex_operating_snapshot(
+    db: aiosqlite.Connection, all_fns: dict[str, Any]
+) -> None:
+    mctx = make_ctx(db)
+    await all_fns["save_snapshot"](
+        caller="codex",
+        data={
+            "infrastructure": "- bridge health: green",
+            "automation_digest": "- no automation drift detected",
+            "active_projects": "- bridge-db",
+        },
+        snapshot_date="2026-04-15",
+        ctx=mctx,
+    )
+    await all_fns["save_snapshot"](
+        caller="codex",
+        data={
+            "consulted_node": {
+                "latest_consultation": "newer advisory metadata, not bridge state"
+            }
+        },
+        snapshot_date="2026-04-16",
+        ctx=mctx,
+    )
+
+    md = await _build_markdown(db)
+    assert "## Codex State Snapshot" in md
+    assert "Last exported: 2026-04-15" in md
+    assert "- bridge health: green" in md
+    assert "- bridge-db" in md
+    assert "newer advisory metadata" not in md
+
+
 async def test_sync_from_file_then_export_preserves_fallback_context_and_live_state(
     db: aiosqlite.Connection, all_fns: dict[str, Any], tmp_path: Path
 ) -> None:

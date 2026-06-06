@@ -3,7 +3,7 @@
 import json
 import logging
 from datetime import date
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
@@ -19,6 +19,54 @@ from bridge_db.db import (
 from bridge_db.models import SNAPSHOT_SYSTEM_MAP, CallerID, snapshot_ownership_error
 
 logger = logging.getLogger("bridge_db.tools.snapshots")
+
+
+def _snapshot_family(system: str, data: dict[str, Any]) -> str:
+    if system != "codex":
+        return "default"
+    if {"infrastructure", "automation_digest", "active_projects"}.issubset(data):
+        return "operating"
+    if "consulted_node" in data:
+        return "consulted_node"
+    return "other"
+
+
+async def _prune_snapshots(db: Any, *, system: str) -> None:
+    cursor = await db.execute(
+        """
+        SELECT id, data
+        FROM system_snapshots
+        WHERE system = ?
+        ORDER BY created_at DESC, id DESC
+        """,
+        (system,),
+    )
+    rows = await cursor.fetchall()
+
+    seen_by_family: dict[str, int] = {}
+    delete_ids: list[int] = []
+    for row in rows:
+        try:
+            parsed_data = cast(object, json.loads(row["data"]))
+        except json.JSONDecodeError:
+            parsed_data = {}
+        data: dict[str, Any] = {}
+        if isinstance(parsed_data, dict):
+            data = {
+                str(key): value
+                for key, value in cast(dict[object, Any], parsed_data).items()
+            }
+        family = _snapshot_family(system, data)
+        seen_by_family[family] = seen_by_family.get(family, 0) + 1
+        if seen_by_family[family] > config.SNAPSHOT_RETENTION_PER_SYSTEM:
+            delete_ids.append(row["id"])
+
+    if delete_ids:
+        placeholders = ",".join("?" for _ in delete_ids)
+        await db.execute(
+            f"DELETE FROM system_snapshots WHERE id IN ({placeholders})",
+            delete_ids,
+        )
 
 
 def register(mcp: FastMCP) -> None:
@@ -60,16 +108,7 @@ def register(mcp: FastMCP) -> None:
                 db, "snapshot", str(snapshot_id), fts_text_for_snapshot(snapshot_json)
             )
 
-        await db.execute(
-            """
-            DELETE FROM system_snapshots
-            WHERE system = ? AND id NOT IN (
-                SELECT id FROM system_snapshots WHERE system = ?
-                ORDER BY created_at DESC LIMIT ?
-            )
-            """,
-            (system, system, config.SNAPSHOT_RETENTION_PER_SYSTEM),
-        )
+        await _prune_snapshots(db, system=system)
         await gc_fts_orphans(db, "snapshot")
         await db.commit()
 
