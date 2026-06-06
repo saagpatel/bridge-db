@@ -41,7 +41,8 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # 
 mcp = FastMCP(
     "bridge-db",
     instructions=(
-        "SQLite-backed bridge for shared state between Claude.ai, Claude Code, and Codex. "
+        "SQLite-backed bridge for shared state between Claude.ai, Claude Code, "
+        "Codex, Notion OS, and personal-ops. "
         "Use log_activity/get_recent_activity for session activity, "
         "get_shipped_events/confirm_shipped_sync/mark_shipped_processed for shipped-event sync, "
         "create_handoff/get_pending_handoffs for project handoffs, "

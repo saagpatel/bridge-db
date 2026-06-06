@@ -10,6 +10,7 @@ from conftest import CaptureMCP, make_ctx
 from mcp.server.fastmcp.exceptions import ToolError
 
 from bridge_db import config
+from bridge_db.db import collect_fts_index_metrics, insert_activity_row
 from bridge_db.tools import activity as mod
 
 
@@ -83,6 +84,26 @@ async def test_get_recent_activity_filters_by_since(
     recent = await fns["get_recent_activity"](since="2026-03-01", ctx=ctx)
     assert len(recent) == 1
     assert recent[0]["project_name"] == "New"
+
+
+async def test_get_recent_activity_breaks_created_at_ties_by_id(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="cc", project_name="OldTie", summary="first", timestamp="2026-04-01", ctx=ctx
+    )
+    await fns["log_activity"](
+        caller="cc", project_name="NewTie", summary="second", timestamp="2026-04-01", ctx=ctx
+    )
+    await db.execute(
+        "UPDATE activity_log SET created_at = '2026-04-01T00:00:00Z' WHERE source = 'cc'"
+    )
+    await db.commit()
+
+    recent = await fns["get_recent_activity"](source="cc", limit=2, ctx=ctx)
+
+    assert [entry["project_name"] for entry in recent] == ["NewTie", "OldTie"]
 
 
 async def test_get_recent_activity_invalid_source_raises(
@@ -333,6 +354,44 @@ async def test_log_activity_prunes_to_retention_limit(
     row = await cursor.fetchone()
     assert row is not None
     assert row[0] == limit
+
+
+async def test_log_activity_retention_keeps_highest_ids_when_created_at_ties(
+    db: aiosqlite.Connection,
+) -> None:
+    limit = config.ACTIVITY_RETENTION_PER_SOURCE
+    for i in range(limit + 5):
+        await insert_activity_row(
+            db,
+            source="cc",
+            timestamp="2026-06-06",
+            project_name=f"P{i:02}",
+            summary="same-second burst",
+            retention_limit=None,
+        )
+    await db.execute(
+        "UPDATE activity_log SET created_at = '9999-01-01T00:00:00Z' WHERE source = 'cc'"
+    )
+    await db.commit()
+
+    # This insert triggers retention pruning. Its lower created_at means the
+    # survivor set is decided entirely by id DESC within the fixed timestamp tie.
+    await insert_activity_row(
+        db,
+        source="cc",
+        timestamp="2026-06-06",
+        project_name="outside-tie",
+        summary="triggers pruning",
+        retention_limit=limit,
+    )
+    await db.commit()
+
+    cursor = await db.execute("SELECT id FROM activity_log WHERE source = 'cc' ORDER BY id")
+    rows = await cursor.fetchall()
+    assert [row["id"] for row in rows] == list(range(6, 56))
+
+    metrics = await collect_fts_index_metrics(db)
+    assert metrics["ok"] is True
 
 
 async def test_log_activity_accepts_notion_os(

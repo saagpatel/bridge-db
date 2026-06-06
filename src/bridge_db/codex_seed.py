@@ -106,7 +106,7 @@ async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, A
                     DELETE FROM system_snapshots
                     WHERE system = ? AND id NOT IN (
                         SELECT id FROM system_snapshots WHERE system = ?
-                        ORDER BY created_at DESC LIMIT ?
+                        ORDER BY created_at DESC, id DESC LIMIT ?
                     )
                     """,
                     ("codex", "codex", config.SNAPSHOT_RETENTION_PER_SYSTEM),

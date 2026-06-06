@@ -47,7 +47,8 @@ async def build_markdown(db: Any) -> str:
 
     # --- CC State Snapshot ---
     cursor = await db.execute(
-        "SELECT snapshot_date, data FROM system_snapshots WHERE system='cc' ORDER BY created_at DESC LIMIT 1"
+        "SELECT snapshot_date, data FROM system_snapshots "
+        "WHERE system='cc' ORDER BY created_at DESC, id DESC LIMIT 1"
     )
     cc_snap_row = await cursor.fetchone()
     cc_snapshot_md = ""
@@ -95,7 +96,7 @@ async def build_markdown(db: Any) -> str:
     # --- Recent CC Activity ---
     cursor = await db.execute(
         "SELECT timestamp, project_name, summary, branch, tags FROM activity_log "
-        "WHERE source='cc' ORDER BY timestamp DESC, created_at DESC LIMIT 20"
+        "WHERE source='cc' ORDER BY timestamp DESC, created_at DESC, id DESC LIMIT 20"
     )
     cc_activity_rows = await cursor.fetchall()
     cc_activity_lines = _render_activity_rows(cc_activity_rows)
@@ -123,7 +124,7 @@ async def build_markdown(db: Any) -> str:
     # --- Recent Codex Activity ---
     cursor = await db.execute(
         "SELECT timestamp, project_name, summary, branch, tags FROM activity_log "
-        "WHERE source='codex' ORDER BY timestamp DESC, created_at DESC LIMIT 20"
+        "WHERE source='codex' ORDER BY timestamp DESC, created_at DESC, id DESC LIMIT 20"
     )
     codex_activity_rows = await cursor.fetchall()
     codex_activity_lines = _render_activity_rows(codex_activity_rows)
@@ -141,7 +142,7 @@ async def build_markdown(db: Any) -> str:
     for source, heading in _EXTRA_SOURCES.items():
         cursor = await db.execute(
             "SELECT timestamp, project_name, summary, branch, tags FROM activity_log "
-            "WHERE source=? ORDER BY timestamp DESC, created_at DESC LIMIT 20",
+            "WHERE source=? ORDER BY timestamp DESC, created_at DESC, id DESC LIMIT 20",
             (source,),
         )
         extra_rows = await cursor.fetchall()
@@ -152,7 +153,7 @@ async def build_markdown(db: Any) -> str:
     # --- Pending Handoffs ---
     cursor = await db.execute(
         "SELECT project_name, project_path, roadmap_file, phase, dispatched_at "
-        "FROM pending_handoffs WHERE status='pending' ORDER BY dispatched_at DESC"
+        "FROM pending_handoffs WHERE status='pending' ORDER BY dispatched_at DESC, id DESC"
     )
     handoff_rows = await cursor.fetchall()
     if handoff_rows:

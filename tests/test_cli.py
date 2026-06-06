@@ -386,7 +386,7 @@ asyncio.run(main())
         assert str(db_path) in result.stdout
         assert str(audit_log_path) in result.stdout
         assert "23 MCP tools" in (repo_root / "README.md").read_text(encoding="utf-8")
-        assert "148 tests" in (repo_root / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "155 tests" in (repo_root / "CLAUDE.md").read_text(encoding="utf-8")
     if flag == "--status":
         assert "contexts=0" in result.stdout
         assert "Attention:" not in result.stdout

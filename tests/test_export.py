@@ -258,6 +258,33 @@ async def test_export_uses_latest_codex_operating_snapshot(
     assert "newer advisory metadata" not in md
 
 
+async def test_export_uses_latest_cc_snapshot_when_created_at_ties(
+    db: aiosqlite.Connection, all_fns: dict[str, Any]
+) -> None:
+    mctx = make_ctx(db)
+    await all_fns["save_snapshot"](
+        caller="cc",
+        data={"active_projects": "OLD SNAPSHOT MARKER"},
+        snapshot_date="2026-06-01",
+        ctx=mctx,
+    )
+    await all_fns["save_snapshot"](
+        caller="cc",
+        data={"active_projects": "NEW SNAPSHOT MARKER"},
+        snapshot_date="2026-06-02",
+        ctx=mctx,
+    )
+    await db.execute(
+        "UPDATE system_snapshots SET created_at = '2026-06-01T00:00:00Z' WHERE system = 'cc'"
+    )
+    await db.commit()
+
+    md = await _build_markdown(db)
+
+    assert "NEW SNAPSHOT MARKER" in md
+    assert "OLD SNAPSHOT MARKER" not in md
+
+
 async def test_sync_from_file_then_export_preserves_fallback_context_and_live_state(
     db: aiosqlite.Connection, all_fns: dict[str, Any], tmp_path: Path
 ) -> None:

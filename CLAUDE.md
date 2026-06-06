@@ -1,6 +1,6 @@
 # bridge-db
 
-SQLite-backed MCP server for cross-system state sharing between Claude.ai, Claude Code, and Codex.
+SQLite-backed MCP server for cross-system state sharing between Claude.ai, Claude Code, Codex, Notion OS, and personal-ops.
 
 ## Commands
 
@@ -31,7 +31,7 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 
 - `caller` parameter on write tools enforces ownership (`CallerID = Literal["cc","codex","claude_ai","notion_os","personal_ops"]`)
 - `source`/`system` DB columns map 1:1 from `caller`
-- Activity retention: 50 per source; snapshot retention: 10 per system (auto-pruned on insert)
+- Activity retention: 50 per source; snapshot retention: 10 per system family (Codex operating and consulted-node snapshots are retained independently)
 - Export trigger: consumers call `export_bridge_markdown` explicitly after writes
 - Startup sync trigger: Claude Code `/start` calls `sync_from_file` before bridge reads so Claude.ai-owned file edits are imported into SQLite first
 - Logging: `logging.basicConfig(stream=sys.stderr)` — never stdout
@@ -66,7 +66,7 @@ bridge-db is an active local project in the /Users/d/Projects portfolio.
 
 ## Current State
 
-This project is in steady-state maintenance. The codebase is stable, the DB is live, core features are shipped and documented, and observability over the two JSONL logs is now closed (was a half-built feedback loop). 23 MCP tools across 9 modules, 148 tests green, pyright + ruff clean. Scope is explicitly pinned to cross-system *state* coordination plus lexical `recall`, shipped-event sync receipts, plus observability — expansion into a knowledge store is ruled out.
+This project is in steady-state maintenance. The codebase is stable, the DB is live, core features are shipped and documented, and observability over the two JSONL logs is now closed (was a half-built feedback loop). 23 MCP tools across 9 modules, 155 tests green, pyright + ruff clean. Scope is explicitly pinned to cross-system *state* coordination plus lexical `recall`, shipped-event sync receipts, plus observability — expansion into a knowledge store is ruled out.
 
 ## Stack
 
@@ -75,7 +75,7 @@ This project is in steady-state maintenance. The codebase is stable, the DB is l
 - **Database**: SQLite via `aiosqlite`
 - **Type checking**: pyright (strict)
 - **Lint**: ruff
-- **Test**: pytest (148 tests)
+- **Test**: pytest (155 tests)
 
 ## How To Run
 

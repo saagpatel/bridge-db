@@ -104,7 +104,7 @@ async def collect_status_summary(db: Any) -> dict[str, Any]:
     for system in _SNAPSHOT_SYSTEMS:
         cursor = await db.execute(
             "SELECT snapshot_date FROM system_snapshots "
-            "WHERE system = ? ORDER BY created_at DESC LIMIT 1",
+            "WHERE system = ? ORDER BY created_at DESC, id DESC LIMIT 1",
             (system,),
         )
         snapshot_row = await cursor.fetchone()
@@ -114,7 +114,7 @@ async def collect_status_summary(db: Any) -> dict[str, Any]:
     for source in _ACTIVITY_SOURCES:
         cursor = await db.execute(
             "SELECT timestamp, project_name FROM activity_log "
-            "WHERE source = ? ORDER BY timestamp DESC, created_at DESC LIMIT 1",
+            "WHERE source = ? ORDER BY timestamp DESC, created_at DESC, id DESC LIMIT 1",
             (source,),
         )
         activity_row = await cursor.fetchone()

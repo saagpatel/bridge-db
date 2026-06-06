@@ -395,7 +395,7 @@ async def insert_activity_row(
             DELETE FROM activity_log
             WHERE source = ? AND id NOT IN (
                 SELECT id FROM activity_log WHERE source = ?
-                ORDER BY created_at DESC LIMIT ?
+                ORDER BY created_at DESC, id DESC LIMIT ?
             )
             """,
             (source, source, retention_limit),

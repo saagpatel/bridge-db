@@ -207,6 +207,53 @@ async def test_status_returns_compact_operator_summary(
     assert result["latest_activity"]["cc"] == "2026-04-17 (bridge-db)"
 
 
+async def test_status_breaks_latest_ties_by_id(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "test.db").touch()
+    bridge = tmp_path / "bridge.md"
+    bridge.write_text("# test", encoding="utf-8")
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge)
+
+    fixed_created_at = "2026-04-17T00:00:00Z"
+    first_snapshot = '{"active_projects":"old"}'
+    second_snapshot = '{"active_projects":"new"}'
+    for snapshot_date, data in (
+        ("2026-04-17", first_snapshot),
+        ("2026-04-18", second_snapshot),
+    ):
+        cursor = await db.execute(
+            "INSERT INTO system_snapshots (system, snapshot_date, data, created_at) "
+            "VALUES ('cc', ?, ?, ?)",
+            (snapshot_date, data, fixed_created_at),
+        )
+        snapshot_id = cursor.lastrowid
+        assert snapshot_id is not None
+        await upsert_fts_entry(db, "snapshot", str(snapshot_id), fts_text_for_snapshot(data))
+
+    for project_name in ("old-activity", "new-activity"):
+        cursor = await db.execute(
+            "INSERT INTO activity_log (source, timestamp, project_name, summary, created_at) "
+            "VALUES ('cc', '2026-04-17', ?, 'checked operator status', ?)",
+            (project_name, fixed_created_at),
+        )
+        activity_id = cursor.lastrowid
+        assert activity_id is not None
+        await upsert_fts_entry(
+            db,
+            "activity",
+            str(activity_id),
+            fts_text_for_activity(project_name, "checked operator status", None),
+        )
+    await db.commit()
+
+    result = await fns["status"](ctx=make_ctx(db))
+
+    assert result["ok"] is True
+    assert result["latest_snapshots"]["cc"] == "2026-04-18"
+    assert result["latest_activity"]["cc"] == "2026-04-17 (new-activity)"
+
+
 async def test_health_wal_absent_when_no_wal_file(
     db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
 ) -> None:

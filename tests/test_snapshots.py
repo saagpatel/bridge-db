@@ -62,6 +62,26 @@ async def test_get_latest_snapshot_returns_most_recent(
     assert snap["data"]["v"] == "2"
 
 
+async def test_get_latest_snapshot_breaks_created_at_ties_by_id(
+    db: aiosqlite.Connection, snap_fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await snap_fns["save_snapshot"](
+        caller="cc", data={"v": "old"}, snapshot_date="2026-01-01", ctx=ctx
+    )
+    await snap_fns["save_snapshot"](
+        caller="cc", data={"v": "new"}, snapshot_date="2026-01-02", ctx=ctx
+    )
+    await db.execute(
+        "UPDATE system_snapshots SET created_at = '2026-01-01T00:00:00Z' WHERE system = 'cc'"
+    )
+    await db.commit()
+
+    snap = await snap_fns["get_latest_snapshot"](system="cc", ctx=ctx)
+
+    assert snap["data"]["v"] == "new"
+
+
 async def test_get_latest_snapshot_not_found_raises(
     db: aiosqlite.Connection, snap_fns: dict[str, Any]
 ) -> None:

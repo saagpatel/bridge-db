@@ -115,7 +115,7 @@ def register(mcp: FastMCP) -> None:
             SELECT id, source, timestamp, project_name, summary, branch, tags, created_at
             FROM activity_log
             {where}
-            ORDER BY timestamp DESC, created_at DESC
+            ORDER BY timestamp DESC, created_at DESC, id DESC
             LIMIT ?
             """,
             params,
