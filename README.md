@@ -14,8 +14,10 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
 - **Phase 6 observability shipped (2026-04-17):** `recall_stats` reads the recall query log, `audit_tail` reads the audit log, and `health` now surfaces `wal_size_bytes` + `wal_warning`. All three close half-built feedback loops without expanding scope. See the Phase 6 section in [ROADMAP.md](ROADMAP.md).
 - Shipped-event sync hardening shipped: `confirm_shipped_sync` records downstream proof in `shipped_sync_receipts` before marking a `SHIPPED` activity event `PROCESSED`.
 - `health` / `status` also surface `processed_shipped_without_receipt` as a soft drift signal for older or manual `mark_shipped_processed` paths, and `fts_missing` / `fts_orphaned` as hard recall-index health signals. Prefer `confirm_shipped_sync` for new downstream syncs.
-- Local verification is currently green as of 2026-05-30: `148` tests passing,
-  `ruff` clean, `pyright` clean, and live `--doctor` / `--status` / `--dogfood` checks healthy.
+- Local verification is currently green as of 2026-06-06: `155` tests passing,
+  `ruff` clean, and `pyright` clean. Live `--doctor` and `--status` checks are
+  healthy; `--dogfood` currently reports one intentionally pending Veritas
+  handoff awaiting the human QuickTime audio check.
 - Project is in steady maintenance. Scope is pinned to cross-system *state* coordination plus lexical `recall` plus observability; it is not a knowledge store.
 - The Bridge Sync burn-in heartbeat has been retired after a clean post-run
   review. The 2026-05-30 dependency refresh updated the lockfile for current
@@ -94,7 +96,8 @@ args = ["run", "--directory", "/Users/d/Projects/bridge-db", "python", "-m", "br
 
 - **DB**: `~/.local/share/bridge-db/bridge.db`
 - **Bridge file**: `~/.claude/projects/-Users-d/memory/claude_ai_context.md`
-- Retention: 50 activity entries per source, 10 snapshots per system
+- Retention: 50 activity entries per source; 10 snapshots per system family
+  (Codex operating and consulted-node snapshots are retained independently)
 - Health check: `health` MCP tool or `uv run python -m bridge_db --doctor`
 - Operator summary: `uv run python -m bridge_db --status`
 - Dogfood pass: `uv run python -m bridge_db --dogfood` bundles the status, FTS index, WAL, recall, and shipped-sync audit checks used after bridge-sync runs

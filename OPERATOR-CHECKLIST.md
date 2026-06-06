@@ -55,16 +55,18 @@ Checklist
 
 ## Current Verified Local State
 
-Routine verifier refreshed on 2026-05-30. Claude Desktop registration details
+Routine verifier refreshed on 2026-06-06. Claude Desktop registration details
 below remain from the earlier integration verification.
 
-- `uv run pytest` passes locally with 148 tests.
+- `uv run pytest` passes locally with 155 tests.
 - `uv run pyright` passes locally.
 - `uv run ruff check` passes locally.
 - `uv run python -m bridge_db --doctor` passes locally.
 - `uv run python -m bridge_db --status` reports healthy bridge state.
-- `uv run python -m bridge_db --dogfood` reports a clean shipped-event queue.
-- `uv run python -m bridge_db --dogfood` reports a clean FTS index (`fts_missing=0`, `fts_orphaned=0`).
+- `uv run python -m bridge_db --dogfood` reports a clean shipped-event queue
+  and clean FTS index (`fts_missing=0`, `fts_orphaned=0`).
+- `uv run python -m bridge_db --dogfood` currently reports one intentionally
+  pending Veritas handoff awaiting the human QuickTime audio check.
 - Claude Code SessionEnd logging uses `uv run --directory /Users/d/Projects/bridge-db python -m bridge_db --log-session-boundary <project>` rather than direct SQLite writes.
 - `claude mcp list` reports `bridge-db` connected through this repo.
 - Codex config includes the `mcp_servers.bridge-db` registration for this repo.
@@ -74,8 +76,8 @@ below remain from the earlier integration verification.
 - Claude.ai read access is confirmed with a successful `mcp__bridge_db__health()` call after restart.
 - Claude.ai direct write behavior has been proven through bridge-db MCP tools.
 - Startup sync plus export has been verified end to end.
-- Latest local repo verification is green: `148` tests, `ruff` clean, `pyright` clean.
-- Live status currently reports no pending handoffs and no unprocessed shipped events.
+- Latest local repo verification is green: `155` tests, `ruff` clean, `pyright` clean.
+- Live status currently reports one pending Veritas handoff and no unprocessed shipped events.
 - Dependency drift was refreshed through PR #27 after Dependabot PRs #25 and #26 were superseded.
 - Bridge Sync burn-in review is complete and the one-time heartbeat is retired.
 - `POST-SYNC-REVIEW.md` is the checklist to use after future scheduled Bridge
@@ -165,6 +167,8 @@ Activity retention and shipped-sync receipts answer different questions:
 - `activity_log` keeps the latest 50 rows per source for ordinary activity
   writes. This is a convenience retention policy for recent context, not a
   proof ledger.
+- `system_snapshots` keeps the latest 10 rows per system family; Codex
+  operating snapshots and consulted-node snapshots are retained independently.
 - `shipped_sync_receipts` is the downstream proof ledger for shipped events that
   were confirmed through `confirm_shipped_sync`.
 - Claude Code SessionEnd logging uses `--log-session-boundary`; that path adds

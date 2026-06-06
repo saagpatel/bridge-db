@@ -1,7 +1,7 @@
 [project]
 name = "bridge-db"
 version = "0.1.0"
-description = "SQLite-backed MCP server for cross-system state sharing between Claude.ai, Claude Code, and Codex"
+description = "SQLite-backed MCP server for cross-system state sharing between Claude.ai, Claude Code, Codex, Notion OS, and personal-ops"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
