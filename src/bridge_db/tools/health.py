@@ -9,6 +9,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from bridge_db import config
 from bridge_db.db import SCHEMA_VERSION, collect_fts_index_metrics, get_db
+from bridge_db.migration import SECTION_MAP, extract_sections
 
 logger = logging.getLogger("bridge_db.tools.health")
 
@@ -22,6 +23,54 @@ _ROW_COUNT_TABLES = (
 )
 _ACTIVITY_SOURCES = ("cc", "codex", "claude_ai", "notion_os", "personal_ops")
 _SNAPSHOT_SYSTEMS = ("cc", "codex")
+
+
+def _read_bridge_claude_ai_sections() -> dict[str, str] | None:
+    """Parse the exported bridge file's claude_ai-owned sections the same way
+    ``sync_from_file`` reads them. Returns ``{section_name: body}`` (only non-empty
+    sections), or ``None`` when the file is absent/unreadable."""
+    path = config.BRIDGE_FILE_PATH
+    if not path.exists():
+        return None
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    headings = extract_sections(content)
+    sections: dict[str, str] = {}
+    for heading, section_name in SECTION_MAP.items():
+        body = headings.get(heading, "").strip()
+        if body:
+            sections[section_name] = body
+    return sections
+
+
+async def collect_claude_ai_section_drift(db: Any) -> dict[str, Any]:
+    """Detect when the exported bridge file's claude_ai sections disagree with the
+    DB projection (F8 clobber-race monitor).
+
+    A mismatch means either unsynced inbound Claude.ai file edits at risk of being
+    overwritten by the next ``export_bridge_markdown``, or a stale export — both
+    actionable (run ``sync_from_file`` or re-export). Advisory only: this is a
+    latent-risk signal and is intentionally NOT folded into ``ok`` so it can't flap
+    during the normal window between a DB write and the next export.
+    """
+    file_sections = _read_bridge_claude_ai_sections()
+    if file_sections is None:
+        return {"checked": False, "in_sync": True, "drifted_sections": []}
+
+    cursor = await db.execute(
+        "SELECT section_name, content FROM context_sections WHERE owner = 'claude_ai'"
+    )
+    rows = await cursor.fetchall()
+    db_sections = {r["section_name"]: (r["content"] or "").strip() for r in rows}
+
+    drifted = sorted(
+        name
+        for name in set(db_sections) | set(file_sections)
+        if db_sections.get(name, "") != file_sections.get(name, "")
+    )
+    return {"checked": True, "in_sync": not drifted, "drifted_sections": drifted}
 
 
 async def collect_health_metrics(db: Any) -> dict[str, Any]:
@@ -71,8 +120,9 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         bridge_file_age_seconds = datetime.now(UTC).timestamp() - mtime
 
     fts_index = await collect_fts_index_metrics(db)
+    claude_ai_section_drift = await collect_claude_ai_section_drift(db)
 
-    # WAL size is a soft signal — do not fold it into `ok`.
+    # WAL size and claude_ai section drift are soft signals — do not fold into `ok`.
     ok = db_exists and schema_version == SCHEMA_VERSION and bridge_file_exists and fts_index["ok"]
 
     return {
@@ -89,6 +139,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "wal_size_bytes": wal_size_bytes,
         "wal_warning": wal_warning,
         "fts_index": fts_index,
+        "claude_ai_section_drift": claude_ai_section_drift,
     }
 
 
@@ -149,11 +200,12 @@ async def collect_status_summary(db: Any) -> dict[str, Any]:
         "signals": {
             "pending_handoffs": pending_handoffs,
             "unprocessed_shipped": health["unprocessed_shipped_count"],
-            "processed_shipped_without_receipt": health[
-                "processed_shipped_without_receipt_count"
-            ],
+            "processed_shipped_without_receipt": health["processed_shipped_without_receipt_count"],
             "fts_missing": health["fts_index"]["missing"],
             "fts_orphaned": health["fts_index"]["orphaned"],
+            "claude_ai_unsynced_sections": len(
+                health["claude_ai_section_drift"]["drifted_sections"]
+            ),
         },
         "fts_index": health["fts_index"],
         "latest_snapshots": latest_snapshots,
