@@ -185,9 +185,7 @@ async def test_mark_shipped_processed_audit_names_activity_ids(
     activity_id = row["id"]
     missing_id = activity_id + 999
 
-    result = await fns["mark_shipped_processed"](
-        activity_ids=[activity_id, missing_id], ctx=ctx
-    )
+    result = await fns["mark_shipped_processed"](activity_ids=[activity_id, missing_id], ctx=ctx)
 
     assert result["updated"] == 1
     assert result["activity_ids"] == [activity_id, missing_id]
@@ -207,6 +205,41 @@ async def test_mark_shipped_processed_empty_raises(
     ctx = make_ctx(db)
     with pytest.raises(ToolError):
         await fns["mark_shipped_processed"](activity_ids=[], ctx=ctx)
+
+
+async def test_mark_shipped_processed_flags_shipped_bypass(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F7: a SHIPPED event processed via the receiptless path is flagged (and audited
+    non-ok) so the drift vector is observable at the source, while a non-shipped
+    operational event passes through clean."""
+    audit_path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(config, "AUDIT_LOG_PATH", audit_path)
+    ctx = make_ctx(db)
+
+    # operational (non-shipped) event — legitimate use, no receipt lifecycle
+    await fns["log_activity"](
+        caller="personal_ops", project_name="Ops", summary="s", tags=["TASK_DONE"], ctx=ctx
+    )
+    # genuine shipped artifact — should go through confirm_shipped_sync instead
+    await fns["log_activity"](
+        caller="cc", project_name="Ship", summary="s", tags=["SHIPPED"], ctx=ctx
+    )
+    cursor = await db.execute("SELECT id, tags FROM activity_log ORDER BY id")
+    rows: list[aiosqlite.Row] = await cursor.fetchall()  # type: ignore[assignment]
+    ops_id, shipped_id = rows[0]["id"], rows[1]["id"]
+
+    ops_result = await fns["mark_shipped_processed"](activity_ids=[ops_id], ctx=ctx)
+    assert ops_result["shipped_bypass_ids"] == []
+
+    shipped_result = await fns["mark_shipped_processed"](activity_ids=[shipped_id], ctx=ctx)
+    assert shipped_result["shipped_bypass_ids"] == [shipped_id]
+    assert shipped_result["updated"] == 1  # still processed — guard is non-breaking
+
+    last = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert last["tool"] == "mark_shipped_processed"
+    assert last["ok"] is False
+    assert f"shipped_bypass_ids=[{shipped_id}]" in last["detail"]
 
 
 async def test_confirm_shipped_sync_requires_downstream_proof(
@@ -297,9 +330,7 @@ async def test_confirm_shipped_sync_records_receipt_and_marks_processed(
     assert receipt["notes"] == "Updated personal-ops portfolio row"
 
     shipped = await fns["get_shipped_events"](ctx=ctx)
-    assert shipped[0]["sync_receipt"]["downstream_ref"] == (
-        "35bc21f1-caf0-81cb-9426-dd264ef668b2"
-    )
+    assert shipped[0]["sync_receipt"]["downstream_ref"] == ("35bc21f1-caf0-81cb-9426-dd264ef668b2")
     assert bridge_path.exists()
 
 

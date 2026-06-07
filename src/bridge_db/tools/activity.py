@@ -238,7 +238,21 @@ def register(mcp: FastMCP) -> None:
         ],
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
-        """Add 'PROCESSED' tag to shipped events so Codex bridge-sync doesn't re-process them."""
+        """Add 'PROCESSED' tag to activity events so they are not re-processed.
+
+        LEGACY / receiptless path. It records NO downstream proof, so for genuine
+        SHIPPED artifacts prefer ``confirm_shipped_sync`` (which writes a
+        ``shipped_sync_receipts`` row). This tool is retained for non-shipped
+        operational events (TASK_DONE / APPROVAL_SENT / PLANNING_APPLIED /
+        REVIEW_CLOSED) that have no shipped-receipt lifecycle.
+
+        Guard (F7): if any passed id IS tagged SHIPPED, processing it here bypasses
+        the receipt and creates exactly the drift ``health.processed_shipped_without_receipt``
+        detects. We still process it (non-breaking for existing callers) but flag it
+        loudly via a warning + a non-ok audit record and return the offending ids in
+        ``shipped_bypass_ids`` so the misuse is observable at the source, not only
+        after the fact.
+        """
         if not activity_ids:
             raise ToolError("activity_ids must not be empty")
 
@@ -246,6 +260,7 @@ def register(mcp: FastMCP) -> None:
         updated = 0
         updated_ids: list[int] = []
         missing_ids: list[int] = []
+        shipped_bypass_ids: list[int] = []
 
         # Tags are not indexed in content_index (see fts_text_for_activity), so
         # updating tags does not require re-indexing. If fts_text_for_activity
@@ -258,6 +273,8 @@ def register(mcp: FastMCP) -> None:
                 missing_ids.append(activity_id)
                 continue
             current_tags: list[str] = json.loads(row["tags"])
+            if "SHIPPED" in current_tags:
+                shipped_bypass_ids.append(activity_id)
             if "PROCESSED" not in current_tags:
                 current_tags.append("PROCESSED")
                 await db.execute(
@@ -271,14 +288,21 @@ def register(mcp: FastMCP) -> None:
 
         await _export_bridge_markdown_after_processing(db)
 
+        if shipped_bypass_ids:
+            logger.warning(
+                "mark_shipped_processed: SHIPPED ids %s processed without a receipt — "
+                "use confirm_shipped_sync for shipped artifacts (F7 drift vector)",
+                shipped_bypass_ids,
+            )
         log_audit(
             "mark_shipped_processed",
             None,
             None,
-            ok=True,
+            ok=not shipped_bypass_ids,
             detail=(
                 f"activity_ids={activity_ids} updated_ids={updated_ids} "
                 f"missing_ids={missing_ids} updated={updated}/{len(activity_ids)}"
+                + (f" shipped_bypass_ids={shipped_bypass_ids}" if shipped_bypass_ids else "")
             ),
         )
         logger.info("mark_shipped_processed: updated %d/%d entries", updated, len(activity_ids))
@@ -289,6 +313,7 @@ def register(mcp: FastMCP) -> None:
             "activity_ids": activity_ids,
             "updated_ids": updated_ids,
             "missing_ids": missing_ids,
+            "shipped_bypass_ids": shipped_bypass_ids,
         }
 
     @mcp.tool()
