@@ -423,3 +423,36 @@ Prefers MCP when available
     assert "Operator-ready bridge role" in content
     assert "Phase 5 operator readiness" in content
     assert "## Recent Personal Ops Activity" in content
+
+
+def test_write_bridge_file_writes_content_and_leaves_no_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "claude_ai_context.md"
+    monkeypatch.setattr(exp_mod.config, "BRIDGE_FILE_PATH", target)
+
+    exp_mod.write_bridge_file("hello bridge\n")
+
+    assert target.read_text(encoding="utf-8") == "hello bridge\n"
+    # the atomic temp file must not linger in the watched directory
+    assert [p.name for p in tmp_path.iterdir()] == ["claude_ai_context.md"]
+
+
+def test_write_bridge_file_atomic_on_replace_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "claude_ai_context.md"
+    target.write_text("original\n", encoding="utf-8")
+    monkeypatch.setattr(exp_mod.config, "BRIDGE_FILE_PATH", target)
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(exp_mod.os, "replace", boom)
+
+    with pytest.raises(OSError, match="simulated replace failure"):
+        exp_mod.write_bridge_file("new content that must not partially land\n")
+
+    # atomicity: the original file is untouched and the temp file is cleaned up
+    assert target.read_text(encoding="utf-8") == "original\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["claude_ai_context.md"]
