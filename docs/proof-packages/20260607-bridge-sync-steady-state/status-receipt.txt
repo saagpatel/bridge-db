@@ -1,0 +1,9 @@
+bridge-db status
+  Overall: healthy
+  DB: exists=True, schema=v6 (expected v6)
+  Bridge file: exists=True, age=0.3h old
+  Rows: contexts=4, activity=174, handoffs=16, snapshots=25, costs=4, shipped_receipts=24
+  Signals: pending_handoffs=0, unprocessed_shipped=0, processed_shipped_without_receipt=0, fts_missing=0, fts_orphaned=0
+  FTS: expected=219, indexed=219, missing=0, orphaned=0
+  Latest snapshots: cc=2026-06-07, codex=2026-06-07
+  Latest activity: {"cc": "2026-06-07T21:20:49Z (.claude)", "claude_ai": "2026-05-17 (sync-bridge)", "codex": "2026-06-07 (operator-os-coherence)", "notion_os": "2026-06-07 (notion_os)", "personal_ops": "2026-05-31 (Follow-up: slow-401 on /v1/coordination/lanes and /v1/github/pulls)"}
