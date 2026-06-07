@@ -320,3 +320,65 @@ async def test_health_ok_unaffected_by_wal_warning(
     result = await fns["health"](ctx=make_ctx(db))
     assert result["wal_warning"] is True
     assert result["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# F8 — claude_ai section drift monitor (bridge file vs DB projection)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_claude_ai_section(
+    db: aiosqlite.Connection, section_name: str, content: str
+) -> None:
+    await db.execute(
+        "INSERT INTO context_sections (section_name, owner, content) VALUES (?, 'claude_ai', ?)",
+        (section_name, content),
+    )
+    await db.commit()
+
+
+async def test_claude_ai_section_drift_in_sync(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _seed_claude_ai_section(db, "career", "Platform Engineer target.")
+    bridge = tmp_path / "bridge.md"
+    bridge.write_text("## Career & Professional Target\nPlatform Engineer target.\n")
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge)
+
+    result = await fns["health"](ctx=make_ctx(db))
+    drift = result["claude_ai_section_drift"]
+    assert drift["checked"] is True
+    assert drift["in_sync"] is True
+    assert drift["drifted_sections"] == []
+
+
+async def test_claude_ai_section_drift_detects_mismatch(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # DB holds the synced value; the file has an unsynced inbound edit.
+    await _seed_claude_ai_section(db, "career", "Synced value.")
+    bridge = tmp_path / "bridge.md"
+    bridge.write_text("## Career & Professional Target\nHand-edited but unsynced.\n")
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge)
+
+    result = await fns["health"](ctx=make_ctx(db))
+    drift = result["claude_ai_section_drift"]
+    assert drift["checked"] is True
+    assert drift["in_sync"] is False
+    assert drift["drifted_sections"] == ["career"]
+
+    status = await fns["status"](ctx=make_ctx(db))
+    assert status["signals"]["claude_ai_unsynced_sections"] == 1
+    # Advisory only — drift must not flip overall health.
+    assert result["ok"] == status["ok"]
+
+
+async def test_claude_ai_section_drift_no_file(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", tmp_path / "missing.md")
+    result = await fns["health"](ctx=make_ctx(db))
+    drift = result["claude_ai_section_drift"]
+    assert drift["checked"] is False
+    assert drift["in_sync"] is True
+    assert drift["drifted_sections"] == []
