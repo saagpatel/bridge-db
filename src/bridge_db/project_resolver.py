@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from bridge_db import config
 
@@ -24,7 +26,7 @@ _NON_ALNUM = re.compile(r"[^a-z0-9]")
 
 # (path, mtime_ns) -> compiled index, so a long-running server picks up new
 # auditor runs without restarting and without re-reading on every call.
-_cache: dict[tuple[str, int], "_Index"] = {}
+_cache: dict[tuple[str, int], _Index] = {}
 
 
 @dataclass(frozen=True)
@@ -59,26 +61,45 @@ def _strip_alias_prefix(alias: str) -> str:
     return alias.split(":", 1)[1] if ":" in alias else alias
 
 
-def _compile_index(registry: dict) -> _Index:
+def _compile_index(registry: Mapping[str, object]) -> _Index:
     norm_to_key: dict[str, str] = {}
-    for entry in registry.get("entries", []):
-        key = entry.get("canonical_key")
-        if not key:
+    raw_entries = registry.get("entries", [])
+    entries: list[object] = []
+    if isinstance(raw_entries, list):
+        entries = cast(list[object], raw_entries)
+    for raw_entry in entries:
+        if not isinstance(raw_entry, dict):
             continue
-        forms = {_normalize(entry.get("display_name"))}
+        entry = cast(dict[str, object], raw_entry)
+        raw_key = entry.get("canonical_key")
+        if not isinstance(raw_key, str) or not raw_key:
+            continue
+        key = raw_key
+        raw_display = entry.get("display_name")
+        forms = {_normalize(raw_display if isinstance(raw_display, str) else None)}
         repo = entry.get("repo_full_name")
         if repo:
-            forms.add(_normalize(_repo_base(repo)))
-        if "/" in (key or ""):
+            forms.add(_normalize(_repo_base(repo if isinstance(repo, str) else None)))
+        if "/" in key:
             forms.add(_normalize(key))
-        for alias in entry.get("aliases", []):
-            forms.add(_normalize(_strip_alias_prefix(alias)))
+        raw_aliases = entry.get("aliases", [])
+        aliases: list[object] = []
+        if isinstance(raw_aliases, list):
+            aliases = cast(list[object], raw_aliases)
+        for raw_alias in aliases:
+            if isinstance(raw_alias, str):
+                forms.add(_normalize(_strip_alias_prefix(raw_alias)))
         for form in forms:
             if form:
                 norm_to_key.setdefault(form, key)
-    override_norm_to_key = {
-        _normalize(raw): key for raw, key in registry.get("resolution_overrides", {}).items()
-    }
+    override_norm_to_key: dict[str, str] = {}
+    raw_overrides = registry.get("resolution_overrides", {})
+    overrides: dict[object, object] = (
+        cast(dict[object, object], raw_overrides) if isinstance(raw_overrides, dict) else {}
+    )
+    for raw, key in overrides.items():
+        if isinstance(raw, str) and isinstance(key, str):
+            override_norm_to_key[_normalize(raw)] = key
     return _Index(norm_to_key=norm_to_key, override_norm_to_key=override_norm_to_key)
 
 
@@ -92,10 +113,12 @@ def _load_index(registry_path: Path) -> _Index | None:
     if cached is not None:
         return cached
     try:
-        registry = json.loads(registry_path.read_text())
+        registry = cast(object, json.loads(registry_path.read_text()))
     except (json.JSONDecodeError, OSError):
         return None
-    index = _compile_index(registry)
+    if not isinstance(registry, dict):
+        return None
+    index = _compile_index(cast(dict[str, object], registry))
     _cache.clear()  # only the current registry version matters
     _cache[cache_key] = index
     return index
