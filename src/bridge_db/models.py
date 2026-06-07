@@ -9,6 +9,31 @@ CallerID = Literal["cc", "codex", "claude_ai", "notion_os", "personal_ops"]
 # claude_ai uses context_sections; notion_os/personal_ops log activity and costs
 SystemID = Literal["cc", "codex", "notion_os", "personal_ops"]
 
+CALLER_IDS: tuple[CallerID, ...] = (
+    "cc",
+    "codex",
+    "claude_ai",
+    "notion_os",
+    "personal_ops",
+)
+
+SYSTEM_IDS: tuple[SystemID, ...] = (
+    "cc",
+    "codex",
+    "notion_os",
+    "personal_ops",
+)
+
+# notification-hub keeps hyphenated external source names on the wire. Keep
+# this map explicit so producers do not guess between `_` and `-` dialects.
+NOTIFICATION_SOURCE_ALIASES: dict[CallerID, str] = {
+    "cc": "cc",
+    "codex": "codex",
+    "claude_ai": "claude_ai",
+    "notion_os": "notion-os",
+    "personal_ops": "personal-ops",
+}
+
 # Which section names belong to which owner
 # Keys are the section_name values stored in context_sections
 SECTION_OWNERS: dict[str, CallerID] = {
@@ -20,9 +45,7 @@ SECTION_OWNERS: dict[str, CallerID] = {
 
 # Callers allowed to log activity per source column value.
 # activity_log.source maps directly from caller.
-ACTIVITY_SOURCES: frozenset[CallerID] = frozenset(
-    {"cc", "codex", "claude_ai", "notion_os", "personal_ops"}
-)
+ACTIVITY_SOURCES: frozenset[CallerID] = frozenset(CALLER_IDS)
 
 # Callers allowed to save snapshots per system
 # Only cc/codex own full state snapshots; notion_os/personal_ops use activity log instead
