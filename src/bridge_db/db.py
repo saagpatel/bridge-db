@@ -10,7 +10,7 @@ import aiosqlite
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Full DDL for current schema (initial create on a fresh DB)
 _SCHEMA_DDL = """
@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS pending_handoffs (
     dispatched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     picked_up_at TEXT,
     cleared_at TEXT,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'active', 'cleared'))
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'active', 'cleared')),
+    canonical_key TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_handoff_status ON pending_handoffs(status);
@@ -200,6 +201,16 @@ _MIGRATION_V4_TO_V5 = """
 ALTER TABLE activity_log ADD COLUMN canonical_key TEXT;
 """
 
+# Migration v5 → v6: extend canonical resolution to the handoff queue by adding
+# nullable canonical_key to pending_handoffs (mirrors the v5 activity_log change).
+# create_handoff resolves on write; clear_handoff matches on it so a handoff
+# dispatched under one project_name still clears when /end passes a sibling alias
+# (F1 consumer adoption). Additive and FTS-neutral — canonical_key is not part of
+# fts_text_for_handoff.
+_MIGRATION_V5_TO_V6 = """
+ALTER TABLE pending_handoffs ADD COLUMN canonical_key TEXT;
+"""
+
 
 async def apply_pragmas(db: aiosqlite.Connection) -> None:
     """Apply all required PRAGMAs. Safe to call on every connection open."""
@@ -265,6 +276,13 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
             await db.execute(f"PRAGMA user_version = {current_version}")
             await db.commit()
             logger.info("Schema migrated to v5")
+        elif current_version == 5:
+            logger.info("Migrating schema v5 → v6")
+            await db.executescript(_MIGRATION_V5_TO_V6)
+            current_version = 6
+            await db.execute(f"PRAGMA user_version = {current_version}")
+            await db.commit()
+            logger.info("Schema migrated to v6")
         else:
             raise RuntimeError(f"No migration path defined from v{current_version}")
 

@@ -7,8 +7,10 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
+from bridge_db.audit import log_audit
 from bridge_db.db import fts_text_for_handoff, get_db, upsert_fts_entry
 from bridge_db.models import CallerID
+from bridge_db.project_resolver import resolve as resolve_project
 
 logger = logging.getLogger("bridge_db.tools.handoffs")
 
@@ -36,12 +38,14 @@ def register(mcp: FastMCP) -> None:
             raise ToolError(f"Only 'claude_ai' may create handoffs; caller was '{caller}'")
 
         db = get_db(ctx)
+        resolution = resolve_project(project_name)
         cursor = await db.execute(
             """
-            INSERT INTO pending_handoffs (project_name, project_path, roadmap_file, phase, dispatched_from)
-            VALUES (?, ?, ?, ?, 'claude_ai')
+            INSERT INTO pending_handoffs
+                (project_name, project_path, roadmap_file, phase, dispatched_from, canonical_key)
+            VALUES (?, ?, ?, ?, 'claude_ai', ?)
             """,
-            (project_name, project_path, roadmap_file, phase),
+            (project_name, project_path, roadmap_file, phase, resolution.canonical_key),
         )
         handoff_id = cursor.lastrowid
 
@@ -55,11 +59,29 @@ def register(mcp: FastMCP) -> None:
 
         await db.commit()
 
+        log_audit("create_handoff", caller, project_name, ok=True)
+        if resolution.registry_present and not resolution.matched:
+            # Drift: a real handoff with no canonical match. Surface it via the
+            # audit log rather than silently recording an unresolvable name, so a
+            # later clear_handoff alias can't expect a canonical match that the
+            # registry never produced.
+            log_audit(
+                "create_handoff.unmatched_project",
+                caller,
+                project_name,
+                ok=True,
+                detail="no canonical match in project-registry; flagged for triage",
+            )
+            logger.warning(
+                "create_handoff: unmatched project_name %r (no canonical key)", project_name
+            )
+
         logger.info("handoff created: id=%d project=%s", handoff_id, project_name)
         return {
             "ok": True,
             "handoff_id": handoff_id,
             "project_name": project_name,
+            "canonical_key": resolution.canonical_key,
             "status": "pending",
         }
 
@@ -72,7 +94,7 @@ def register(mcp: FastMCP) -> None:
         cursor = await db.execute(
             """
             SELECT id, project_name, project_path, roadmap_file, phase,
-                   dispatched_from, dispatched_at, status
+                   dispatched_from, dispatched_at, status, canonical_key
             FROM pending_handoffs
             WHERE status = 'pending'
             ORDER BY dispatched_at DESC, id DESC
@@ -89,6 +111,7 @@ def register(mcp: FastMCP) -> None:
                 "dispatched_from": r["dispatched_from"],
                 "dispatched_at": r["dispatched_at"],
                 "status": r["status"],
+                "canonical_key": r["canonical_key"],
             }
             for r in rows
         ]
@@ -107,7 +130,8 @@ def register(mcp: FastMCP) -> None:
 
         db = get_db(ctx)
         cursor = await db.execute(
-            "SELECT id, project_name, status FROM pending_handoffs WHERE id = ?", (handoff_id,)
+            "SELECT id, project_name, status, canonical_key FROM pending_handoffs WHERE id = ?",
+            (handoff_id,),
         )
         row = await cursor.fetchone()
         if row is None:
@@ -129,6 +153,7 @@ def register(mcp: FastMCP) -> None:
             "ok": True,
             "handoff_id": handoff_id,
             "project_name": row["project_name"],
+            "canonical_key": row["canonical_key"],
             "status": "active",
         }
 
@@ -145,14 +170,27 @@ def register(mcp: FastMCP) -> None:
             raise ToolError(f"Only 'cc' or 'codex' may clear handoffs; caller was '{caller}'")
 
         db = get_db(ctx)
+        # Match by exact project_name OR — when the incoming name resolves through
+        # the canonical registry — by shared canonical_key, so a handoff dispatched
+        # as "IncidentMgmt" still clears when /end passes "IncidentManagement" (both
+        # resolve to the same canonical key). The exact-name path is always present,
+        # preserving today's behavior for rows with no canonical_key (F1).
+        canonical = resolve_project(project_name).canonical_key
+        if canonical is not None:
+            match_sql = "(project_name = ? OR canonical_key = ?)"
+            match_params: tuple[str, ...] = (project_name, canonical)
+        else:
+            match_sql = "project_name = ?"
+            match_params = (project_name,)
+
         cursor = await db.execute(
-            """
+            f"""
             SELECT id
             FROM pending_handoffs
-            WHERE project_name = ? AND status != 'cleared'
+            WHERE {match_sql} AND status != 'cleared'
             ORDER BY dispatched_at DESC, id DESC
             """,
-            (project_name,),
+            match_params,
         )
         rows = await cursor.fetchall()
         if not rows:
@@ -161,12 +199,12 @@ def register(mcp: FastMCP) -> None:
 
         handoff_ids = [row["id"] for row in rows]
         await db.execute(
-            """
+            f"""
             UPDATE pending_handoffs
             SET status = 'cleared', cleared_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-            WHERE project_name = ? AND status != 'cleared'
+            WHERE {match_sql} AND status != 'cleared'
             """,
-            (project_name,),
+            match_params,
         )
         await db.commit()
         logger.info(
@@ -179,4 +217,5 @@ def register(mcp: FastMCP) -> None:
             "handoff_ids": handoff_ids,
             "cleared_count": len(handoff_ids),
             "project_name": project_name,
+            "canonical_key": canonical,
         }

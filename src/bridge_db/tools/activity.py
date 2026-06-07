@@ -193,6 +193,7 @@ def register(mcp: FastMCP) -> None:
                 a.branch,
                 a.tags,
                 a.created_at,
+                a.canonical_key,
                 r.downstream_system,
                 r.downstream_ref,
                 r.synced_by,
@@ -206,30 +207,69 @@ def register(mcp: FastMCP) -> None:
             params,
         )
         rows = await cursor.fetchall()
-        return [
-            {
-                "id": r["id"],
-                "source": r["source"],
-                "timestamp": r["timestamp"],
-                "project_name": r["project_name"],
-                "summary": r["summary"],
-                "branch": r["branch"],
-                "tags": json.loads(r["tags"]),
-                "created_at": r["created_at"],
-                "sync_receipt": (
-                    {
-                        "downstream_system": r["downstream_system"],
-                        "downstream_ref": r["downstream_ref"],
-                        "synced_by": r["synced_by"],
-                        "synced_at": r["synced_at"],
-                        "notes": r["sync_notes"],
-                    }
-                    if r["downstream_ref"] is not None
-                    else None
-                ),
-            }
-            for r in rows
-        ]
+        events: list[dict[str, Any]] = []
+        for r in rows:
+            resolution = resolve_project(r["project_name"])
+            canonical_key = r["canonical_key"] or resolution.canonical_key
+            notion_sync: dict[str, Any]
+            if not resolution.registry_present:
+                notion_sync = {
+                    "state": "registry_unavailable",
+                    "reason": "project registry is absent or unreadable",
+                    "canonical_key": canonical_key,
+                    "notion_page_id": None,
+                    "notion_title": None,
+                }
+            elif not resolution.matched:
+                notion_sync = {
+                    "state": "unmatched",
+                    "reason": "no canonical project match in project registry",
+                    "canonical_key": None,
+                    "notion_page_id": None,
+                    "notion_title": None,
+                }
+            elif resolution.notion_page_id is None:
+                notion_sync = {
+                    "state": "no_notion_target",
+                    "reason": "canonical project has no notion_local_page_id",
+                    "canonical_key": canonical_key,
+                    "notion_page_id": None,
+                    "notion_title": resolution.notion_title,
+                }
+            else:
+                notion_sync = {
+                    "state": "ready",
+                    "reason": "canonical project has explicit notion_local_page_id",
+                    "canonical_key": canonical_key,
+                    "notion_page_id": resolution.notion_page_id,
+                    "notion_title": resolution.notion_title,
+                }
+            events.append(
+                {
+                    "id": r["id"],
+                    "source": r["source"],
+                    "timestamp": r["timestamp"],
+                    "project_name": r["project_name"],
+                    "canonical_key": canonical_key,
+                    "notion_sync": notion_sync,
+                    "summary": r["summary"],
+                    "branch": r["branch"],
+                    "tags": json.loads(r["tags"]),
+                    "created_at": r["created_at"],
+                    "sync_receipt": (
+                        {
+                            "downstream_system": r["downstream_system"],
+                            "downstream_ref": r["downstream_ref"],
+                            "synced_by": r["synced_by"],
+                            "synced_at": r["synced_at"],
+                            "notes": r["sync_notes"],
+                        }
+                        if r["downstream_ref"] is not None
+                        else None
+                    ),
+                }
+            )
+        return events
 
     @mcp.tool()
     async def mark_shipped_processed(

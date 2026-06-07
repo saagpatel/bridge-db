@@ -9,13 +9,22 @@ from bridge_db.project_resolver import resolve
 
 
 def _entry(
-    key: str, display: str, repo: str | None = None, aliases: list[str] | None = None
+    key: str,
+    display: str,
+    repo: str | None = None,
+    aliases: list[str] | None = None,
+    bridge_project_names: list[str] | None = None,
+    notion_local_page_id: str | None = None,
+    notion_local_title: str | None = None,
 ) -> dict[str, object]:
     return {
         "canonical_key": key,
         "display_name": display,
         "repo_full_name": repo,
         "aliases": aliases or [],
+        "bridge_project_names": bridge_project_names or [],
+        "notion_local_page_id": notion_local_page_id,
+        "notion_local_title": notion_local_title,
     }
 
 
@@ -39,6 +48,28 @@ def test_matches_display_and_alias_spellings(tmp_path: Path) -> None:
     )
     assert resolve("MCP Audit", registry_path=reg).canonical_key == "MCPAudit"
     assert resolve("mcpaudit", registry_path=reg).canonical_key == "MCPAudit"
+
+
+def test_matches_bridge_project_names_and_exposes_notion_target(tmp_path: Path) -> None:
+    reg = _write_registry(
+        tmp_path / "r.json",
+        [
+            _entry(
+                "Fun:GamePrjs/LoreKeeper",
+                "LoreKeeper",
+                repo="saagpatel/LoreKeeper",
+                bridge_project_names=["lore-keeper-ship-lane"],
+                notion_local_page_id="326c21f1-caf0-81c3-8759-e5aa28dee730",
+                notion_local_title="LoreKeeper",
+            )
+        ],
+    )
+
+    result = resolve("lore-keeper-ship-lane", registry_path=reg)
+
+    assert result.canonical_key == "Fun:GamePrjs/LoreKeeper"
+    assert result.notion_page_id == "326c21f1-caf0-81c3-8759-e5aa28dee730"
+    assert result.notion_title == "LoreKeeper"
 
 
 def test_override_resolves_hard_normalization_failure(tmp_path: Path) -> None:
