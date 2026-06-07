@@ -16,9 +16,10 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
 - `get_shipped_events` now includes a computed `notion_sync` contract from the
   canonical project registry. Bridge-sync agents should update Notion only when
   `notion_sync.state == "ready"` and the referenced page readback proves the
-  expected Project Portfolio row; `unmatched`, `no_notion_target`, and
-  `registry_unavailable` events stay pending instead of being guessed through
-  fuzzy search.
+  expected Project Portfolio row. `meta_no_target` events are policy-backed
+  local/meta receipts that should be processed against the policy reference, not
+  Notion. `unmatched`, `no_notion_target`, and `registry_unavailable` events
+  stay pending instead of being guessed through fuzzy search.
 - `health` / `status` also surface `processed_shipped_without_receipt` as a soft drift signal for older or manual `mark_shipped_processed` paths, and `fts_missing` / `fts_orphaned` as hard recall-index health signals. Prefer `confirm_shipped_sync` for new downstream syncs.
 - Local verification is currently green as of 2026-06-06: `155` tests passing,
   `ruff` clean, and `pyright` clean. Live `--doctor`, `--status`, and
@@ -119,6 +120,9 @@ machine-readable gate:
 
 - `ready`: fetch the explicit `notion_page_id`, update only that row, fetch it
   again, then call `confirm_shipped_sync` with the readback proof.
+- `meta_no_target`: do not update Notion. Confirm the event with
+  `downstream_system=policy` and `downstream_ref` pointing to the configured
+  policy file after verifying the policy applies to the event.
 - `unmatched`, `no_notion_target`, or `registry_unavailable`: leave the event
   unprocessed and repair the project registry or mapping source first.
 

@@ -3,7 +3,7 @@
 import json
 import logging
 from datetime import date
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
@@ -19,6 +19,37 @@ from bridge_db.models import ACTIVITY_SOURCES, CallerID, invalid_source_error
 from bridge_db.project_resolver import resolve as resolve_project
 
 logger = logging.getLogger("bridge_db.tools.activity")
+
+
+def _normalize_policy_key(value: str) -> str:
+    return value.strip().lower()
+
+
+def _load_meta_shipped_event_policy(project_name: str) -> dict[str, Any] | None:
+    """Return meta-event policy for SHIPPED rows that intentionally skip Notion."""
+    try:
+        raw = json.loads(config.META_SHIPPED_EVENTS_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    policy_root = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+    projects = policy_root.get("projects")
+    if not isinstance(projects, dict):
+        return None
+    project_policies = cast(dict[str, Any], projects)
+    policy = project_policies.get(_normalize_policy_key(project_name))
+    if not isinstance(policy, dict):
+        return None
+    policy_fields = cast(dict[str, Any], policy)
+    reason = policy_fields.get("reason")
+    record_outcome_in = policy_fields.get("record_outcome_in")
+    return {
+        "reason": reason if isinstance(reason, str) and reason else "meta event has no Notion target",
+        "record_outcome_in": (
+            record_outcome_in
+            if isinstance(record_outcome_in, str) and record_outcome_in
+            else "bridge-db shipped_sync_receipts"
+        ),
+    }
 
 
 async def _export_bridge_markdown_after_processing(db: Any) -> None:
@@ -211,8 +242,19 @@ def register(mcp: FastMCP) -> None:
         for r in rows:
             resolution = resolve_project(r["project_name"])
             canonical_key = r["canonical_key"] or resolution.canonical_key
+            meta_policy = _load_meta_shipped_event_policy(r["project_name"])
             notion_sync: dict[str, Any]
-            if not resolution.registry_present:
+            if meta_policy is not None:
+                notion_sync = {
+                    "state": "meta_no_target",
+                    "reason": meta_policy["reason"],
+                    "canonical_key": canonical_key,
+                    "notion_page_id": None,
+                    "notion_title": None,
+                    "record_outcome_in": meta_policy["record_outcome_in"],
+                    "policy_ref": str(config.META_SHIPPED_EVENTS_PATH),
+                }
+            elif not resolution.registry_present:
                 notion_sync = {
                     "state": "registry_unavailable",
                     "reason": "project registry is absent or unreadable",

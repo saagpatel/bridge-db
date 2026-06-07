@@ -210,6 +210,55 @@ async def test_get_shipped_events_includes_notion_sync_contract(
     assert by_name["missing-project"]["notion_sync"]["state"] == "unmatched"
 
 
+async def test_get_shipped_events_marks_policy_backed_meta_events(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = tmp_path / "project-registry.json"
+    registry.write_text(json.dumps({"entries": [], "resolution_overrides": {}}), encoding="utf-8")
+    policy = tmp_path / "meta-shipped-events.json"
+    policy.write_text(
+        json.dumps(
+            {
+                "projects": {
+                    "operator-os-coherence": {
+                        "reason": "machine-level receipt",
+                        "record_outcome_in": "bridge-db shipped_sync_receipts",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "PROJECT_REGISTRY_PATH", registry)
+    monkeypatch.setattr(config, "META_SHIPPED_EVENTS_PATH", policy)
+
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="cc",
+        project_name="operator-os-coherence",
+        summary="s",
+        tags=["SHIPPED"],
+        ctx=ctx,
+    )
+    await fns["log_activity"](
+        caller="cc", project_name="missing-project", summary="s", tags=["SHIPPED"], ctx=ctx
+    )
+
+    shipped = await fns["get_shipped_events"](ctx=ctx)
+    by_name = {entry["project_name"]: entry for entry in shipped}
+
+    meta_sync = by_name["operator-os-coherence"]["notion_sync"]
+    assert meta_sync["state"] == "meta_no_target"
+    assert meta_sync["reason"] == "machine-level receipt"
+    assert meta_sync["notion_page_id"] is None
+    assert meta_sync["record_outcome_in"] == "bridge-db shipped_sync_receipts"
+    assert meta_sync["policy_ref"] == str(policy)
+    assert by_name["missing-project"]["notion_sync"]["state"] == "unmatched"
+
+
 async def test_mark_shipped_processed_idempotent(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:

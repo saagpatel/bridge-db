@@ -1,0 +1,8 @@
+{
+  "projects": {
+    "operator-os-coherence": {
+      "reason": "Machine-level operator OS coherence receipts span bridge-db, Notion, Codex, and related operating surfaces. They are valid local/meta shipped events and should not be mapped to a single Notion Local Portfolio project row.",
+      "record_outcome_in": "bridge-db shipped_sync_receipts with downstream_system=policy"
+    }
+  }
+}
