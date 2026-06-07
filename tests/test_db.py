@@ -396,6 +396,67 @@ async def test_migration_v3_to_v4_adds_shipped_sync_receipts(tmp_path: Path) -> 
         await migrated.close()
 
 
+async def test_migration_v5_to_v6_adds_handoff_canonical_key(tmp_path: Path) -> None:
+    """A v5 DB gains pending_handoffs.canonical_key without losing existing rows."""
+    db = await aiosqlite.connect(str(tmp_path / "v5.db"))
+    db.row_factory = aiosqlite.Row
+    await db.executescript("""
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE pending_handoffs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_name TEXT NOT NULL,
+            project_path TEXT,
+            roadmap_file TEXT,
+            phase TEXT,
+            dispatched_from TEXT NOT NULL DEFAULT 'claude_ai',
+            dispatched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            picked_up_at TEXT,
+            cleared_at TEXT,
+            status TEXT NOT NULL DEFAULT 'pending'
+        );
+        CREATE VIRTUAL TABLE content_index USING fts5(
+            source_type UNINDEXED,
+            source_id UNINDEXED,
+            text,
+            tokenize = 'porter unicode61 remove_diacritics 2'
+        );
+        INSERT INTO pending_handoffs (project_name, phase)
+            VALUES ('MyProject', 'Phase 2');
+        PRAGMA user_version = 5;
+    """)
+    await db.commit()
+    await db.close()
+
+    migrated = await open_db(tmp_path / "v5.db")
+    try:
+        cursor = await migrated.execute("PRAGMA user_version")
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == SCHEMA_VERSION
+
+        # Existing row preserved, new column defaults to NULL.
+        cursor = await migrated.execute("SELECT project_name, canonical_key FROM pending_handoffs")
+        existing = await cursor.fetchone()
+        assert existing is not None
+        assert existing["project_name"] == "MyProject"
+        assert existing["canonical_key"] is None
+
+        # New writes can populate the column.
+        await migrated.execute(
+            "INSERT INTO pending_handoffs (project_name, canonical_key) VALUES (?, ?)",
+            ("IncidentMgmt", "incidentmgmt"),
+        )
+        await migrated.commit()
+        cursor = await migrated.execute(
+            "SELECT canonical_key FROM pending_handoffs WHERE project_name = 'IncidentMgmt'"
+        )
+        new_row = await cursor.fetchone()
+        assert new_row is not None
+        assert new_row["canonical_key"] == "incidentmgmt"
+    finally:
+        await migrated.close()
+
+
 async def test_ensure_schema_rejects_future_db_version(tmp_path: Path) -> None:
     db_path = tmp_path / "future.db"
     db = await aiosqlite.connect(str(db_path))

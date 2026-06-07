@@ -206,9 +206,7 @@ async def test_get_shipped_events_includes_notion_sync_contract(
         "notion_title": "Ready Project",
     }
     assert by_name["mapped-without-page"]["notion_sync"]["state"] == "no_notion_target"
-    assert by_name["mapped-without-page"]["notion_sync"]["canonical_key"] == (
-        "MappedWithoutPage"
-    )
+    assert by_name["mapped-without-page"]["notion_sync"]["canonical_key"] == ("MappedWithoutPage")
     assert by_name["missing-project"]["notion_sync"]["state"] == "unmatched"
 
 
