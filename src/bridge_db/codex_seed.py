@@ -17,7 +17,7 @@ from bridge_db.db import (
     open_db,
     upsert_fts_entry,
 )
-from bridge_db.tools.export import build_markdown
+from bridge_db.tools.export import build_markdown, write_bridge_file
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
@@ -147,8 +147,7 @@ async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, A
         if not dry_run and (snapshot_write == "inserted" or activity_write == "inserted"):
             await db.commit()
             content = await build_markdown(db)
-            config.BRIDGE_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            config.BRIDGE_FILE_PATH.write_text(content, encoding="utf-8")
+            write_bridge_file(content)
         elif not dry_run:
             await db.rollback()
 

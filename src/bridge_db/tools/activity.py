@@ -24,11 +24,10 @@ logger = logging.getLogger("bridge_db.tools.activity")
 async def _export_bridge_markdown_after_processing(db: Any) -> None:
     """Keep the fallback bridge file current after shipped-event state changes."""
     try:
-        from bridge_db.tools.export import build_markdown
+        from bridge_db.tools.export import build_markdown, write_bridge_file
 
         content = await build_markdown(db)
-        config.BRIDGE_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        config.BRIDGE_FILE_PATH.write_text(content, encoding="utf-8")
+        write_bridge_file(content)
         logger.info("auto-export triggered after shipped-event processing")
     except Exception:
         logger.warning("auto-export after shipped-event processing failed", exc_info=True)

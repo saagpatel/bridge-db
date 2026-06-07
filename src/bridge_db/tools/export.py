@@ -2,7 +2,10 @@
 
 import json
 import logging
+import os
+import tempfile
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -13,6 +16,32 @@ from bridge_db.db import get_db
 logger = logging.getLogger("bridge_db.tools.export")
 
 _SECTION_ORDER = ["career", "speaking", "research", "capabilities"]
+
+
+def write_bridge_file(content: str) -> None:
+    """Write the markdown bridge file atomically (F8).
+
+    The notification-hub watcher tails this file's *directory* and any file-based
+    client (Claude.ai) reads it directly. A plain ``write_text`` truncates then
+    rewrites in place, so a concurrent reader can observe a half-written file.
+    Writing to a temp file in the same directory and ``os.replace``-ing it into
+    place makes the swap atomic: readers always see either the complete old or the
+    complete new file, never a partial. The temp name is dot-prefixed so the
+    watcher's exact-path filter ignores it (verified: macOS still emits a
+    ``modified`` event on the destination after the replace, so detection is
+    unaffected).
+    """
+    path = config.BRIDGE_FILE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _is_codex_operating_snapshot(data: dict[str, Any]) -> bool:
@@ -221,9 +250,8 @@ def register(mcp: FastMCP) -> None:
         db = get_db(ctx)
         content = await build_markdown(db)
 
+        write_bridge_file(content)
         bridge_path = config.BRIDGE_FILE_PATH
-        bridge_path.parent.mkdir(parents=True, exist_ok=True)
-        bridge_path.write_text(content, encoding="utf-8")
 
         logger.info("bridge markdown exported: %s (%d bytes)", bridge_path, len(content))
         return {"ok": True, "path": str(bridge_path), "bytes": len(content)}
