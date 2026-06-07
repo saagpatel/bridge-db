@@ -20,12 +20,13 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 
 ## Architecture
 
-- **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=5000`). Schema at v4 — adds `content_index` FTS5 vtable mirroring all source rows for lexical search, plus `shipped_sync_receipts` for downstream proof before shipped events are marked processed.
+- **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=5000`). Schema at v5 — adds nullable `activity_log.canonical_key` (resolved canonical project key, see Canonical resolution below), atop v4's `content_index` FTS5 vtable mirroring all source rows for lexical search and `shipped_sync_receipts` for downstream proof before shipped events are marked processed.
 - **MCP transport**: stdio (stdout = JSON-RPC, all logging → stderr)
 - **23 MCP tools** across 9 modules: activity, handoffs, context, snapshots, cost, export, health, recall (FTS5 lexical search; Phase −1 of the semantic memory layer), audit (read-side observability over the JSONL audit + recall query logs). `health` / `status` include signals for pending handoffs, unprocessed shipped events, receiptless processed shipped events, FTS index drift, WAL size, and bridge-file freshness.
 - **Context access**: `get_db(ctx)` helper casts lifespan context to `aiosqlite.Connection`
 - **Tool registration**: `CaptureMCP` pattern in tests — decorators capture raw async fns
-- **FTS5 invariant**: every write path that touches `context_sections`, `activity_log`, `system_snapshots`, or `pending_handoffs` calls `upsert_fts_entry` / `gc_fts_orphans` from [db.py](src/bridge_db/db.py) in the same transaction. Auto-prune paths in `log_activity` and `save_snapshot` GC orphan FTS rows.
+- **FTS5 invariant**: every write path that touches `context_sections`, `activity_log`, `system_snapshots`, or `pending_handoffs` calls `upsert_fts_entry` / `gc_fts_orphans` from [db.py](src/bridge_db/db.py) in the same transaction. Auto-prune paths in `log_activity` and `save_snapshot` GC orphan FTS rows. (`canonical_key` is not FTS-indexed, so it does not affect this invariant.)
+- **Canonical resolution**: `log_activity` resolves `project_name` → canonical project key on write via [project_resolver.py](src/bridge_db/project_resolver.py), a read-only consumer of GithubRepoAuditor's `project-registry.json` (path overridable via `BRIDGE_DB_PROJECT_REGISTRY_PATH`). The resolved key is stored in `activity_log.canonical_key` and returned by `log_activity` / `get_recent_activity`. Pass-through (key stays `NULL`) when the registry file is absent, so logging is unchanged; a present-but-unmatched name is flagged via the audit log (`log_activity.unmatched_project`), not silently recorded.
 
 ## Conventions
 
