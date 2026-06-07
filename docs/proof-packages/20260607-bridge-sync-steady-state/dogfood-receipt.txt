@@ -1,0 +1,10 @@
+bridge-db dogfood
+  Overall: healthy
+  Signals: pending_handoffs=0, unprocessed_shipped=0, processed_shipped_without_receipt=0
+  WAL: size_bytes=4214792, warning=False
+  FTS: expected=219, indexed=219, missing=0, orphaned=0
+  Recall: queries_7d=18, miss_rate=0.0, scopes={'all': 16, 'section': 1, 'activity': 1}
+  Recent audit rows checked: 10
+  Latest confirm_shipped_sync: activity_id=2242 downstream=notion:https://app.notion.com/p/378c21f1caf081038ba3c9c8ba5e6f78
+  Latest mark_shipped_processed: activity_ids=[1678] updated_ids=[] missing_ids=[] updated=0/1
+  Compatibility audit detail: current
