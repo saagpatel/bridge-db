@@ -49,3 +49,12 @@ PROJECT_REGISTRY_PATH: Path = Path(
         str(Path.home() / "Projects" / "GithubRepoAuditor" / "output" / "project-registry.json"),
     )
 )
+
+# Local policy for SHIPPED events that are valid cross-system/meta receipts but
+# should not be reconciled to a Notion Local Portfolio project row.
+META_SHIPPED_EVENTS_PATH: Path = Path(
+    os.environ.get(
+        "BRIDGE_DB_META_SHIPPED_EVENTS_PATH",
+        str(Path(__file__).resolve().parents[2] / "config" / "meta-shipped-events.json"),
+    )
+)
