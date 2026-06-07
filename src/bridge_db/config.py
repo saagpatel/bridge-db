@@ -39,3 +39,13 @@ AUDIT_LOG_PATH: Path = Path(
         str(DB_PATH.parent / "audit.jsonl"),
     )
 )
+
+# Canonical project-identity registry emitted by GithubRepoAuditor. Read-only
+# consumer input for resolving project_name -> canonical key on write. If absent,
+# resolution is a no-op (pass-through) and logging behaviour is unchanged.
+PROJECT_REGISTRY_PATH: Path = Path(
+    os.environ.get(
+        "BRIDGE_DB_PROJECT_REGISTRY_PATH",
+        str(Path.home() / "Projects" / "GithubRepoAuditor" / "output" / "project-registry.json"),
+    )
+)

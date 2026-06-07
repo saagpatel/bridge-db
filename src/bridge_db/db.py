@@ -10,7 +10,7 @@ import aiosqlite
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Full DDL for current schema (initial create on a fresh DB)
 _SCHEMA_DDL = """
@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS activity_log (
     summary TEXT NOT NULL,
     branch TEXT,
     tags TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    canonical_key TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_activity_source ON activity_log(source);
@@ -192,6 +193,13 @@ CREATE TABLE IF NOT EXISTS pending_handoffs (
 CREATE INDEX IF NOT EXISTS idx_handoff_status ON pending_handoffs(status);
 """
 
+# Migration v4 → v5: add nullable canonical_key to activity_log so each entry
+# can carry the resolved canonical project key (see project_resolver). Additive
+# and FTS-neutral — canonical_key is not part of fts_text_for_activity.
+_MIGRATION_V4_TO_V5 = """
+ALTER TABLE activity_log ADD COLUMN canonical_key TEXT;
+"""
+
 
 async def apply_pragmas(db: aiosqlite.Connection) -> None:
     """Apply all required PRAGMAs. Safe to call on every connection open."""
@@ -250,6 +258,13 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
             await db.execute(f"PRAGMA user_version = {current_version}")
             await db.commit()
             logger.info("Schema migrated to v4")
+        elif current_version == 4:
+            logger.info("Migrating schema v4 → v5")
+            await db.executescript(_MIGRATION_V4_TO_V5)
+            current_version = 5
+            await db.execute(f"PRAGMA user_version = {current_version}")
+            await db.commit()
+            logger.info("Schema migrated to v5")
         else:
             raise RuntimeError(f"No migration path defined from v{current_version}")
 
@@ -369,14 +384,15 @@ async def insert_activity_row(
     branch: str | None = None,
     tags: list[str] | None = None,
     retention_limit: int | None = None,
+    canonical_key: str | None = None,
 ) -> int:
     """Insert an activity row and keep the FTS activity mirror in sync."""
     cursor = await db.execute(
         """
-        INSERT INTO activity_log (source, timestamp, project_name, summary, branch, tags)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO activity_log (source, timestamp, project_name, summary, branch, tags, canonical_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (source, timestamp, project_name, summary, branch, json.dumps(tags or [])),
+        (source, timestamp, project_name, summary, branch, json.dumps(tags or []), canonical_key),
     )
     activity_id = cursor.lastrowid
     if activity_id is None:

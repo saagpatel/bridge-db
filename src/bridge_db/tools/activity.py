@@ -16,6 +16,7 @@ from bridge_db.db import (
     insert_activity_row,
 )
 from bridge_db.models import ACTIVITY_SOURCES, CallerID, invalid_source_error
+from bridge_db.project_resolver import resolve as resolve_project
 
 logger = logging.getLogger("bridge_db.tools.activity")
 
@@ -59,6 +60,7 @@ def register(mcp: FastMCP) -> None:
         """Log a session activity entry. Auto-prunes to the most recent 50 entries per source."""
         db = get_db(ctx)
         ts = timestamp or str(date.today())
+        resolution = resolve_project(project_name)
         await insert_activity_row(
             db,
             source=caller,
@@ -68,12 +70,32 @@ def register(mcp: FastMCP) -> None:
             branch=branch,
             tags=tags,
             retention_limit=config.ACTIVITY_RETENTION_PER_SOURCE,
+            canonical_key=resolution.canonical_key,
         )
         await db.commit()
 
         log_audit("log_activity", caller, project_name, ok=True)
+        if resolution.registry_present and not resolution.matched:
+            # Drift: a real write with no canonical match. Surface it via the
+            # existing audit log rather than silently recording the drifted name.
+            log_audit(
+                "log_activity.unmatched_project",
+                caller,
+                project_name,
+                ok=True,
+                detail="no canonical match in project-registry; flagged for triage",
+            )
+            logger.warning(
+                "log_activity: unmatched project_name %r (no canonical key)", project_name
+            )
         logger.info("logged activity: [%s] %s: %s", caller, project_name, summary)
-        return {"ok": True, "source": caller, "project_name": project_name, "timestamp": ts}
+        return {
+            "ok": True,
+            "source": caller,
+            "project_name": project_name,
+            "canonical_key": resolution.canonical_key,
+            "timestamp": ts,
+        }
 
     @mcp.tool()
     async def get_recent_activity(
@@ -112,7 +134,7 @@ def register(mcp: FastMCP) -> None:
 
         cursor = await db.execute(
             f"""
-            SELECT id, source, timestamp, project_name, summary, branch, tags, created_at
+            SELECT id, source, timestamp, project_name, summary, branch, tags, created_at, canonical_key
             FROM activity_log
             {where}
             ORDER BY timestamp DESC, created_at DESC, id DESC
@@ -131,6 +153,7 @@ def register(mcp: FastMCP) -> None:
                 "branch": r["branch"],
                 "tags": json.loads(r["tags"]),
                 "created_at": r["created_at"],
+                "canonical_key": r["canonical_key"],
             }
             for r in rows
         ]
