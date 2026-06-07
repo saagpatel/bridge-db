@@ -13,6 +13,12 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
 - Phase −1 of the semantic memory arc shipped and is the **final layer**: `content_index` FTS5 vtable mirrors all content tables, `recall(query, limit, scope)` exposes it via MCP with OR-semantic multi-token queries, and health/status now verify that source rows and FTS rows stay aligned. Vector/embedding phases were closed after a dry-run showed that "missed" queries targeted content not actually in `bridge.db`. See the closure banner at the top of [bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md](bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md).
 - **Phase 6 observability shipped (2026-04-17):** `recall_stats` reads the recall query log, `audit_tail` reads the audit log, and `health` now surfaces `wal_size_bytes` + `wal_warning`. All three close half-built feedback loops without expanding scope. See the Phase 6 section in [ROADMAP.md](ROADMAP.md).
 - Shipped-event sync hardening shipped: `confirm_shipped_sync` records downstream proof in `shipped_sync_receipts` before marking a `SHIPPED` activity event `PROCESSED`.
+- `get_shipped_events` now includes a computed `notion_sync` contract from the
+  canonical project registry. Bridge-sync agents should update Notion only when
+  `notion_sync.state == "ready"` and the referenced page readback proves the
+  expected Project Portfolio row; `unmatched`, `no_notion_target`, and
+  `registry_unavailable` events stay pending instead of being guessed through
+  fuzzy search.
 - `health` / `status` also surface `processed_shipped_without_receipt` as a soft drift signal for older or manual `mark_shipped_processed` paths, and `fts_missing` / `fts_orphaned` as hard recall-index health signals. Prefer `confirm_shipped_sync` for new downstream syncs.
 - Local verification is currently green as of 2026-06-06: `155` tests passing,
   `ruff` clean, and `pyright` clean. Live `--doctor`, `--status`, and
@@ -108,6 +114,13 @@ args = ["run", "--directory", "/Users/d/Projects/bridge-db", "python", "-m", "br
 activity rows are recent context, while `shipped_sync_receipts` is the proof
 ledger for downstream shipped-event syncs. Treat `processed_shipped_without_receipt=0`
 and `fts_missing=0` as the primary clean signals, not raw row counts alone.
+For Notion reconciliation, treat each shipped event's `notion_sync` object as the
+machine-readable gate:
+
+- `ready`: fetch the explicit `notion_page_id`, update only that row, fetch it
+  again, then call `confirm_shipped_sync` with the readback proof.
+- `unmatched`, `no_notion_target`, or `registry_unavailable`: leave the event
+  unprocessed and repair the project registry or mapping source first.
 
 ## Startup Sync
 

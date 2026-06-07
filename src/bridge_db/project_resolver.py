@@ -36,12 +36,15 @@ class Resolution:
     canonical_key: str | None
     registry_present: bool
     matched: bool
+    notion_page_id: str | None = None
+    notion_title: str | None = None
 
 
 @dataclass(frozen=True)
 class _Index:
     norm_to_key: dict[str, str]
     override_norm_to_key: dict[str, str]
+    notion_targets_by_key: dict[str, tuple[str, str | None]]
 
 
 def _normalize(value: str | None) -> str:
@@ -63,6 +66,7 @@ def _strip_alias_prefix(alias: str) -> str:
 
 def _compile_index(registry: Mapping[str, object]) -> _Index:
     norm_to_key: dict[str, str] = {}
+    notion_targets_by_key: dict[str, tuple[str, str | None]] = {}
     raw_entries = registry.get("entries", [])
     entries: list[object] = []
     if isinstance(raw_entries, list):
@@ -76,10 +80,18 @@ def _compile_index(registry: Mapping[str, object]) -> _Index:
             continue
         key = raw_key
         raw_display = entry.get("display_name")
+        display = raw_display if isinstance(raw_display, str) else None
         forms = {_normalize(raw_display if isinstance(raw_display, str) else None)}
         repo = entry.get("repo_full_name")
         if repo:
             forms.add(_normalize(_repo_base(repo if isinstance(repo, str) else None)))
+        raw_bridge_names = entry.get("bridge_project_names", [])
+        bridge_names: list[object] = []
+        if isinstance(raw_bridge_names, list):
+            bridge_names = cast(list[object], raw_bridge_names)
+        for raw_bridge_name in bridge_names:
+            if isinstance(raw_bridge_name, str):
+                forms.add(_normalize(raw_bridge_name))
         if "/" in key:
             forms.add(_normalize(key))
         raw_aliases = entry.get("aliases", [])
@@ -92,6 +104,13 @@ def _compile_index(registry: Mapping[str, object]) -> _Index:
         for form in forms:
             if form:
                 norm_to_key.setdefault(form, key)
+        page_id = entry.get("notion_local_page_id")
+        if isinstance(page_id, str) and page_id.strip():
+            title = entry.get("notion_local_title")
+            notion_targets_by_key[key] = (
+                page_id.strip(),
+                title if isinstance(title, str) and title else display,
+            )
     override_norm_to_key: dict[str, str] = {}
     raw_overrides = registry.get("resolution_overrides", {})
     overrides: dict[object, object] = (
@@ -100,7 +119,11 @@ def _compile_index(registry: Mapping[str, object]) -> _Index:
     for raw, key in overrides.items():
         if isinstance(raw, str) and isinstance(key, str):
             override_norm_to_key[_normalize(raw)] = key
-    return _Index(norm_to_key=norm_to_key, override_norm_to_key=override_norm_to_key)
+    return _Index(
+        norm_to_key=norm_to_key,
+        override_norm_to_key=override_norm_to_key,
+        notion_targets_by_key=notion_targets_by_key,
+    )
 
 
 def _load_index(registry_path: Path) -> _Index | None:
@@ -133,4 +156,16 @@ def resolve(project_name: str, registry_path: Path | None = None) -> Resolution:
     if not norm:
         return Resolution(canonical_key=None, registry_present=True, matched=False)
     key = index.override_norm_to_key.get(norm) or index.norm_to_key.get(norm)
-    return Resolution(canonical_key=key, registry_present=True, matched=key is not None)
+    notion_page_id = None
+    notion_title = None
+    if key is not None:
+        notion_target = index.notion_targets_by_key.get(key)
+        if notion_target is not None:
+            notion_page_id, notion_title = notion_target
+    return Resolution(
+        canonical_key=key,
+        registry_present=True,
+        matched=key is not None,
+        notion_page_id=notion_page_id,
+        notion_title=notion_title,
+    )

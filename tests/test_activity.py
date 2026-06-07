@@ -142,6 +142,76 @@ async def test_get_shipped_events_unprocessed_only(
     assert unprocessed[0]["project_name"] == "A"
 
 
+async def test_get_shipped_events_includes_notion_sync_contract(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = tmp_path / "project-registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "canonical_key": "ReadyProject",
+                        "display_name": "ReadyProject",
+                        "repo_full_name": "saagpatel/ready-project",
+                        "bridge_project_names": ["ready-project"],
+                        "aliases": [],
+                        "notion_local_title": "Ready Project",
+                        "notion_local_page_id": "page-ready",
+                    },
+                    {
+                        "canonical_key": "MappedWithoutPage",
+                        "display_name": "MappedWithoutPage",
+                        "repo_full_name": None,
+                        "bridge_project_names": ["mapped-without-page"],
+                        "aliases": [],
+                        "notion_local_title": "Mapped Without Page",
+                        "notion_local_page_id": None,
+                    },
+                ],
+                "resolution_overrides": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "PROJECT_REGISTRY_PATH", registry)
+
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="cc", project_name="ready-project", summary="s", tags=["SHIPPED"], ctx=ctx
+    )
+    await fns["log_activity"](
+        caller="cc",
+        project_name="mapped-without-page",
+        summary="s",
+        tags=["SHIPPED"],
+        ctx=ctx,
+    )
+    await fns["log_activity"](
+        caller="cc", project_name="missing-project", summary="s", tags=["SHIPPED"], ctx=ctx
+    )
+
+    shipped = await fns["get_shipped_events"](ctx=ctx)
+    by_name = {entry["project_name"]: entry for entry in shipped}
+
+    assert by_name["ready-project"]["canonical_key"] == "ReadyProject"
+    assert by_name["ready-project"]["notion_sync"] == {
+        "state": "ready",
+        "reason": "canonical project has explicit notion_local_page_id",
+        "canonical_key": "ReadyProject",
+        "notion_page_id": "page-ready",
+        "notion_title": "Ready Project",
+    }
+    assert by_name["mapped-without-page"]["notion_sync"]["state"] == "no_notion_target"
+    assert by_name["mapped-without-page"]["notion_sync"]["canonical_key"] == (
+        "MappedWithoutPage"
+    )
+    assert by_name["missing-project"]["notion_sync"]["state"] == "unmatched"
+
+
 async def test_mark_shipped_processed_idempotent(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
