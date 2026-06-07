@@ -1,5 +1,7 @@
 """Tests for handoff queue tools."""
 
+import json
+from pathlib import Path
 from typing import Any
 
 import aiosqlite
@@ -7,6 +9,7 @@ import pytest
 from conftest import CaptureMCP, make_ctx
 from mcp.server.fastmcp.exceptions import ToolError
 
+from bridge_db import config
 from bridge_db.tools import handoffs as mod
 
 
@@ -15,6 +18,27 @@ def fns(db: aiosqlite.Connection) -> dict[str, Any]:
     cap = CaptureMCP()
     mod.register(cap)
     return cap.fns
+
+
+def _registry(tmp_path: Path) -> Path:
+    """A registry where 'IncidentMgmt' and 'IncidentManagement' share one key."""
+    reg = tmp_path / "project-registry.json"
+    reg.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "canonical_key": "incidentmgmt",
+                        "display_name": "IncidentMgmt",
+                        "repo_full_name": "saagpatel/IncidentManagement",
+                        "aliases": [],
+                    }
+                ],
+                "resolution_overrides": {},
+            }
+        )
+    )
+    return reg
 
 
 async def test_create_handoff_requires_claude_ai(
@@ -171,9 +195,14 @@ async def test_handoff_lifecycle_across_pending_pickup_and_clear(
     )
 
     pending_before = await fns["get_pending_handoffs"](ctx=ctx)
-    assert [handoff["project_name"] for handoff in pending_before] == ["BridgeExport", "BridgeStatus"]
+    assert [handoff["project_name"] for handoff in pending_before] == [
+        "BridgeExport",
+        "BridgeStatus",
+    ]
 
-    picked_up = await fns["pick_up_handoff"](caller="codex", handoff_id=first["handoff_id"], ctx=ctx)
+    picked_up = await fns["pick_up_handoff"](
+        caller="codex", handoff_id=first["handoff_id"], ctx=ctx
+    )
     assert picked_up["status"] == "active"
 
     pending_after_pickup = await fns["get_pending_handoffs"](ctx=ctx)
@@ -203,3 +232,94 @@ async def test_handoff_lifecycle_across_pending_pickup_and_clear(
     second_row = await cursor.fetchone()
     assert second_row is not None
     assert second_row["status"] == "pending"
+
+
+async def test_create_handoff_resolves_canonical_key(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "PROJECT_REGISTRY_PATH", _registry(tmp_path))
+    ctx = make_ctx(db)
+    result = await fns["create_handoff"](caller="claude_ai", project_name="IncidentMgmt", ctx=ctx)
+    assert result["canonical_key"] == "incidentmgmt"
+
+    cursor = await db.execute(
+        "SELECT canonical_key FROM pending_handoffs WHERE project_name = 'IncidentMgmt'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["canonical_key"] == "incidentmgmt"
+
+    pending = await fns["get_pending_handoffs"](ctx=ctx)
+    assert pending[0]["canonical_key"] == "incidentmgmt"
+
+
+async def test_create_handoff_canonical_key_none_when_registry_absent(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "PROJECT_REGISTRY_PATH", tmp_path / "missing.json")
+    ctx = make_ctx(db)
+    result = await fns["create_handoff"](caller="claude_ai", project_name="IncidentMgmt", ctx=ctx)
+    assert result["canonical_key"] is None
+
+    cursor = await db.execute("SELECT canonical_key FROM pending_handoffs")
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["canonical_key"] is None
+
+
+async def test_clear_handoff_matches_canonical_alias(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A handoff dispatched as 'IncidentMgmt' clears when /end passes the sibling
+    name 'IncidentManagement' — both resolve to the same canonical key (F1)."""
+    monkeypatch.setattr(config, "PROJECT_REGISTRY_PATH", _registry(tmp_path))
+    ctx = make_ctx(db)
+    created = await fns["create_handoff"](caller="claude_ai", project_name="IncidentMgmt", ctx=ctx)
+
+    # 'IncidentManagement' != the stored project_name, so this clears ONLY via the
+    # shared canonical key — proving canonical matching, not string matching.
+    result = await fns["clear_handoff"](caller="cc", project_name="IncidentManagement", ctx=ctx)
+    assert result["cleared"] is True
+    assert result["cleared_count"] == 1
+    assert result["handoff_id"] == created["handoff_id"]
+    assert result["canonical_key"] == "incidentmgmt"
+
+    cursor = await db.execute(
+        "SELECT status FROM pending_handoffs WHERE id = ?", (created["handoff_id"],)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["status"] == "cleared"
+
+
+async def test_clear_handoff_canonical_does_not_overmatch_other_projects(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Canonical matching must not clear an unrelated project that resolves to a
+    different (or no) canonical key."""
+    monkeypatch.setattr(config, "PROJECT_REGISTRY_PATH", _registry(tmp_path))
+    ctx = make_ctx(db)
+    keep = await fns["create_handoff"](caller="claude_ai", project_name="weekly-review", ctx=ctx)
+    await fns["create_handoff"](caller="claude_ai", project_name="IncidentMgmt", ctx=ctx)
+
+    result = await fns["clear_handoff"](caller="cc", project_name="IncidentManagement", ctx=ctx)
+    assert result["cleared_count"] == 1
+
+    cursor = await db.execute(
+        "SELECT status FROM pending_handoffs WHERE id = ?", (keep["handoff_id"],)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["status"] == "pending"

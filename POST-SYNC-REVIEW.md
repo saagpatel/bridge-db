@@ -36,6 +36,11 @@ Expected clean signals:
 - `wal_warning=False`
 - latest shipped-sync audit rows use `confirm_shipped_sync` with downstream
   proof, not only `mark_shipped_processed`
+- each unprocessed shipped event has an inspected `notion_sync` state from
+  `get_shipped_events(unprocessed_only=True)`. Only `ready` events may proceed
+  to Notion update/readback/`confirm_shipped_sync`; `unmatched`,
+  `no_notion_target`, and `registry_unavailable` are valid pending states that
+  require registry repair instead of fuzzy Notion search.
 - if a Claude Code session ended since the last review, the newest
   `CC session ended` row has a matching `content_index` row
 
