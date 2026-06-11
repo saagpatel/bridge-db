@@ -9,6 +9,11 @@ CallerID = Literal["cc", "codex", "claude_ai", "notion_os", "personal_ops"]
 # claude_ai uses context_sections; notion_os/personal_ops log activity and costs
 SystemID = Literal["cc", "codex", "notion_os", "personal_ops"]
 
+# Provenance trust label on instruction-bearing rows (pending_handoffs,
+# activity_log, context_sections, system_snapshots). 'agent' is the conservative
+# write default; the Phase-2 pickup gate refuses non-'operator' handoffs on Codex.
+SourceTrust = Literal["operator", "agent", "ingested"]
+
 CALLER_IDS: tuple[CallerID, ...] = (
     "cc",
     "codex",
