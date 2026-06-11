@@ -10,7 +10,7 @@ import aiosqlite
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Full DDL for current schema (initial create on a fresh DB)
 _SCHEMA_DDL = """
@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS context_sections (
     section_name TEXT PRIMARY KEY,
     owner TEXT NOT NULL CHECK(owner IN ('claude_ai', 'cc', 'codex')),
     content TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested'))
 );
 
 CREATE TABLE IF NOT EXISTS activity_log (
@@ -30,7 +31,8 @@ CREATE TABLE IF NOT EXISTS activity_log (
     branch TEXT,
     tags TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    canonical_key TEXT
+    canonical_key TEXT,
+    source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_activity_source ON activity_log(source);
@@ -41,7 +43,8 @@ CREATE TABLE IF NOT EXISTS system_snapshots (
     system TEXT NOT NULL CHECK(system IN ('cc', 'codex')),
     snapshot_date TEXT NOT NULL,
     data TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_snapshot_system ON system_snapshots(system, created_at DESC);
@@ -57,7 +60,8 @@ CREATE TABLE IF NOT EXISTS pending_handoffs (
     picked_up_at TEXT,
     cleared_at TEXT,
     status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'active', 'cleared')),
-    canonical_key TEXT
+    canonical_key TEXT,
+    source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_handoff_status ON pending_handoffs(status);
@@ -211,6 +215,26 @@ _MIGRATION_V5_TO_V6 = """
 ALTER TABLE pending_handoffs ADD COLUMN canonical_key TEXT;
 """
 
+# Migration v6 → v7: add the source_trust provenance label to the four
+# instruction-bearing tables. Additive ADD COLUMN — SQLite permits a column CHECK
+# when the constant default satisfies it (it does), so no rename/recreate.
+# Conservative backfill: pre-existing context_sections + pending_handoffs rows are
+# owner-authored history → 'operator'; activity_log + system_snapshots history keeps
+# the 'agent' default. source_trust is DB-only and not FTS-indexed, so content_index
+# is untouched (no repopulate_content_index).
+_MIGRATION_V6_TO_V7 = """
+ALTER TABLE pending_handoffs ADD COLUMN source_trust TEXT NOT NULL DEFAULT 'agent'
+    CHECK(source_trust IN ('operator', 'agent', 'ingested'));
+ALTER TABLE activity_log ADD COLUMN source_trust TEXT NOT NULL DEFAULT 'agent'
+    CHECK(source_trust IN ('operator', 'agent', 'ingested'));
+ALTER TABLE context_sections ADD COLUMN source_trust TEXT NOT NULL DEFAULT 'agent'
+    CHECK(source_trust IN ('operator', 'agent', 'ingested'));
+ALTER TABLE system_snapshots ADD COLUMN source_trust TEXT NOT NULL DEFAULT 'agent'
+    CHECK(source_trust IN ('operator', 'agent', 'ingested'));
+UPDATE context_sections SET source_trust = 'operator';
+UPDATE pending_handoffs SET source_trust = 'operator';
+"""
+
 
 async def apply_pragmas(db: aiosqlite.Connection) -> None:
     """Apply all required PRAGMAs. Safe to call on every connection open."""
@@ -283,6 +307,13 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
             await db.execute(f"PRAGMA user_version = {current_version}")
             await db.commit()
             logger.info("Schema migrated to v6")
+        elif current_version == 6:
+            logger.info("Migrating schema v6 → v7")
+            await db.executescript(_MIGRATION_V6_TO_V7)
+            current_version = 7
+            await db.execute(f"PRAGMA user_version = {current_version}")
+            await db.commit()
+            logger.info("Schema migrated to v7")
         else:
             raise RuntimeError(f"No migration path defined from v{current_version}")
 
