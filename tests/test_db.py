@@ -397,7 +397,13 @@ async def test_migration_v3_to_v4_adds_shipped_sync_receipts(tmp_path: Path) -> 
 
 
 async def test_migration_v5_to_v6_adds_handoff_canonical_key(tmp_path: Path) -> None:
-    """A v5 DB gains pending_handoffs.canonical_key without losing existing rows."""
+    """A v5 DB gains pending_handoffs.canonical_key without losing existing rows.
+
+    open_db migrates through to HEAD, so this v5 fixture must carry every
+    instruction-bearing table the later steps touch (the v6→v7 step ALTERs all
+    four). The version assertion below therefore reflects HEAD, not v6; a v6→v7
+    regression can surface here first.
+    """
     db = await aiosqlite.connect(str(tmp_path / "v5.db"))
     db.row_factory = aiosqlite.Row
     await db.executescript("""
@@ -413,6 +419,32 @@ async def test_migration_v5_to_v6_adds_handoff_canonical_key(tmp_path: Path) -> 
             picked_up_at TEXT,
             cleared_at TEXT,
             status TEXT NOT NULL DEFAULT 'pending'
+        );
+        -- Sibling instruction-bearing tables that exist in any real v5 DB.
+        -- Required because open_db migrates to HEAD and the v6→v7 step ALTERs them.
+        CREATE TABLE context_sections (
+            section_name TEXT PRIMARY KEY,
+            owner TEXT NOT NULL,
+            content TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        CREATE TABLE activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            branch TEXT,
+            tags TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            canonical_key TEXT
+        );
+        CREATE TABLE system_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            system TEXT NOT NULL,
+            snapshot_date TEXT NOT NULL,
+            data TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );
         CREATE VIRTUAL TABLE content_index USING fts5(
             source_type UNINDEXED,
@@ -467,3 +499,225 @@ async def test_ensure_schema_rejects_future_db_version(tmp_path: Path) -> None:
         await ensure_schema(db)
 
     await db.close()
+
+
+# ── source_trust provenance (v6 → v7) ──────────────────────────────────────
+
+
+async def _create_v6_fixture(db_path: Path) -> None:
+    """Build a populated v6 DB: the four instruction-bearing tables at v6 shape
+    (canonical_key on activity_log + pending_handoffs, no source_trust anywhere),
+    the content_index FTS table, one seeded row per table, user_version = 6."""
+    db = await aiosqlite.connect(str(db_path))
+    db.row_factory = aiosqlite.Row
+    await db.executescript("""
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE context_sections (
+            section_name TEXT PRIMARY KEY,
+            owner TEXT NOT NULL,
+            content TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        CREATE TABLE activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            branch TEXT,
+            tags TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            canonical_key TEXT
+        );
+        CREATE TABLE system_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            system TEXT NOT NULL,
+            snapshot_date TEXT NOT NULL,
+            data TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        CREATE TABLE pending_handoffs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_name TEXT NOT NULL,
+            project_path TEXT,
+            roadmap_file TEXT,
+            phase TEXT,
+            dispatched_from TEXT NOT NULL DEFAULT 'claude_ai',
+            dispatched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            picked_up_at TEXT,
+            cleared_at TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            canonical_key TEXT
+        );
+        CREATE VIRTUAL TABLE content_index USING fts5(
+            source_type UNINDEXED,
+            source_id UNINDEXED,
+            text,
+            tokenize = 'porter unicode61 remove_diacritics 2'
+        );
+        INSERT INTO context_sections (section_name, owner, content)
+            VALUES ('career', 'claude_ai', 'Staff Engineer target');
+        INSERT INTO activity_log (source, timestamp, project_name, summary)
+            VALUES ('cc', '2026-06-07', 'bridge-db', 'landed F1 handoffs');
+        INSERT INTO system_snapshots (system, snapshot_date, data)
+            VALUES ('cc', '2026-06-07', '{"active_projects": ["bridge-db"]}');
+        INSERT INTO pending_handoffs (project_name, phase)
+            VALUES ('MyProject', 'Phase 2');
+        PRAGMA user_version = 6;
+    """)
+    await db.commit()
+    await db.close()
+
+
+async def test_schema_source_trust_defaults_to_agent(db: aiosqlite.Connection) -> None:
+    """Fresh DB: every instruction-bearing table defaults source_trust to 'agent'."""
+    await db.execute(
+        "INSERT INTO context_sections (section_name, owner, content) "
+        "VALUES ('career', 'claude_ai', 'x')"
+    )
+    await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary) "
+        "VALUES ('cc', '2026-06-10', 'bridge-db', 'work')"
+    )
+    await db.execute(
+        "INSERT INTO system_snapshots (system, snapshot_date, data) "
+        "VALUES ('cc', '2026-06-10', '{}')"
+    )
+    await db.execute("INSERT INTO pending_handoffs (project_name) VALUES ('bridge-db')")
+    await db.commit()
+
+    for table in ("context_sections", "activity_log", "system_snapshots", "pending_handoffs"):
+        cursor = await db.execute(f"SELECT source_trust FROM {table}")
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row["source_trust"] == "agent", f"{table} did not default to 'agent'"
+
+
+_TRUST_TABLES = ("context_sections", "activity_log", "system_snapshots", "pending_handoffs")
+
+
+async def _insert_with_trust(db: aiosqlite.Connection, table: str, trust: str) -> None:
+    """Insert one minimal valid row into `table` with an explicit source_trust.
+
+    Each table has a distinct NOT NULL column set; `trust` is embedded in the
+    natural/PK key so repeated inserts on context_sections (PK section_name)
+    don't collide.
+    """
+    key = f"{table}-{trust}"
+    if table == "context_sections":
+        await db.execute(
+            "INSERT INTO context_sections (section_name, owner, content, source_trust) "
+            "VALUES (?, 'claude_ai', 'x', ?)",
+            (key, trust),
+        )
+    elif table == "activity_log":
+        await db.execute(
+            "INSERT INTO activity_log (source, timestamp, project_name, summary, source_trust) "
+            "VALUES ('cc', '2026-06-10', ?, 'w', ?)",
+            (key, trust),
+        )
+    elif table == "system_snapshots":
+        await db.execute(
+            "INSERT INTO system_snapshots (system, snapshot_date, data, source_trust) "
+            "VALUES ('cc', '2026-06-10', '{}', ?)",
+            (trust,),
+        )
+    elif table == "pending_handoffs":
+        await db.execute(
+            "INSERT INTO pending_handoffs (project_name, source_trust) VALUES (?, ?)",
+            (key, trust),
+        )
+    else:  # pragma: no cover - guards against a typo'd table name in a test
+        raise AssertionError(f"unknown table {table}")
+
+
+async def test_source_trust_accepts_all_valid_values(db: aiosqlite.Connection) -> None:
+    """Every table's CHECK admits each SourceTrust value — guards against a
+    misspelled or missing literal in any one of the four DDL CHECK clauses."""
+    for table in _TRUST_TABLES:
+        for trust in ("operator", "agent", "ingested"):
+            await _insert_with_trust(db, table, trust)
+    await db.commit()
+
+
+async def test_source_trust_check_rejects_unknown_all_tables(db: aiosqlite.Connection) -> None:
+    """Every table's CHECK rejects a value outside the SourceTrust set — guards
+    against a dropped CHECK clause on any one of the four ALTER/DDL statements."""
+    for table in _TRUST_TABLES:
+        with pytest.raises(aiosqlite.IntegrityError):
+            await _insert_with_trust(db, table, "untrusted")
+
+
+async def test_migration_v6_to_v7_adds_source_trust(tmp_path: Path) -> None:
+    """A v6 DB gains source_trust on all four tables with conservative backfill."""
+    await _create_v6_fixture(tmp_path / "v6.db")
+
+    migrated = await open_db(tmp_path / "v6.db")
+    try:
+        cursor = await migrated.execute("PRAGMA user_version")
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == SCHEMA_VERSION
+
+        # Owner-authored history → 'operator'.
+        for table in ("context_sections", "pending_handoffs"):
+            cursor = await migrated.execute(f"SELECT source_trust FROM {table}")
+            r = await cursor.fetchone()
+            assert r is not None
+            assert r["source_trust"] == "operator", f"{table} backfill should be 'operator'"
+
+        # Agent-authored history keeps the default.
+        for table in ("activity_log", "system_snapshots"):
+            cursor = await migrated.execute(f"SELECT source_trust FROM {table}")
+            r = await cursor.fetchone()
+            assert r is not None
+            assert r["source_trust"] == "agent", f"{table} backfill should stay 'agent'"
+
+        # No data loss: seeded content survives the migration.
+        cursor = await migrated.execute(
+            "SELECT content FROM context_sections WHERE section_name = 'career'"
+        )
+        r = await cursor.fetchone()
+        assert r is not None
+        assert r["content"] == "Staff Engineer target"
+
+        cursor = await migrated.execute(
+            "SELECT phase FROM pending_handoffs WHERE project_name = 'MyProject'"
+        )
+        r = await cursor.fetchone()
+        assert r is not None
+        assert r["phase"] == "Phase 2"
+
+        # The migration-defined CHECKs (separate SQL from _SCHEMA_DDL) must be
+        # complete on every table: each admits all valid values and rejects unknowns.
+        for table in _TRUST_TABLES:
+            await _insert_with_trust(migrated, table, "ingested")
+            with pytest.raises(aiosqlite.IntegrityError):
+                await _insert_with_trust(migrated, table, "untrusted")
+        await migrated.commit()
+    finally:
+        await migrated.close()
+
+
+async def test_migration_v6_to_v7_is_idempotent(tmp_path: Path) -> None:
+    """Re-opening a migrated v7 DB is a no-op — the version gate blocks re-running ALTER."""
+    await _create_v6_fixture(tmp_path / "v6.db")
+
+    first = await open_db(tmp_path / "v6.db")
+    await first.close()
+
+    # Second open must not raise "duplicate column name"; version stays at v7.
+    second = await open_db(tmp_path / "v6.db")
+    try:
+        cursor = await second.execute("PRAGMA user_version")
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == SCHEMA_VERSION
+
+        # Backfill is stable across the no-op re-open.
+        cursor = await second.execute("SELECT source_trust FROM context_sections")
+        r = await cursor.fetchone()
+        assert r is not None
+        assert r["source_trust"] == "operator"
+    finally:
+        await second.close()
