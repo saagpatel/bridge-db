@@ -140,15 +140,29 @@ def register(mcp: FastMCP) -> None:
             CallerID, Field(description="The system picking up the handoff: 'cc' or 'codex'")
         ],
         handoff_id: Annotated[int, Field(description="ID of the handoff to pick up")],
+        confirm: Annotated[
+            bool,
+            Field(
+                description="Operator confirmation to pick up a non-operator-trust handoff "
+                "(cc only; ignored for codex, which is refused until promoted)"
+            ),
+        ] = False,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
-        """Mark a handoff as active (in progress). Only 'cc' or 'codex' may pick up."""
+        """Mark a handoff as active (in progress). Only 'cc' or 'codex' may pick up.
+
+        Provenance gate: a non-'operator' handoff is gated at this pending → active
+        transition. 'cc' must re-invoke with confirm=True; 'codex' (danger-full-access)
+        is refused until the handoff is promoted to operator trust. 'operator'-trust
+        handoffs pick up in one call, as before.
+        """
         if caller not in ("cc", "codex"):
             raise ToolError(f"Only 'cc' or 'codex' may pick up handoffs; caller was '{caller}'")
 
         db = get_db(ctx)
         cursor = await db.execute(
-            "SELECT id, project_name, status, canonical_key FROM pending_handoffs WHERE id = ?",
+            "SELECT id, project_name, status, source_trust, canonical_key "
+            "FROM pending_handoffs WHERE id = ?",
             (handoff_id,),
         )
         row = await cursor.fetchone()
@@ -156,6 +170,44 @@ def register(mcp: FastMCP) -> None:
             raise ToolError(f"No handoff found with id {handoff_id}")
         if row["status"] != "pending":
             raise ToolError(f"Handoff {handoff_id} is not pending (status: {row['status']})")
+
+        trust = row["source_trust"]
+        project = row["project_name"]
+
+        # Provenance gate — the pending → active transition is the dangerous step.
+        if trust != "operator":
+            if caller == "codex":
+                log_audit(
+                    "pick_up_handoff",
+                    caller,
+                    project,
+                    ok=False,
+                    detail=f"source_trust={trust} decision=refused",
+                )
+                raise ToolError(
+                    f"Codex cannot pick up a non-operator-trust handoff (source_trust='{trust}'). "
+                    "Promote it to operator trust before picking up with Codex."
+                )
+            if not confirm:  # caller == 'cc'
+                log_audit(
+                    "pick_up_handoff",
+                    caller,
+                    project,
+                    ok=False,
+                    detail=f"source_trust={trust} decision=confirmation_required",
+                )
+                return {
+                    "ok": False,
+                    "requires_confirmation": True,
+                    "handoff_id": handoff_id,
+                    "project_name": project,
+                    "source_trust": trust,
+                    "status": "pending",
+                    "reason": (
+                        "non-operator-trust handoff; re-invoke pick_up_handoff with confirm=True"
+                    ),
+                }
+            # cc + confirm=True → confirmed override; fall through to the transition.
 
         await db.execute(
             """
@@ -166,12 +218,21 @@ def register(mcp: FastMCP) -> None:
             (handoff_id,),
         )
         await db.commit()
-        logger.info("handoff picked up: id=%d by %s", handoff_id, caller)
+        decision = "allowed confirm=true" if (trust != "operator" and confirm) else "allowed"
+        log_audit(
+            "pick_up_handoff",
+            caller,
+            project,
+            ok=True,
+            detail=f"source_trust={trust} decision={decision}",
+        )
+        logger.info("handoff picked up: id=%d by %s (source_trust=%s)", handoff_id, caller, trust)
         return {
             "ok": True,
             "handoff_id": handoff_id,
-            "project_name": row["project_name"],
+            "project_name": project,
             "canonical_key": row["canonical_key"],
+            "source_trust": trust,
             "status": "active",
         }
 

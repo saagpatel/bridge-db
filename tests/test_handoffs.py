@@ -127,10 +127,14 @@ async def test_get_pending_handoffs_returns_pending_only(
 
 async def test_pick_up_handoff(db: aiosqlite.Connection, fns: dict[str, Any]) -> None:
     ctx = make_ctx(db)
-    created = await fns["create_handoff"](caller="claude_ai", project_name="P", ctx=ctx)
+    created = await fns["create_handoff"](
+        caller="claude_ai", project_name="P", source_trust="operator", ctx=ctx
+    )
     handoff_id = created["handoff_id"]
 
+    # operator-trust handoff → fast path, picks up in one call.
     result = await fns["pick_up_handoff"](caller="cc", handoff_id=handoff_id, ctx=ctx)
+    assert result["ok"] is True
     assert result["status"] == "active"
 
     cursor = await db.execute(
@@ -159,6 +163,162 @@ async def test_pick_up_nonexistent_handoff_raises(
         await fns["pick_up_handoff"](caller="cc", handoff_id=9999, ctx=ctx)
 
 
+async def test_pick_up_cc_agent_requires_confirmation_no_transition(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    created = await fns["create_handoff"](caller="claude_ai", project_name="P", ctx=ctx)  # agent
+    handoff_id = created["handoff_id"]
+
+    result = await fns["pick_up_handoff"](caller="cc", handoff_id=handoff_id, ctx=ctx)
+    assert result["ok"] is False
+    assert result["requires_confirmation"] is True
+    assert result["source_trust"] == "agent"
+    assert result["status"] == "pending"
+
+    cursor = await db.execute(
+        "SELECT status, picked_up_at FROM pending_handoffs WHERE id = ?", (handoff_id,)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["picked_up_at"] is None
+
+
+async def test_pick_up_cc_agent_with_confirm_activates(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    created = await fns["create_handoff"](caller="claude_ai", project_name="P", ctx=ctx)
+    handoff_id = created["handoff_id"]
+    result = await fns["pick_up_handoff"](caller="cc", handoff_id=handoff_id, confirm=True, ctx=ctx)
+    assert result["ok"] is True
+    assert result["status"] == "active"
+    assert result["source_trust"] == "agent"
+
+    cursor = await db.execute(
+        "SELECT status, picked_up_at FROM pending_handoffs WHERE id = ?", (handoff_id,)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["status"] == "active"
+    assert row["picked_up_at"] is not None
+
+
+async def test_pick_up_cc_ingested_gate_then_confirm(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    """ingested is non-operator: gated (no transition) without confirm, active with confirm."""
+    ctx = make_ctx(db)
+    created = await fns["create_handoff"](
+        caller="claude_ai", project_name="P", source_trust="ingested", ctx=ctx
+    )
+    handoff_id = created["handoff_id"]
+
+    gated = await fns["pick_up_handoff"](caller="cc", handoff_id=handoff_id, ctx=ctx)
+    assert gated["requires_confirmation"] is True
+    assert gated["source_trust"] == "ingested"
+    cursor = await db.execute(
+        "SELECT status, picked_up_at FROM pending_handoffs WHERE id = ?", (handoff_id,)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["picked_up_at"] is None
+
+    confirmed = await fns["pick_up_handoff"](
+        caller="cc", handoff_id=handoff_id, confirm=True, ctx=ctx
+    )
+    assert confirmed["ok"] is True
+    assert confirmed["status"] == "active"
+
+
+async def test_pick_up_codex_agent_refused_even_with_confirm(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    created = await fns["create_handoff"](caller="claude_ai", project_name="P", ctx=ctx)  # agent
+    handoff_id = created["handoff_id"]
+
+    with pytest.raises(ToolError, match="operator"):
+        await fns["pick_up_handoff"](caller="codex", handoff_id=handoff_id, ctx=ctx)
+    # confirm=True must NOT bypass the codex refusal.
+    with pytest.raises(ToolError, match="operator"):
+        await fns["pick_up_handoff"](caller="codex", handoff_id=handoff_id, confirm=True, ctx=ctx)
+
+    cursor = await db.execute(
+        "SELECT status, picked_up_at FROM pending_handoffs WHERE id = ?", (handoff_id,)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["picked_up_at"] is None
+
+
+async def test_pick_up_codex_ingested_refused(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    """Codex refusal keys on non-operator, not just 'agent' — ingested is refused too."""
+    ctx = make_ctx(db)
+    created = await fns["create_handoff"](
+        caller="claude_ai", project_name="P", source_trust="ingested", ctx=ctx
+    )
+    handoff_id = created["handoff_id"]
+    with pytest.raises(ToolError, match="operator"):
+        await fns["pick_up_handoff"](caller="codex", handoff_id=handoff_id, ctx=ctx)
+
+    cursor = await db.execute(
+        "SELECT status, picked_up_at FROM pending_handoffs WHERE id = ?", (handoff_id,)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["picked_up_at"] is None
+
+
+async def test_pick_up_codex_operator_activates_one_call(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    created = await fns["create_handoff"](
+        caller="claude_ai", project_name="P", source_trust="operator", ctx=ctx
+    )
+    handoff_id = created["handoff_id"]
+    result = await fns["pick_up_handoff"](caller="codex", handoff_id=handoff_id, ctx=ctx)
+    assert result["ok"] is True
+    assert result["status"] == "active"
+
+    cursor = await db.execute("SELECT status FROM pending_handoffs WHERE id = ?", (handoff_id,))
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["status"] == "active"
+
+
+async def test_pick_up_gate_writes_distinct_audit_events(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    """confirmation_required / refused / allowed each emit a distinct audit event."""
+    ctx = make_ctx(db)
+    agent = await fns["create_handoff"](caller="claude_ai", project_name="Agentish", ctx=ctx)
+    operator = await fns["create_handoff"](
+        caller="claude_ai", project_name="Opish", source_trust="operator", ctx=ctx
+    )
+
+    await fns["pick_up_handoff"](caller="cc", handoff_id=agent["handoff_id"], ctx=ctx)
+    with pytest.raises(ToolError):
+        await fns["pick_up_handoff"](caller="codex", handoff_id=agent["handoff_id"], ctx=ctx)
+    await fns["pick_up_handoff"](caller="cc", handoff_id=operator["handoff_id"], ctx=ctx)
+
+    events = [
+        json.loads(line) for line in config.AUDIT_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    ]
+    details = [e["detail"] for e in events if e["tool"] == "pick_up_handoff"]
+    assert len(details) == 3  # exactly one event per pickup call (tmp log isolated by conftest)
+    assert any("decision=confirmation_required" in d for d in details)
+    assert any("decision=refused" in d for d in details)
+    assert any("decision=allowed" in d for d in details)
+
+
 async def test_clear_handoff_by_project_name(db: aiosqlite.Connection, fns: dict[str, Any]) -> None:
     ctx = make_ctx(db)
     await fns["create_handoff"](caller="claude_ai", project_name="MyProject", ctx=ctx)
@@ -180,7 +340,9 @@ async def test_clear_handoff_clears_all_matching_rows(
     ctx = make_ctx(db)
     first = await fns["create_handoff"](caller="claude_ai", project_name="MyProject", ctx=ctx)
     second = await fns["create_handoff"](caller="claude_ai", project_name="MyProject", ctx=ctx)
-    await fns["pick_up_handoff"](caller="cc", handoff_id=second["handoff_id"], ctx=ctx)
+    await fns["pick_up_handoff"](
+        caller="cc", handoff_id=second["handoff_id"], confirm=True, ctx=ctx
+    )
 
     result = await fns["clear_handoff"](caller="cc", project_name="MyProject", ctx=ctx)
 
@@ -223,6 +385,7 @@ async def test_handoff_lifecycle_across_pending_pickup_and_clear(
         project_name="BridgeStatus",
         project_path="/Users/d/Projects/bridge-db",
         phase="Phase 5",
+        source_trust="operator",
         ctx=ctx,
     )
     second = await fns["create_handoff"](
