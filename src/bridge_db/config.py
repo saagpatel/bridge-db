@@ -58,3 +58,17 @@ META_SHIPPED_EVENTS_PATH: Path = Path(
         str(Path(__file__).resolve().parents[2] / "config" / "meta-shipped-events.json"),
     )
 )
+
+# Principal enrollment store: maps sha256(token) -> caller id. Operator-managed
+# via `python -m bridge_db --enroll <caller>`; mode 0600. Override for tests.
+PRINCIPALS_PATH: Path = Path(
+    os.environ.get(
+        "BRIDGE_DB_PRINCIPALS_PATH",
+        str(DB_PATH.parent / "principals.json"),
+    )
+)
+
+# Auth rollout dial: 'off' (legacy, no checks), 'warn' (allow + audit mismatches),
+# 'enforce' (reject mismatches and unbound writes). Unrecognized values are
+# treated as 'enforce' by auth.auth_mode() — fail closed.
+AUTH_MODE: str = os.environ.get("BRIDGE_DB_AUTH_MODE", "off")
