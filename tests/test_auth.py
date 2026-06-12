@@ -10,6 +10,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 from bridge_db import auth, config
 from bridge_db.audit import iter_jsonl
+from bridge_db.models import SourceTrust
 
 
 def write_principals(path: Path, entries: dict[str, str]) -> None:
@@ -176,7 +177,7 @@ def test_clamp_blocks_operator_in_active_modes(monkeypatch: pytest.MonkeyPatch, 
 
 @pytest.mark.parametrize("requested", ["agent", "ingested", None])
 def test_clamp_passes_non_operator_through(
-    monkeypatch: pytest.MonkeyPatch, requested: str | None
+    monkeypatch: pytest.MonkeyPatch, requested: SourceTrust | None
 ) -> None:
     monkeypatch.setattr(config, "AUTH_MODE", "enforce")
     assert auth.clamp_source_trust(requested, caller="cc", tool="log_activity") == (

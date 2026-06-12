@@ -19,6 +19,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 from bridge_db import config
 from bridge_db.audit import log_audit
+from bridge_db.models import SourceTrust
 
 logger = logging.getLogger("bridge_db.auth")
 
@@ -108,7 +109,9 @@ def require_caller(ctx: Any, caller: str, tool: str) -> None:
     raise ToolError(f"Caller mismatch: connection bound to '{principal}', cannot act as '{caller}'")
 
 
-def clamp_source_trust(requested: str | None, caller: str, tool: str) -> tuple[str | None, bool]:
+def clamp_source_trust(
+    requested: SourceTrust | None, caller: str, tool: str
+) -> tuple[SourceTrust | None, bool]:
     """Block MCP-side minting of the 'operator' label.
 
     Returns (stored_value, clamped). Active in warn and enforce modes; 'off'

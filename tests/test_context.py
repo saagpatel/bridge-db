@@ -267,9 +267,7 @@ Capability notes
     ]
 
 
-async def test_sync_from_file_is_idempotent(
-    db: aiosqlite.Connection, tmp_path: Path
-) -> None:
+async def test_sync_from_file_is_idempotent(db: aiosqlite.Connection, tmp_path: Path) -> None:
     bridge_file = tmp_path / "claude_ai_context.md"
     bridge_file.write_text(
         """## Career & Professional Target
@@ -297,6 +295,35 @@ v4
     row = await cursor.fetchone()
     assert row is not None
     assert row[0] == 4
+
+
+async def test_update_section_clamps_operator_self_promotion(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from conftest import CaptureMCP, make_ctx
+
+    from bridge_db import config as bridge_config
+    from bridge_db.tools import context as context_module
+
+    monkeypatch.setattr(bridge_config, "AUTH_MODE", "warn")
+    cap = CaptureMCP()
+    context_module.register(cap)
+    result = await cap.fns["update_section"](
+        caller="claude_ai",
+        section_name="career",
+        content="# Career\nupdated",
+        source_trust="operator",
+        ctx=make_ctx(db, principal="claude_ai"),
+    )
+    assert result["source_trust"] == "agent"
+    assert result["source_trust_clamped"] is True
+
+    cursor = await db.execute(
+        "SELECT source_trust FROM context_sections WHERE section_name = 'career'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["source_trust"] == "agent"
 
 
 async def test_sync_from_file_skips_non_owned_sections(

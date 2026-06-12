@@ -8,7 +8,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db.audit import log_audit
-from bridge_db.auth import require_caller
+from bridge_db.auth import clamp_source_trust, require_caller
 from bridge_db.db import fts_text_for_handoff, get_db, upsert_fts_entry
 from bridge_db.models import CallerID, SourceTrust
 from bridge_db.project_resolver import resolve as resolve_project
@@ -43,6 +43,10 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """Create a project handoff for Claude Code or Codex to pick up. Only claude_ai may dispatch."""
         require_caller(ctx, caller, tool="create_handoff")
+        clamped_trust, source_trust_clamped = clamp_source_trust(
+            source_trust, caller=caller, tool="create_handoff"
+        )
+        source_trust = clamped_trust if clamped_trust is not None else source_trust
         if caller != "claude_ai":
             raise ToolError(f"Only 'claude_ai' may create handoffs; caller was '{caller}'")
 
@@ -102,6 +106,7 @@ def register(mcp: FastMCP) -> None:
             "project_name": project_name,
             "canonical_key": resolution.canonical_key,
             "source_trust": source_trust,
+            "source_trust_clamped": source_trust_clamped,
             "status": "pending",
         }
 

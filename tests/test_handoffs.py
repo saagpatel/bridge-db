@@ -561,3 +561,24 @@ async def test_clear_handoff_canonical_does_not_overmatch_other_projects(
     row = await cursor.fetchone()
     assert row is not None
     assert row["status"] == "pending"
+
+
+async def test_create_handoff_clamps_operator_label(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from conftest import CaptureMCP, make_ctx
+
+    from bridge_db import config as bridge_config
+    from bridge_db.tools import handoffs as handoffs_module
+
+    monkeypatch.setattr(bridge_config, "AUTH_MODE", "warn")
+    cap = CaptureMCP()
+    handoffs_module.register(cap)
+    result = await cap.fns["create_handoff"](
+        caller="claude_ai",
+        project_name="TestProject",
+        source_trust="operator",
+        ctx=make_ctx(db, principal="claude_ai"),
+    )
+    assert result["source_trust"] == "agent"
+    assert result["source_trust_clamped"] is True

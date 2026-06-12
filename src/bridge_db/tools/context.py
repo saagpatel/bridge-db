@@ -9,7 +9,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db import config
-from bridge_db.auth import require_caller
+from bridge_db.auth import clamp_source_trust, require_caller
 from bridge_db.db import (
     fts_text_for_section,
     get_db,
@@ -121,6 +121,9 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """Upsert a context section. Caller must be the section owner (see SECTION_OWNERS)."""
         require_caller(ctx, caller, tool="update_section")
+        source_trust, source_trust_clamped = clamp_source_trust(
+            source_trust, caller=caller, tool="update_section"
+        )
         owner = SECTION_OWNERS.get(section_name)
         if owner is None:
             raise ToolError(
@@ -154,6 +157,7 @@ def register(mcp: FastMCP) -> None:
             "section_name": section_name,
             "owner": owner,
             "source_trust": stored_trust,
+            "source_trust_clamped": source_trust_clamped,
         }
 
     @mcp.tool()
