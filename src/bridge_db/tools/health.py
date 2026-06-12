@@ -23,6 +23,27 @@ _ROW_COUNT_TABLES = (
 )
 _ACTIVITY_SOURCES = ("cc", "codex", "claude_ai", "notion_os", "personal_ops")
 _SNAPSHOT_SYSTEMS = ("cc", "codex")
+_TRUST_LEVELS = ("operator", "agent", "ingested")
+_TRUST_TABLES = ("context_sections", "activity_log", "system_snapshots", "pending_handoffs")
+
+
+async def _source_trust_breakdown(db: Any) -> dict[str, dict[str, int]]:
+    """Per-table provenance distribution: {table: {operator, agent, ingested}}.
+
+    Default-zero-filled so every level is present even when a table has no rows
+    at that trust. Reads source rows directly; content_index is not involved.
+    """
+    breakdown: dict[str, dict[str, int]] = {}
+    for table in _TRUST_TABLES:
+        cursor = await db.execute(
+            f"SELECT source_trust, COUNT(*) AS n FROM {table} GROUP BY source_trust"  # noqa: S608
+        )
+        counts = {level: 0 for level in _TRUST_LEVELS}
+        for row in await cursor.fetchall():
+            if row["source_trust"] in counts:
+                counts[row["source_trust"]] = row["n"]
+        breakdown[table] = counts
+    return breakdown
 
 
 def _read_bridge_claude_ai_sections() -> dict[str, str] | None:
@@ -121,6 +142,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
 
     fts_index = await collect_fts_index_metrics(db)
     claude_ai_section_drift = await collect_claude_ai_section_drift(db)
+    source_trust_breakdown = await _source_trust_breakdown(db)
 
     # WAL size and claude_ai section drift are soft signals — do not fold into `ok`.
     ok = db_exists and schema_version == SCHEMA_VERSION and bridge_file_exists and fts_index["ok"]
@@ -140,6 +162,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "wal_warning": wal_warning,
         "fts_index": fts_index,
         "claude_ai_section_drift": claude_ai_section_drift,
+        "source_trust_breakdown": source_trust_breakdown,
     }
 
 
@@ -150,6 +173,15 @@ async def collect_status_summary(db: Any) -> dict[str, Any]:
     cursor = await db.execute("SELECT COUNT(*) FROM pending_handoffs WHERE status = 'pending'")
     pending_handoffs_row = await cursor.fetchone()
     pending_handoffs = pending_handoffs_row[0] if pending_handoffs_row else 0
+
+    cursor = await db.execute(
+        "SELECT source_trust, COUNT(*) AS n FROM pending_handoffs "
+        "WHERE status = 'pending' GROUP BY source_trust"
+    )
+    pending_handoffs_by_trust = {level: 0 for level in _TRUST_LEVELS}
+    for trust_row in await cursor.fetchall():
+        if trust_row["source_trust"] in pending_handoffs_by_trust:
+            pending_handoffs_by_trust[trust_row["source_trust"]] = trust_row["n"]
 
     latest_snapshots: dict[str, str] = {}
     for system in _SNAPSHOT_SYSTEMS:
@@ -197,6 +229,8 @@ async def collect_status_summary(db: Any) -> dict[str, Any]:
             "age_human": bridge_age_human,
         },
         "row_counts": health["row_counts"],
+        "source_trust_breakdown": health["source_trust_breakdown"],
+        "pending_handoffs_by_trust": pending_handoffs_by_trust,
         "signals": {
             "pending_handoffs": pending_handoffs,
             "unprocessed_shipped": health["unprocessed_shipped_count"],

@@ -89,6 +89,42 @@ async def test_recall_happy_path(
     assert entry["n_results"] == len(results)
 
 
+async def test_recall_hits_carry_source_trust(capture: CaptureMCP, db: Any) -> None:
+    """Every recall source-type branch surfaces its row's source_trust. Distinct
+    values across section/activity/snapshot/handoff catch a per-branch column drop."""
+    ctx = make_ctx(db)
+    await capture.fns["update_section"](
+        caller="claude_ai",
+        section_name="career",
+        content="Quokka career notes",
+        source_trust="operator",
+        ctx=ctx,
+    )
+    await capture.fns["log_activity"](
+        caller="cc",
+        project_name="bridge-db",
+        summary="Quokka activity",
+        source_trust="agent",
+        ctx=ctx,
+    )
+    await capture.fns["save_snapshot"](
+        caller="cc", data={"note": "Quokka snapshot"}, source_trust="ingested", ctx=ctx
+    )
+    await capture.fns["create_handoff"](
+        caller="claude_ai", project_name="Quokka", source_trust="operator", ctx=ctx
+    )
+
+    results = await capture.fns["recall"](query="Quokka", limit=10, scope="all", ctx=ctx)
+    by_type = {hit["source_type"]: hit for hit in results}
+    assert {"section", "activity", "snapshot", "handoff"} <= set(by_type), (
+        f"expected all four source types, got {sorted(by_type)}"
+    )
+    assert by_type["section"]["source_trust"] == "operator"
+    assert by_type["activity"]["source_trust"] == "agent"
+    assert by_type["snapshot"]["source_trust"] == "ingested"
+    assert by_type["handoff"]["source_trust"] == "operator"
+
+
 async def test_recall_empty_result(
     capture: CaptureMCP, db: Any, tmp_path: Any, monkeypatch: Any
 ) -> None:

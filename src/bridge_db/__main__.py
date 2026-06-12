@@ -128,6 +128,11 @@ async def run_status() -> bool:
         f" fts_orphaned={summary['signals']['fts_orphaned']}"
     )
     print(f"  FTS: {_fts_detail(summary['fts_index'])}")
+    trust = summary["pending_handoffs_by_trust"]
+    print(
+        "  Pending handoff trust:"
+        f" operator={trust['operator']}, agent={trust['agent']}, ingested={trust['ingested']}"
+    )
     attention = _status_attention(summary)
     if attention:
         print(f"  Attention: {attention}")
@@ -152,8 +157,7 @@ def _status_attention(summary: dict[str, Any]) -> str | None:
         notes.append(f"unprocessed_shipped={signals['unprocessed_shipped']}")
     if signals["processed_shipped_without_receipt"]:
         notes.append(
-            "processed_shipped_without_receipt="
-            f"{signals['processed_shipped_without_receipt']}"
+            f"processed_shipped_without_receipt={signals['processed_shipped_without_receipt']}"
         )
     if signals["fts_missing"]:
         notes.append(f"fts_missing={signals['fts_missing']}")
@@ -208,10 +212,7 @@ async def run_dogfood() -> bool:
         " processed_shipped_without_receipt="
         f"{summary['signals']['processed_shipped_without_receipt']}"
     )
-    print(
-        "  WAL:"
-        f" size_bytes={health['wal_size_bytes']}, warning={health['wal_warning']}"
-    )
+    print(f"  WAL: size_bytes={health['wal_size_bytes']}, warning={health['wal_warning']}")
     print(f"  FTS: {_fts_detail(health['fts_index'])}")
     print(
         "  Recall:"
@@ -342,9 +343,7 @@ def main() -> None:
         ok = asyncio.run(run_rebuild_content_index())
         sys.exit(0 if ok else 1)
     if args.log_session_boundary:
-        ok = asyncio.run(
-            run_log_session_boundary(args.log_session_boundary, args.duration_minutes)
-        )
+        ok = asyncio.run(run_log_session_boundary(args.log_session_boundary, args.duration_minutes))
         sys.exit(0 if ok else 1)
 
     from bridge_db.server import mcp

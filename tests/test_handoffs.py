@@ -125,6 +125,25 @@ async def test_get_pending_handoffs_returns_pending_only(
     assert pending[0]["project_name"] == "B"
 
 
+async def test_get_pending_handoffs_surfaces_source_trust(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await fns["create_handoff"](
+        caller="claude_ai", project_name="Op", source_trust="operator", ctx=ctx
+    )
+    await fns["create_handoff"](
+        caller="claude_ai", project_name="In", source_trust="ingested", ctx=ctx
+    )
+    await fns["create_handoff"](caller="claude_ai", project_name="Ag", ctx=ctx)  # default agent
+
+    pending = await fns["get_pending_handoffs"](ctx=ctx)
+    trust = {h["project_name"]: h["source_trust"] for h in pending}
+    assert trust["Op"] == "operator"
+    assert trust["In"] == "ingested"
+    assert trust["Ag"] == "agent"
+
+
 async def test_pick_up_handoff(db: aiosqlite.Connection, fns: dict[str, Any]) -> None:
     ctx = make_ctx(db)
     created = await fns["create_handoff"](

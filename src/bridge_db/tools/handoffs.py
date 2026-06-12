@@ -112,7 +112,7 @@ def register(mcp: FastMCP) -> None:
         cursor = await db.execute(
             """
             SELECT id, project_name, project_path, roadmap_file, phase,
-                   dispatched_from, dispatched_at, status, canonical_key
+                   dispatched_from, dispatched_at, status, canonical_key, source_trust
             FROM pending_handoffs
             WHERE status = 'pending'
             ORDER BY dispatched_at DESC, id DESC
@@ -130,6 +130,7 @@ def register(mcp: FastMCP) -> None:
                 "dispatched_at": r["dispatched_at"],
                 "status": r["status"],
                 "canonical_key": r["canonical_key"],
+                "source_trust": r["source_trust"],
             }
             for r in rows
         ]

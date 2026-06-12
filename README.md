@@ -69,6 +69,19 @@ No shared daemon. Each MCP client spawns its own `bridge-db` process via stdio. 
 
 Write tools enforce `caller` ownership, so systems can only write the slices of state they own. Recent hardening also added `notion_os` and `personal_ops` as first-class activity and cost writers.
 
+## Provenance & the pickup gate
+
+Instruction-bearing rows carry a `source_trust` label — `operator`, `agent`, or `ingested` — recording who authored the content. It lives only in the DB (schema v7+, on `pending_handoffs`, `activity_log`, `context_sections`, `system_snapshots`) and is **never serialized into the markdown export**, which would otherwise launder provenance.
+
+- **Writers** set it via an optional `source_trust` param; the conservative default is `agent` (a Claude-dispatched write is agent-authored unless the operator asserts otherwise). `update_section` preserves an existing section's label on a content-only re-sync.
+- **The gate** lives at the one dangerous transition — `pick_up_handoff` moving a handoff `pending → active`:
+  - `operator`-trust → picks up in one call (`cc` and `codex`).
+  - `cc` + non-`operator` → returns `requires_confirmation` and does **not** transition; re-invoke with `confirm=True` to proceed.
+  - `codex` + non-`operator` → **refused** (Codex runs with `danger-full-access`; `confirm` cannot bypass it). Promote the handoff to `operator` trust first.
+- **Visibility:** `get_pending_handoffs` and `recall` hits carry `source_trust`; `status` reports `pending_handoffs_by_trust` and `health` a full per-table `source_trust_breakdown`. Each gate decision (`allowed` / `confirmation_required` / `refused`) is written to the audit log.
+
+> Consumers authoring an operator-directed handoff (e.g. the `vibe-code-handoff` skill) should pass `source_trust="operator"` on `create_handoff` so it picks up without confirmation.
+
 ## Commands
 
 ```bash
