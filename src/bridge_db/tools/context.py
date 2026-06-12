@@ -9,7 +9,8 @@ from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db import config
-from bridge_db.auth import clamp_source_trust, require_caller
+from bridge_db.audit import log_audit
+from bridge_db.auth import auth_mode, clamp_source_trust, require_caller
 from bridge_db.db import (
     fts_text_for_section,
     get_db,
@@ -71,31 +72,74 @@ async def _upsert_section(
 
 
 async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str, Any]:
-    """Read the bridge file and upsert the Claude.ai-owned context sections."""
+    """Read the bridge file and upsert the Claude.ai-owned context sections.
+
+    With auth active (mode != 'off'), the file is an unauthenticated channel:
+    unchanged sections are skipped (label preserved), changed or new sections
+    are imported as source_trust='ingested' and reported in `demoted` so the
+    operator can review and promote via `--promote-section`. In 'off' mode the
+    legacy preserve-label upsert runs unchanged (rollback lever).
+    """
     if not bridge_path.exists():
         raise ToolError(f"Bridge file not found: {bridge_path}")
 
+    auth_active = auth_mode() != "off"
     parsed_sections = parse_owned_sections(bridge_path.read_text(encoding="utf-8"))
     synced_sections: list[str] = []
+    unchanged: list[str] = []
+    demoted: list[str] = []
 
     for section_name in SECTION_OWNERS:
         if section_name not in parsed_sections:
             continue
+        content = parsed_sections[section_name]
 
-        await _upsert_section(
-            db=db,
-            section_name=section_name,
-            owner="claude_ai",
-            content=parsed_sections[section_name],
-        )
+        if auth_active:
+            cursor = await db.execute(
+                "SELECT content FROM context_sections WHERE section_name = ?",
+                (section_name,),
+            )
+            row = await cursor.fetchone()
+            if row is not None and row["content"] == content:
+                unchanged.append(section_name)
+                continue
+            await _upsert_section(
+                db=db,
+                section_name=section_name,
+                owner="claude_ai",
+                content=content,
+                source_trust="ingested",
+            )
+            demoted.append(section_name)
+        else:
+            await _upsert_section(
+                db=db, section_name=section_name, owner="claude_ai", content=content
+            )
+
         synced_sections.append(section_name)
 
     await db.commit()
-    logger.info("synced %d claude_ai section(s) from %s", len(synced_sections), bridge_path)
+    if demoted:
+        log_audit(
+            "sync_from_file.demoted",
+            None,
+            None,
+            ok=True,
+            detail=f"sections={','.join(demoted)} label=ingested (file channel)",
+        )
+    logger.info(
+        "synced %d claude_ai section(s) from %s (unchanged=%d, demoted=%d)",
+        len(synced_sections),
+        bridge_path,
+        len(unchanged),
+        len(demoted),
+    )
     return {
         "ok": True,
         "path": str(bridge_path),
         "sections_synced": synced_sections,
+        "unchanged": unchanged,
+        "demoted": demoted,
         "count": len(synced_sections),
     }
 
