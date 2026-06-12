@@ -162,10 +162,12 @@ def test_require_caller_enforce_unbound_raises(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(config, "AUTH_MODE", "enforce")
     with pytest.raises(ToolError, match="Unauthenticated connection"):
         auth.require_caller(_FakeCtx(None), "cc", tool="log_activity")
+    assert audit_events()[0]["tool"] == "auth.mismatch"
 
 
-def test_clamp_blocks_operator_when_active(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(config, "AUTH_MODE", "warn")
+@pytest.mark.parametrize("mode", ["warn", "enforce"])
+def test_clamp_blocks_operator_in_active_modes(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", mode)
     stored, clamped = auth.clamp_source_trust("operator", caller="claude_ai", tool="create_handoff")
     assert (stored, clamped) == ("agent", True)
     events = audit_events()
