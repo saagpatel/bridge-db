@@ -72,3 +72,35 @@ def test_auth_mode_normalizes_and_fails_closed(
 ) -> None:
     monkeypatch.setattr(config, "AUTH_MODE", raw)
     assert auth.auth_mode() == expected
+
+
+def test_get_principal_reads_lifespan_context() -> None:
+    class _Lifespan:
+        principal = "cc"
+
+    class _RequestContext:
+        lifespan_context = _Lifespan()
+
+    class _Ctx:
+        request_context = _RequestContext()
+
+    assert auth.get_principal(_Ctx()) == "cc"
+
+
+def test_get_principal_malformed_ctx_returns_none() -> None:
+    assert auth.get_principal(object()) is None
+
+
+def test_load_principals_skips_malformed_entries(tmp_path: Path) -> None:
+    path = tmp_path / "principals.json"
+    payload = {
+        "version": 1,
+        "principals": {
+            "bad-caller": "not-a-dict",
+            "no-hash": {"enrolled_at": "2026-06-12T00:00:00Z"},
+            "cc": {"token_sha256": auth.hash_token("token-cc"), "enrolled_at": "x"},
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    loaded = auth.load_principals(path)
+    assert loaded == {auth.hash_token("token-cc"): "cc"}

@@ -36,11 +36,17 @@ def load_principals(path: Path) -> dict[str, str]:
     """Read the enrollment file into a sha256(token) -> caller map.
 
     Missing or malformed file -> {} (nothing binds, enforce mode denies writes).
+    A vanished file (deleted between calls) is treated as missing and returns {}.
     """
-    if not path.exists():
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        logger.warning("principals file unreadable: %s", path)
         return {}
     try:
-        raw = cast(object, json.loads(path.read_text(encoding="utf-8")))
+        raw = cast(object, json.loads(text))
         if not isinstance(raw, dict):
             return {}
         entries = cast(dict[str, object], raw).get("principals")
@@ -54,7 +60,7 @@ def load_principals(path: Path) -> dict[str, str]:
             if isinstance(token_hash, str):
                 result[token_hash] = caller
         return result
-    except (json.JSONDecodeError, KeyError, TypeError):
+    except (json.JSONDecodeError, TypeError):
         logger.warning("principals file unreadable: %s", path)
         return {}
 
