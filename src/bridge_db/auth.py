@@ -15,7 +15,10 @@ import logging
 from pathlib import Path
 from typing import Any, cast
 
+from mcp.server.fastmcp.exceptions import ToolError
+
 from bridge_db import config
+from bridge_db.audit import log_audit
 
 logger = logging.getLogger("bridge_db.auth")
 
@@ -77,3 +80,50 @@ def get_principal(ctx: Any) -> str | None:
         return getattr(ctx.request_context.lifespan_context, "principal", None)
     except AttributeError:
         return None
+
+
+def require_caller(ctx: Any, caller: str, tool: str) -> None:
+    """Cross-check the claimed caller against the connection-bound principal.
+
+    off: no-op. warn: allow but audit mismatches. enforce: reject mismatches
+    and unbound connections. Match is always silent.
+    """
+    mode = auth_mode()
+    if mode == "off":
+        return
+    principal = get_principal(ctx)
+    if principal == caller:
+        return
+    detail = f"tool={tool} principal={principal or 'unbound'} caller={caller} mode={mode}"
+    log_audit("auth.mismatch", caller, None, ok=False, detail=detail)
+    logger.warning("auth mismatch: %s", detail)
+    if mode == "warn":
+        return
+    if principal is None:
+        raise ToolError(
+            "Unauthenticated connection: no BRIDGE_DB_PRINCIPAL_TOKEN bound. "
+            "Enroll with `python -m bridge_db --enroll <caller>` and set the "
+            "token in this client's MCP spawn env."
+        )
+    raise ToolError(f"Caller mismatch: connection bound to '{principal}', cannot act as '{caller}'")
+
+
+def clamp_source_trust(requested: str | None, caller: str, tool: str) -> tuple[str | None, bool]:
+    """Block MCP-side minting of the 'operator' label.
+
+    Returns (stored_value, clamped). Active in warn and enforce modes; 'off'
+    preserves legacy behavior so the rollback lever stays total. Operator
+    labels are minted only via the TTY-gated CLI (--promote-section) or
+    pre-existing rows.
+    """
+    if auth_mode() == "off" or requested != "operator":
+        return requested, False
+    log_audit(
+        "auth.trust_clamped",
+        caller,
+        None,
+        ok=False,
+        detail=f"tool={tool} requested=operator stored=agent",
+    )
+    logger.warning("source_trust clamp: tool=%s caller=%s operator->agent", tool, caller)
+    return "agent", True

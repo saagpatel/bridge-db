@@ -6,8 +6,10 @@ import json
 from pathlib import Path
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from bridge_db import auth, config
+from bridge_db.audit import iter_jsonl
 
 
 def write_principals(path: Path, entries: dict[str, str]) -> None:
@@ -104,3 +106,86 @@ def test_load_principals_skips_malformed_entries(tmp_path: Path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
     loaded = auth.load_principals(path)
     assert loaded == {auth.hash_token("token-cc"): "cc"}
+
+
+class _FakeLifespan:
+    def __init__(self, principal: str | None) -> None:
+        self.principal = principal
+
+
+class _FakeRequestContext:
+    def __init__(self, principal: str | None) -> None:
+        self.lifespan_context = _FakeLifespan(principal)
+
+
+class _FakeCtx:
+    def __init__(self, principal: str | None) -> None:
+        self.request_context = _FakeRequestContext(principal)
+
+
+def audit_events() -> list[dict[str, object]]:
+    return list(iter_jsonl(config.AUDIT_LOG_PATH))
+
+
+def test_require_caller_off_mode_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", "off")
+    auth.require_caller(_FakeCtx(None), "cc", tool="log_activity")  # no raise
+    assert audit_events() == []
+
+
+def test_require_caller_match_passes_silently(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", "enforce")
+    auth.require_caller(_FakeCtx("cc"), "cc", tool="log_activity")
+    assert audit_events() == []
+
+
+def test_require_caller_warn_mismatch_allows_and_audits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", "warn")
+    auth.require_caller(_FakeCtx("codex"), "claude_ai", tool="create_handoff")
+    events = audit_events()
+    assert len(events) == 1
+    assert events[0]["tool"] == "auth.mismatch"
+    assert events[0]["ok"] is False
+    assert "principal=codex" in str(events[0]["detail"])
+
+
+def test_require_caller_enforce_mismatch_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", "enforce")
+    with pytest.raises(ToolError, match="bound to 'codex'"):
+        auth.require_caller(_FakeCtx("codex"), "cc", tool="log_activity")
+    assert audit_events()[0]["tool"] == "auth.mismatch"
+
+
+def test_require_caller_enforce_unbound_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", "enforce")
+    with pytest.raises(ToolError, match="Unauthenticated connection"):
+        auth.require_caller(_FakeCtx(None), "cc", tool="log_activity")
+
+
+def test_clamp_blocks_operator_when_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", "warn")
+    stored, clamped = auth.clamp_source_trust("operator", caller="claude_ai", tool="create_handoff")
+    assert (stored, clamped) == ("agent", True)
+    events = audit_events()
+    assert events[0]["tool"] == "auth.trust_clamped"
+
+
+@pytest.mark.parametrize("requested", ["agent", "ingested", None])
+def test_clamp_passes_non_operator_through(
+    monkeypatch: pytest.MonkeyPatch, requested: str | None
+) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", "enforce")
+    assert auth.clamp_source_trust(requested, caller="cc", tool="log_activity") == (
+        requested,
+        False,
+    )
+
+
+def test_clamp_inactive_in_off_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", "off")
+    assert auth.clamp_source_trust("operator", caller="cc", tool="log_activity") == (
+        "operator",
+        False,
+    )
