@@ -8,6 +8,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db.audit import log_audit
+from bridge_db.auth import require_caller
 from bridge_db.db import fts_text_for_handoff, get_db, upsert_fts_entry
 from bridge_db.models import CallerID, SourceTrust
 from bridge_db.project_resolver import resolve as resolve_project
@@ -41,6 +42,7 @@ def register(mcp: FastMCP) -> None:
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Create a project handoff for Claude Code or Codex to pick up. Only claude_ai may dispatch."""
+        require_caller(ctx, caller, tool="create_handoff")
         if caller != "claude_ai":
             raise ToolError(f"Only 'claude_ai' may create handoffs; caller was '{caller}'")
 
@@ -157,6 +159,7 @@ def register(mcp: FastMCP) -> None:
         is refused until the handoff is promoted to operator trust. 'operator'-trust
         handoffs pick up in one call, as before.
         """
+        require_caller(ctx, caller, tool="pick_up_handoff")
         if caller not in ("cc", "codex"):
             raise ToolError(f"Only 'cc' or 'codex' may pick up handoffs; caller was '{caller}'")
 
@@ -246,6 +249,7 @@ def register(mcp: FastMCP) -> None:
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Clear a handoff by project name (mark as done). Called by /end after completing project work."""
+        require_caller(ctx, caller, tool="clear_handoff")
         if caller not in ("cc", "codex"):
             raise ToolError(f"Only 'cc' or 'codex' may clear handoffs; caller was '{caller}'")
 

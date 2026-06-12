@@ -522,6 +522,23 @@ async def test_clear_handoff_matches_canonical_alias(
     assert row["status"] == "cleared"
 
 
+async def test_create_handoff_enforce_rejects_unbound_connection(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bridge_db import config as bridge_config
+    from bridge_db.tools import handoffs as handoffs_module
+
+    monkeypatch.setattr(bridge_config, "AUTH_MODE", "enforce")
+    cap = CaptureMCP()
+    handoffs_module.register(cap)
+    with pytest.raises(ToolError, match="Unauthenticated connection"):
+        await cap.fns["create_handoff"](
+            caller="claude_ai",
+            project_name="TestProject",
+            ctx=make_ctx(db, principal=None),
+        )
+
+
 async def test_clear_handoff_canonical_does_not_overmatch_other_projects(
     db: aiosqlite.Connection,
     fns: dict[str, Any],

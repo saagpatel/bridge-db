@@ -10,6 +10,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db import config
+from bridge_db.auth import require_caller
 from bridge_db.db import (
     fts_text_for_snapshot,
     gc_fts_orphans,
@@ -89,6 +90,7 @@ def register(mcp: FastMCP) -> None:
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Save a system state snapshot. Auto-prunes to the 10 most recent per system."""
+        require_caller(ctx, caller, tool="save_snapshot")
         system = SNAPSHOT_SYSTEM_MAP.get(caller)
         if system is None:
             logger.warning("snapshot ownership violation: caller=%s", caller)
