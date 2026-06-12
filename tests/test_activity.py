@@ -42,6 +42,39 @@ async def test_log_activity_inserts_row(db: aiosqlite.Connection, fns: dict[str,
     assert json.loads(rows[0]["tags"]) == ["SHIPPED"]
 
 
+async def test_log_activity_persists_and_echoes_source_trust(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    asserted = await fns["log_activity"](
+        caller="cc", project_name="A", summary="s", source_trust="operator", ctx=ctx
+    )
+    defaulted = await fns["log_activity"](caller="cc", project_name="B", summary="s", ctx=ctx)
+
+    assert asserted["source_trust"] == "operator"
+    assert defaulted["source_trust"] == "agent"
+
+    cursor = await db.execute("SELECT project_name, source_trust FROM activity_log ORDER BY id")
+    rows: list[aiosqlite.Row] = await cursor.fetchall()  # type: ignore[assignment]
+    trust = {r["project_name"]: r["source_trust"] for r in rows}
+    assert trust["A"] == "operator"
+    assert trust["B"] == "agent"
+
+
+async def test_insert_activity_row_defaults_source_trust_agent(db: aiosqlite.Connection) -> None:
+    """The shared helper (used by the --log-session-boundary hook) defaults to 'agent'."""
+    await insert_activity_row(
+        db, source="cc", timestamp="2026-06-10", project_name="boundary", summary="session end"
+    )
+    await db.commit()
+    cursor = await db.execute(
+        "SELECT source_trust FROM activity_log WHERE project_name = 'boundary'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["source_trust"] == "agent"
+
+
 async def test_log_activity_defaults_timestamp_to_today(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:

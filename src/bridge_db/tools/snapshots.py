@@ -16,7 +16,7 @@ from bridge_db.db import (
     get_db,
     upsert_fts_entry,
 )
-from bridge_db.models import SNAPSHOT_SYSTEM_MAP, CallerID, snapshot_ownership_error
+from bridge_db.models import SNAPSHOT_SYSTEM_MAP, CallerID, SourceTrust, snapshot_ownership_error
 
 logger = logging.getLogger("bridge_db.tools.snapshots")
 
@@ -52,10 +52,7 @@ async def _prune_snapshots(db: Any, *, system: str) -> None:
             parsed_data = {}
         data: dict[str, Any] = {}
         if isinstance(parsed_data, dict):
-            data = {
-                str(key): value
-                for key, value in cast(dict[object, Any], parsed_data).items()
-            }
+            data = {str(key): value for key, value in cast(dict[object, Any], parsed_data).items()}
         family = _snapshot_family(system, data)
         seen_by_family[family] = seen_by_family.get(family, 0) + 1
         if seen_by_family[family] > config.SNAPSHOT_RETENTION_PER_SYSTEM:
@@ -82,6 +79,13 @@ def register(mcp: FastMCP) -> None:
         snapshot_date: Annotated[
             str | None, Field(description="Date in YYYY-MM-DD format; defaults to today")
         ] = None,
+        source_trust: Annotated[
+            SourceTrust,
+            Field(
+                description="Provenance: 'operator' (operator-asserted), 'agent' "
+                "(Claude-authored, default), or 'ingested' (external)"
+            ),
+        ] = "agent",
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Save a system state snapshot. Auto-prunes to the 10 most recent per system."""
@@ -96,10 +100,10 @@ def register(mcp: FastMCP) -> None:
         snapshot_json = json.dumps(data)
         cursor = await db.execute(
             """
-            INSERT INTO system_snapshots (system, snapshot_date, data)
-            VALUES (?, ?, ?)
+            INSERT INTO system_snapshots (system, snapshot_date, data, source_trust)
+            VALUES (?, ?, ?, ?)
             """,
-            (system, snap_date, snapshot_json),
+            (system, snap_date, snapshot_json, source_trust),
         )
         snapshot_id = cursor.lastrowid
 
@@ -118,6 +122,7 @@ def register(mcp: FastMCP) -> None:
             "snapshot_id": snapshot_id,
             "system": system,
             "snapshot_date": snap_date,
+            "source_trust": source_trust,
         }
 
     @mcp.tool()

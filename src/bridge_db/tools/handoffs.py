@@ -9,7 +9,7 @@ from pydantic import Field
 
 from bridge_db.audit import log_audit
 from bridge_db.db import fts_text_for_handoff, get_db, upsert_fts_entry
-from bridge_db.models import CallerID
+from bridge_db.models import CallerID, SourceTrust
 from bridge_db.project_resolver import resolve as resolve_project
 
 logger = logging.getLogger("bridge_db.tools.handoffs")
@@ -31,6 +31,13 @@ def register(mcp: FastMCP) -> None:
         phase: Annotated[
             str | None, Field(description="Phase or step to start from, e.g. 'Phase 2'")
         ] = None,
+        source_trust: Annotated[
+            SourceTrust,
+            Field(
+                description="Provenance: 'operator' (operator-asserted), 'agent' "
+                "(Claude-authored, default), or 'ingested' (external)"
+            ),
+        ] = "agent",
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Create a project handoff for Claude Code or Codex to pick up. Only claude_ai may dispatch."""
@@ -42,10 +49,18 @@ def register(mcp: FastMCP) -> None:
         cursor = await db.execute(
             """
             INSERT INTO pending_handoffs
-                (project_name, project_path, roadmap_file, phase, dispatched_from, canonical_key)
-            VALUES (?, ?, ?, ?, 'claude_ai', ?)
+                (project_name, project_path, roadmap_file, phase, dispatched_from,
+                 canonical_key, source_trust)
+            VALUES (?, ?, ?, ?, 'claude_ai', ?, ?)
             """,
-            (project_name, project_path, roadmap_file, phase, resolution.canonical_key),
+            (
+                project_name,
+                project_path,
+                roadmap_file,
+                phase,
+                resolution.canonical_key,
+                source_trust,
+            ),
         )
         handoff_id = cursor.lastrowid
 
@@ -59,7 +74,9 @@ def register(mcp: FastMCP) -> None:
 
         await db.commit()
 
-        log_audit("create_handoff", caller, project_name, ok=True)
+        log_audit(
+            "create_handoff", caller, project_name, ok=True, detail=f"source_trust={source_trust}"
+        )
         if resolution.registry_present and not resolution.matched:
             # Drift: a real handoff with no canonical match. Surface it via the
             # audit log rather than silently recording an unresolvable name, so a
@@ -82,6 +99,7 @@ def register(mcp: FastMCP) -> None:
             "handoff_id": handoff_id,
             "project_name": project_name,
             "canonical_key": resolution.canonical_key,
+            "source_trust": source_trust,
             "status": "pending",
         }
 

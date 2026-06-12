@@ -15,7 +15,7 @@ from bridge_db.db import (
     get_db,
     insert_activity_row,
 )
-from bridge_db.models import ACTIVITY_SOURCES, CallerID, invalid_source_error
+from bridge_db.models import ACTIVITY_SOURCES, CallerID, SourceTrust, invalid_source_error
 from bridge_db.project_resolver import resolve as resolve_project
 
 logger = logging.getLogger("bridge_db.tools.activity")
@@ -43,7 +43,9 @@ def _load_meta_shipped_event_policy(project_name: str) -> dict[str, Any] | None:
     reason = policy_fields.get("reason")
     record_outcome_in = policy_fields.get("record_outcome_in")
     return {
-        "reason": reason if isinstance(reason, str) and reason else "meta event has no Notion target",
+        "reason": reason
+        if isinstance(reason, str) and reason
+        else "meta event has no Notion target",
         "record_outcome_in": (
             record_outcome_in
             if isinstance(record_outcome_in, str) and record_outcome_in
@@ -85,6 +87,13 @@ def register(mcp: FastMCP) -> None:
         timestamp: Annotated[
             str | None, Field(description="Date in YYYY-MM-DD format; defaults to today")
         ] = None,
+        source_trust: Annotated[
+            SourceTrust,
+            Field(
+                description="Provenance: 'operator' (operator-asserted), 'agent' "
+                "(Claude-authored, default), or 'ingested' (external)"
+            ),
+        ] = "agent",
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Log a session activity entry. Auto-prunes to the most recent 50 entries per source."""
@@ -101,6 +110,7 @@ def register(mcp: FastMCP) -> None:
             tags=tags,
             retention_limit=config.ACTIVITY_RETENTION_PER_SOURCE,
             canonical_key=resolution.canonical_key,
+            source_trust=source_trust,
         )
         await db.commit()
 
@@ -124,6 +134,7 @@ def register(mcp: FastMCP) -> None:
             "source": caller,
             "project_name": project_name,
             "canonical_key": resolution.canonical_key,
+            "source_trust": source_trust,
             "timestamp": ts,
         }
 

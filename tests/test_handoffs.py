@@ -71,6 +71,45 @@ async def test_create_handoff_inserts_pending(
     assert rows[0]["status"] == "pending"
 
 
+async def test_create_handoff_persists_and_echoes_source_trust(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    asserted = await fns["create_handoff"](
+        caller="claude_ai", project_name="Operatorish", source_trust="operator", ctx=ctx
+    )
+    ingested = await fns["create_handoff"](
+        caller="claude_ai", project_name="Ingestedish", source_trust="ingested", ctx=ctx
+    )
+    defaulted = await fns["create_handoff"](caller="claude_ai", project_name="Defaulted", ctx=ctx)
+
+    assert asserted["source_trust"] == "operator"
+    assert ingested["source_trust"] == "ingested"
+    assert defaulted["source_trust"] == "agent"
+
+    cursor = await db.execute("SELECT project_name, source_trust FROM pending_handoffs ORDER BY id")
+    rows: list[aiosqlite.Row] = await cursor.fetchall()  # type: ignore[assignment]
+    trust = {r["project_name"]: r["source_trust"] for r in rows}
+    assert trust["Operatorish"] == "operator"
+    assert trust["Ingestedish"] == "ingested"
+    assert trust["Defaulted"] == "agent"
+
+
+async def test_create_handoff_audit_carries_source_trust(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await fns["create_handoff"](
+        caller="claude_ai", project_name="P", source_trust="operator", ctx=ctx
+    )
+    events = [
+        json.loads(line) for line in config.AUDIT_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    ]
+    create_events = [e for e in events if e["tool"] == "create_handoff"]
+    assert create_events, "expected a create_handoff audit event"
+    assert create_events[-1]["detail"] == "source_trust=operator"
+
+
 async def test_get_pending_handoffs_returns_pending_only(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:

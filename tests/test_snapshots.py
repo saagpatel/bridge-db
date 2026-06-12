@@ -39,6 +39,25 @@ async def test_save_snapshot_cc(db: aiosqlite.Connection, snap_fns: dict[str, An
     assert result["system"] == "cc"
 
 
+async def test_save_snapshot_persists_and_echoes_source_trust(
+    db: aiosqlite.Connection, snap_fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    asserted = await snap_fns["save_snapshot"](
+        caller="cc", data={"v": "1"}, source_trust="operator", ctx=ctx
+    )
+    defaulted = await snap_fns["save_snapshot"](caller="codex", data={"v": "2"}, ctx=ctx)
+
+    assert asserted["source_trust"] == "operator"
+    assert defaulted["source_trust"] == "agent"
+
+    cursor = await db.execute("SELECT system, source_trust FROM system_snapshots ORDER BY id")
+    rows: list[aiosqlite.Row] = await cursor.fetchall()  # type: ignore[assignment]
+    trust = {r["system"]: r["source_trust"] for r in rows}
+    assert trust["cc"] == "operator"
+    assert trust["codex"] == "agent"
+
+
 async def test_save_snapshot_claude_ai_raises(
     db: aiosqlite.Connection, snap_fns: dict[str, Any]
 ) -> None:
