@@ -588,3 +588,83 @@ async def test_create_handoff_clamps_operator_label(
     row = await cursor.fetchone()
     assert row is not None
     assert row["source_trust"] == "agent"
+
+
+async def test_pick_up_handoff_codex_principal_cannot_spoof_cc_caller_in_warn(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A codex-bound connection cannot dodge the Codex refusal by claiming caller='cc'.
+
+    In warn mode require_caller only audits a caller/principal mismatch, so the
+    provenance gate must key on the bound principal, not the claimed caller.
+    """
+    from conftest import CaptureMCP, make_ctx
+
+    from bridge_db import config as bridge_config
+    from bridge_db.tools import handoffs as handoffs_module
+
+    monkeypatch.setattr(bridge_config, "AUTH_MODE", "warn")
+    cap = CaptureMCP()
+    handoffs_module.register(cap)
+
+    # Seed an agent-trust (non-operator) pending handoff via the claude_ai path.
+    created = await cap.fns["create_handoff"](
+        caller="claude_ai",
+        project_name="P",
+        ctx=make_ctx(db, principal="claude_ai"),
+    )
+    handoff_id = created["handoff_id"]
+    assert created["source_trust"] == "agent"
+
+    # A codex-BOUND connection claims caller='cc' and tries to confirm-pick-up.
+    with pytest.raises(ToolError, match="Codex cannot pick up"):
+        await cap.fns["pick_up_handoff"](
+            caller="cc",
+            handoff_id=handoff_id,
+            confirm=True,
+            ctx=make_ctx(db, principal="codex"),
+        )
+
+    # The handoff stays pending — the spoof did not transition it.
+    cursor = await db.execute(
+        "SELECT status, picked_up_at FROM pending_handoffs WHERE id = ?", (handoff_id,)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["picked_up_at"] is None
+
+
+async def test_pick_up_handoff_off_mode_unbound_gates_on_claimed_caller(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Legacy/off path: with no principal bound, the gate falls back to the claimed caller.
+
+    A cc caller confirming an agent-trust handoff on an unbound connection still
+    succeeds, proving the principal fallback preserves current behavior.
+    """
+    from conftest import CaptureMCP, make_ctx
+
+    from bridge_db import config as bridge_config
+    from bridge_db.tools import handoffs as handoffs_module
+
+    monkeypatch.setattr(bridge_config, "AUTH_MODE", "off")
+    cap = CaptureMCP()
+    handoffs_module.register(cap)
+
+    created = await cap.fns["create_handoff"](
+        caller="claude_ai",
+        project_name="P",
+        ctx=make_ctx(db),  # principal defaults to None (unbound)
+    )
+    handoff_id = created["handoff_id"]
+    assert created["source_trust"] == "agent"
+
+    result = await cap.fns["pick_up_handoff"](
+        caller="cc",
+        handoff_id=handoff_id,
+        confirm=True,
+        ctx=make_ctx(db),  # unbound → gate_identity falls back to caller='cc'
+    )
+    assert result["ok"] is True
+    assert result["status"] == "active"
