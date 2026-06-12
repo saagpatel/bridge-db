@@ -38,6 +38,100 @@ async def test_update_section_wrong_caller_raises(
         await fns["update_section"](caller="cc", section_name="career", content="...", ctx=ctx)
 
 
+async def test_update_section_defaults_source_trust_agent(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    result = await fns["update_section"](
+        caller="claude_ai", section_name="career", content="# Career", ctx=ctx
+    )
+    assert result["source_trust"] == "agent"
+    cursor = await db.execute(
+        "SELECT source_trust FROM context_sections WHERE section_name = 'career'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["source_trust"] == "agent"
+
+
+async def test_update_section_explicit_operator_persists(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    result = await fns["update_section"](
+        caller="claude_ai",
+        section_name="career",
+        content="# Career",
+        source_trust="operator",
+        ctx=ctx,
+    )
+    assert result["source_trust"] == "operator"
+    cursor = await db.execute(
+        "SELECT source_trust FROM context_sections WHERE section_name = 'career'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["source_trust"] == "operator"
+
+
+async def test_update_section_preserves_existing_trust_on_content_update(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    """Decision 1: a content-only re-sync (no source_trust) preserves the existing label."""
+    ctx = make_ctx(db)
+    # Establish an operator-trust section.
+    await fns["update_section"](
+        caller="claude_ai",
+        section_name="career",
+        content="v1",
+        source_trust="operator",
+        ctx=ctx,
+    )
+    # Routine content re-sync with no trust assertion.
+    result = await fns["update_section"](
+        caller="claude_ai", section_name="career", content="v2 refreshed", ctx=ctx
+    )
+    assert result["source_trust"] == "operator"  # preserved, not demoted to 'agent'
+
+    cursor = await db.execute(
+        "SELECT content, source_trust FROM context_sections WHERE section_name = 'career'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["content"] == "v2 refreshed"  # content updated
+    assert row["source_trust"] == "operator"  # provenance preserved
+
+
+async def test_update_section_explicit_trust_overrides_existing(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    """Decision 1 corollary: an explicit value always wins, including a deliberate
+    demotion 'operator' -> 'agent'. Only an OMITTED param preserves."""
+    ctx = make_ctx(db)
+    await fns["update_section"](
+        caller="claude_ai",
+        section_name="career",
+        content="v1",
+        source_trust="operator",
+        ctx=ctx,
+    )
+    # Explicit 'agent' on an existing 'operator' row deliberately relabels it.
+    result = await fns["update_section"](
+        caller="claude_ai",
+        section_name="career",
+        content="v2",
+        source_trust="agent",
+        ctx=ctx,
+    )
+    assert result["source_trust"] == "agent"
+    cursor = await db.execute(
+        "SELECT source_trust FROM context_sections WHERE section_name = 'career'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["source_trust"] == "agent"
+
+
 async def test_update_section_unknown_section_raises(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:

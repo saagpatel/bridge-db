@@ -434,14 +434,25 @@ async def insert_activity_row(
     tags: list[str] | None = None,
     retention_limit: int | None = None,
     canonical_key: str | None = None,
+    source_trust: str = "agent",
 ) -> int:
     """Insert an activity row and keep the FTS activity mirror in sync."""
     cursor = await db.execute(
         """
-        INSERT INTO activity_log (source, timestamp, project_name, summary, branch, tags, canonical_key)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO activity_log
+            (source, timestamp, project_name, summary, branch, tags, canonical_key, source_trust)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (source, timestamp, project_name, summary, branch, json.dumps(tags or []), canonical_key),
+        (
+            source,
+            timestamp,
+            project_name,
+            summary,
+            branch,
+            json.dumps(tags or []),
+            canonical_key,
+            source_trust,
+        ),
     )
     activity_id = cursor.lastrowid
     if activity_id is None:
