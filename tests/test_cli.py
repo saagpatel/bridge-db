@@ -476,3 +476,44 @@ async def test_promote_section_sets_operator_label(
     row = await cursor.fetchone()
     assert row is not None
     assert row["source_trust"] == "operator"
+
+
+def test_enroll_rotation_replaces_old_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(config, "PRINCIPALS_PATH", tmp_path / "principals.json")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    run_enroll("cc")
+    first = json.loads((tmp_path / "principals.json").read_text(encoding="utf-8"))
+    run_enroll("cc")
+    second = json.loads((tmp_path / "principals.json").read_text(encoding="utf-8"))
+
+    assert first["principals"]["cc"]["token_sha256"] != second["principals"]["cc"]["token_sha256"]
+    assert len(second["principals"]) == 1
+    out = capsys.readouterr().out
+    assert "rotated" in out
+
+
+def test_revoke_unknown_caller_returns_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(config, "PRINCIPALS_PATH", tmp_path / "principals.json")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    assert run_revoke_principal("codex") is False
+    assert "no enrollment found" in capsys.readouterr().out
+
+
+def test_enroll_recovers_from_malformed_principals_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    principals_path = tmp_path / "principals.json"
+    principals_path.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(config, "PRINCIPALS_PATH", principals_path)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    assert run_enroll("cc") is True
+    out = capsys.readouterr().out
+    assert "malformed principals file" in out
+    data = json.loads(principals_path.read_text(encoding="utf-8"))
+    assert "cc" in data["principals"]

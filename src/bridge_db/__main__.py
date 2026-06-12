@@ -6,6 +6,7 @@ import json
 import os
 import secrets
 import sys
+import tempfile
 from datetime import UTC, datetime
 from typing import Any
 
@@ -333,8 +334,17 @@ def _write_principals_file(data: dict[str, Any]) -> None:
     from bridge_db import config
 
     config.PRINCIPALS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    config.PRINCIPALS_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    os.chmod(config.PRINCIPALS_PATH, 0o600)
+    # 0600 from creation + atomic replace: no window where the file is
+    # world-readable or partially written.
+    fd, tmp = tempfile.mkstemp(dir=config.PRINCIPALS_PATH.parent)
+    try:
+        os.chmod(tmp, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, config.PRINCIPALS_PATH)
+    except Exception:
+        os.unlink(tmp)
+        raise
 
 
 def run_enroll(caller: str) -> bool:
