@@ -6,14 +6,20 @@ import subprocess
 import sys
 from pathlib import Path
 
+import aiosqlite
 import pytest
 
 import bridge_db.config as cfg
 import bridge_db.tools.recall as recall_tool
+from bridge_db import auth, config
 from bridge_db.__main__ import (
     run_dogfood,
+    run_enroll,
+    run_list_principals,
     run_log_session_boundary,
+    run_promote_section,
     run_rebuild_content_index,
+    run_revoke_principal,
     run_status,
 )
 from bridge_db.db import (
@@ -389,3 +395,84 @@ asyncio.run(main())
     if flag == "--status":
         assert "contexts=0" in result.stdout
         assert "Attention:" not in result.stdout
+
+
+def test_enroll_writes_hashed_token_with_0600(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(config, "PRINCIPALS_PATH", tmp_path / "principals.json")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    assert run_enroll("cc") is True
+    out = capsys.readouterr().out
+    token_line = [line for line in out.splitlines() if line.startswith("  token: ")]
+    assert len(token_line) == 1
+    token = token_line[0].removeprefix("  token: ").strip()
+
+    data = json.loads((tmp_path / "principals.json").read_text(encoding="utf-8"))
+    assert data["principals"]["cc"]["token_sha256"] == auth.hash_token(token)
+    assert (tmp_path / "principals.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_enroll_refuses_without_tty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "PRINCIPALS_PATH", tmp_path / "principals.json")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    assert run_enroll("cc") is False
+    assert not (tmp_path / "principals.json").exists()
+
+
+def test_enroll_rejects_unknown_caller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "PRINCIPALS_PATH", tmp_path / "principals.json")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    assert run_enroll("mallory") is False
+
+
+def test_revoke_removes_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "PRINCIPALS_PATH", tmp_path / "principals.json")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    run_enroll("cc")
+    assert run_revoke_principal("cc") is True
+    data = json.loads((tmp_path / "principals.json").read_text(encoding="utf-8"))
+    assert "cc" not in data["principals"]
+
+
+def test_list_principals_shows_enrolled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(config, "PRINCIPALS_PATH", tmp_path / "principals.json")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    run_enroll("cc")
+    capsys.readouterr()  # discard enroll output
+    assert run_list_principals() is True
+    out = capsys.readouterr().out
+    assert "cc" in out
+
+
+@pytest.mark.asyncio
+async def test_promote_section_sets_operator_label(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bridge_db.tools.context import (
+        _upsert_section,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    await _upsert_section(
+        db=db,
+        section_name="career",
+        owner="claude_ai",
+        content="reviewed content",
+        source_trust="ingested",
+    )
+    await db.commit()
+    # run_promote_section opens its own connection to the same file the `db`
+    # fixture created (tmp_path / "test.db"); WAL mode permits both.
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    assert await run_promote_section("career") is True
+    cursor = await db.execute(
+        "SELECT source_trust FROM context_sections WHERE section_name = 'career'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["source_trust"] == "operator"
