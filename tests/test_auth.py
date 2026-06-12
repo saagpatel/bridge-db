@@ -223,6 +223,21 @@ async def test_app_lifespan_unknown_token_binds_none_and_audits(
 
     async with app_lifespan(server_mcp) as app_ctx:
         assert app_ctx.principal is None
-    events = audit_events()
-    assert events[0]["tool"] == "auth.bind"
-    assert events[0]["ok"] is False
+    bind_events = [e for e in audit_events() if e["tool"] == "auth.bind"]
+    assert len(bind_events) == 1
+    assert bind_events[0]["ok"] is False
+
+
+async def test_app_lifespan_no_token_binds_none_silently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bridge_db.server import app_lifespan
+    from bridge_db.server import mcp as server_mcp
+
+    monkeypatch.setattr(config, "PRINCIPALS_PATH", tmp_path / "principals.json")
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "bind-test3.db")
+    monkeypatch.delenv("BRIDGE_DB_PRINCIPAL_TOKEN", raising=False)
+
+    async with app_lifespan(server_mcp) as app_ctx:
+        assert app_ctx.principal is None
+    assert audit_events() == []
