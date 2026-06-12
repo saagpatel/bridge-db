@@ -14,7 +14,7 @@ from bridge_db.db import (
     get_db,
     upsert_fts_entry,
 )
-from bridge_db.models import SECTION_OWNERS, CallerID, ownership_error
+from bridge_db.models import SECTION_OWNERS, CallerID, SourceTrust, ownership_error
 
 logger = logging.getLogger("bridge_db.tools.context")
 
@@ -45,16 +45,26 @@ def parse_owned_sections(markdown: str) -> dict[str, str]:
     return {section_name: "\n".join(lines).strip("\n") for section_name, lines in parsed.items()}
 
 
-async def _upsert_section(db: Any, section_name: str, owner: str, content: str) -> None:
+async def _upsert_section(
+    db: Any,
+    section_name: str,
+    owner: str,
+    content: str,
+    source_trust: SourceTrust | None = None,
+) -> None:
+    # source_trust is COALESCEd: a fresh row with no assertion takes 'agent'; a
+    # content-only update (source_trust=None) preserves the row's existing label
+    # rather than relabelling operator-authored sections on a routine re-sync.
     await db.execute(
         """
-        INSERT INTO context_sections (section_name, owner, content, updated_at)
-        VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        INSERT INTO context_sections (section_name, owner, content, source_trust, updated_at)
+        VALUES (?, ?, ?, COALESCE(?, 'agent'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         ON CONFLICT(section_name) DO UPDATE SET
             content = excluded.content,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            source_trust = COALESCE(?, context_sections.source_trust)
         """,
-        (section_name, owner, content),
+        (section_name, owner, content, source_trust, source_trust),
     )
     await upsert_fts_entry(db, "section", section_name, fts_text_for_section(section_name, content))
 
@@ -98,6 +108,14 @@ def register(mcp: FastMCP) -> None:
             Field(description="Section key, e.g. 'career', 'speaking', 'research', 'capabilities'"),
         ],
         content: Annotated[str, Field(description="Full markdown content for this section")],
+        source_trust: Annotated[
+            SourceTrust | None,
+            Field(
+                description="Provenance to set: 'operator', 'agent', or 'ingested' — an "
+                "explicit value always wins (it can relabel an existing section). Omit to "
+                "preserve the section's current label ('agent' on first write)."
+            ),
+        ] = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Upsert a context section. Caller must be the section owner (see SECTION_OWNERS)."""
@@ -113,10 +131,28 @@ def register(mcp: FastMCP) -> None:
             raise ToolError(ownership_error(caller, section_name, owner))
 
         db = get_db(ctx)
-        await _upsert_section(db=db, section_name=section_name, owner=owner, content=content)
+        await _upsert_section(
+            db=db,
+            section_name=section_name,
+            owner=owner,
+            content=content,
+            source_trust=source_trust,
+        )
         await db.commit()
+        # Echo the label actually stored (not the param): on a preserve-update the
+        # stored value is the pre-existing label, not the None that was passed in.
+        cursor = await db.execute(
+            "SELECT source_trust FROM context_sections WHERE section_name = ?", (section_name,)
+        )
+        row = await cursor.fetchone()
+        stored_trust = row["source_trust"] if row is not None else source_trust
         logger.info("section updated: %s by %s", section_name, caller)
-        return {"ok": True, "section_name": section_name, "owner": owner}
+        return {
+            "ok": True,
+            "section_name": section_name,
+            "owner": owner,
+            "source_trust": stored_trust,
+        }
 
     @mcp.tool()
     async def get_section(
