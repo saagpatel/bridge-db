@@ -112,42 +112,50 @@ def collect_recall_stats(days: int = 7) -> dict[str, Any]:
     }
 
 
-async def _preview_for(db: Any, source_type: str, source_id: str) -> str:
-    """Return a short preview string for a result, joined from the source row.
+async def _preview_and_trust(db: Any, source_type: str, source_id: str) -> tuple[str, str | None]:
+    """Return (preview, source_trust) for a result, joined from the source row.
 
-    Returns empty string if the source row is missing (orphan FTS entry) —
-    this is defensive; gc_fts_orphans should prevent that case.
+    Returns ("", None) if the source row is missing (orphan FTS entry) — this is
+    defensive; gc_fts_orphans should prevent that case. source_trust is read from
+    the source row, not content_index (which stays UNINDEXED metadata only).
     """
     if source_type == "section":
         cursor = await db.execute(
-            "SELECT content FROM context_sections WHERE section_name = ?", (source_id,)
+            "SELECT content, source_trust FROM context_sections WHERE section_name = ?",
+            (source_id,),
         )
         row = await cursor.fetchone()
-        return (row["content"] or "")[:200] if row else ""
+        if row is None:
+            return "", None
+        return (row["content"] or "")[:200], row["source_trust"]
     if source_type == "activity":
         cursor = await db.execute(
-            "SELECT summary, project_name FROM activity_log WHERE id = ?", (int(source_id),)
+            "SELECT summary, project_name, source_trust FROM activity_log WHERE id = ?",
+            (int(source_id),),
         )
         row = await cursor.fetchone()
         if row is None:
-            return ""
-        return f"{row['project_name']}: {row['summary']}"[:200]
+            return "", None
+        return f"{row['project_name']}: {row['summary']}"[:200], row["source_trust"]
     if source_type == "snapshot":
         cursor = await db.execute(
-            "SELECT data FROM system_snapshots WHERE id = ?", (int(source_id),)
-        )
-        row = await cursor.fetchone()
-        return (row["data"] or "")[:200] if row else ""
-    if source_type == "handoff":
-        cursor = await db.execute(
-            "SELECT project_name, phase FROM pending_handoffs WHERE id = ?", (int(source_id),)
+            "SELECT data, source_trust FROM system_snapshots WHERE id = ?", (int(source_id),)
         )
         row = await cursor.fetchone()
         if row is None:
-            return ""
+            return "", None
+        return (row["data"] or "")[:200], row["source_trust"]
+    if source_type == "handoff":
+        cursor = await db.execute(
+            "SELECT project_name, phase, source_trust FROM pending_handoffs WHERE id = ?",
+            (int(source_id),),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return "", None
         phase = f" ({row['phase']})" if row["phase"] else ""
-        return f"{row['project_name']}{phase}"[:200]
-    return ""
+        return f"{row['project_name']}{phase}"[:200], row["source_trust"]
+    return "", None
 
 
 def register(mcp: FastMCP) -> None:
@@ -205,7 +213,7 @@ def register(mcp: FastMCP) -> None:
 
         results: list[dict[str, Any]] = []
         for r in rows:
-            preview = await _preview_for(db, r["source_type"], r["source_id"])
+            preview, source_trust = await _preview_and_trust(db, r["source_type"], r["source_id"])
             results.append(
                 {
                     "source_type": r["source_type"],
@@ -213,6 +221,7 @@ def register(mcp: FastMCP) -> None:
                     "snippet": r["snippet"],
                     "bm25_score": r["bm25_score"],
                     "preview": preview,
+                    "source_trust": source_trust,
                 }
             )
 

@@ -66,6 +66,72 @@ async def test_health_row_counts_reflect_data(
     assert result["fts_index"]["orphaned"] == 0
 
 
+async def test_health_source_trust_breakdown(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
+) -> None:
+    (tmp_path / "test.db").touch()
+    await db.execute(
+        "INSERT INTO pending_handoffs (project_name, source_trust) VALUES ('A', 'operator')"
+    )
+    await db.execute(
+        "INSERT INTO pending_handoffs (project_name, source_trust) VALUES ('B', 'agent')"
+    )
+    await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary, source_trust) "
+        "VALUES ('cc', '2026-06-10', 'P', 'S', 'ingested')"
+    )
+    await db.execute(
+        "INSERT INTO context_sections (section_name, owner, content, source_trust) "
+        "VALUES ('career', 'claude_ai', 'x', 'operator')"
+    )
+    await db.execute(
+        "INSERT INTO system_snapshots (system, snapshot_date, data, source_trust) "
+        "VALUES ('cc', '2026-06-10', '{}', 'agent')"
+    )
+    await db.commit()
+    ctx = make_ctx(db)
+    result = await fns["health"](ctx=ctx)
+
+    breakdown = result["source_trust_breakdown"]
+    assert set(breakdown) == {
+        "context_sections",
+        "activity_log",
+        "system_snapshots",
+        "pending_handoffs",
+    }
+    # every table carries all three levels, default-zero-filled
+    for table_counts in breakdown.values():
+        assert set(table_counts) == {"operator", "agent", "ingested"}
+    # each table's seeded level is counted in the right bucket
+    assert breakdown["pending_handoffs"] == {"operator": 1, "agent": 1, "ingested": 0}
+    assert breakdown["activity_log"]["ingested"] == 1
+    assert breakdown["context_sections"]["operator"] == 1
+    assert breakdown["system_snapshots"]["agent"] == 1
+
+
+async def test_status_pending_handoffs_by_trust(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
+) -> None:
+    (tmp_path / "test.db").touch()
+    await db.execute(
+        "INSERT INTO pending_handoffs (project_name, source_trust) VALUES ('A', 'operator')"
+    )
+    await db.execute(
+        "INSERT INTO pending_handoffs (project_name, source_trust, status) "
+        "VALUES ('B', 'agent', 'pending')"
+    )
+    # A cleared agent handoff must NOT count — the signal is pending-scoped.
+    await db.execute(
+        "INSERT INTO pending_handoffs (project_name, source_trust, status) "
+        "VALUES ('C', 'agent', 'cleared')"
+    )
+    await db.commit()
+    ctx = make_ctx(db)
+    result = await fns["status"](ctx=ctx)
+
+    assert result["pending_handoffs_by_trust"] == {"operator": 1, "agent": 1, "ingested": 0}
+
+
 async def test_health_unprocessed_shipped_count(
     db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
 ) -> None:

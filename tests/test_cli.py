@@ -88,6 +88,7 @@ async def test_run_status_reports_healthy_summary(
     assert "pending_handoffs=0" in captured
     assert "unprocessed_shipped=1" in captured
     assert "Attention: unprocessed_shipped=1" in captured
+    assert "Pending handoff trust: operator=0, agent=0, ingested=0" in captured
     assert "dogfood will fail until cleared" in captured
     assert "cc=2026-04-17" in captured
     assert '"cc": "2026-04-17 (bridge-db)"' in captured
@@ -142,9 +143,7 @@ async def test_run_dogfood_reports_read_only_observability(
                         "caller": None,
                         "project": None,
                         "ok": True,
-                        "detail": (
-                            "activity_ids=[1] updated_ids=[1] missing_ids=[] updated=1/1"
-                        ),
+                        "detail": ("activity_ids=[1] updated_ids=[1] missing_ids=[] updated=1/1"),
                     }
                 ),
             ]
