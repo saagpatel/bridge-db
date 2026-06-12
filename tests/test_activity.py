@@ -674,3 +674,28 @@ async def test_mark_shipped_processed_triggers_auto_export(
     )
     content = bridge_path.read_text()
     assert "TestProject" in content
+
+
+async def test_log_activity_clamps_operator_label_in_db(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bridge_db import config as bridge_config
+    from bridge_db.tools import activity as activity_module
+
+    monkeypatch.setattr(bridge_config, "AUTH_MODE", "warn")
+    cap = CaptureMCP()
+    activity_module.register(cap)
+    result = await cap.fns["log_activity"](
+        caller="cc",
+        project_name="TestProject",
+        summary="tried to mint operator",
+        source_trust="operator",
+        ctx=make_ctx(db, principal="cc"),
+    )
+    assert result["source_trust_clamped"] is True
+    cursor = await db.execute(
+        "SELECT source_trust FROM activity_log WHERE project_name = ?", ("TestProject",)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["source_trust"] == "agent"

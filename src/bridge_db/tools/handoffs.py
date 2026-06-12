@@ -43,12 +43,11 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """Create a project handoff for Claude Code or Codex to pick up. Only claude_ai may dispatch."""
         require_caller(ctx, caller, tool="create_handoff")
-        clamped_trust, source_trust_clamped = clamp_source_trust(
-            source_trust, caller=caller, tool="create_handoff"
-        )
-        source_trust = clamped_trust if clamped_trust is not None else source_trust
         if caller != "claude_ai":
             raise ToolError(f"Only 'claude_ai' may create handoffs; caller was '{caller}'")
+        source_trust, source_trust_clamped = clamp_source_trust(
+            source_trust, caller=caller, tool="create_handoff"
+        )
 
         db = get_db(ctx)
         resolution = resolve_project(project_name)

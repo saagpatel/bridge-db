@@ -13,7 +13,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, overload
 
 from mcp.server.fastmcp.exceptions import ToolError
 
@@ -107,6 +107,16 @@ def require_caller(ctx: Any, caller: str, tool: str) -> None:
             "token in this client's MCP spawn env."
         )
     raise ToolError(f"Caller mismatch: connection bound to '{principal}', cannot act as '{caller}'")
+
+
+@overload
+def clamp_source_trust(
+    requested: SourceTrust, caller: str, tool: str
+) -> tuple[SourceTrust, bool]: ...
+
+
+@overload
+def clamp_source_trust(requested: None, caller: str, tool: str) -> tuple[None, bool]: ...
 
 
 def clamp_source_trust(

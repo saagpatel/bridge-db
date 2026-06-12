@@ -91,10 +91,9 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """Save a system state snapshot. Auto-prunes to the 10 most recent per system."""
         require_caller(ctx, caller, tool="save_snapshot")
-        clamped_trust, source_trust_clamped = clamp_source_trust(
+        source_trust, source_trust_clamped = clamp_source_trust(
             source_trust, caller=caller, tool="save_snapshot"
         )
-        source_trust = clamped_trust if clamped_trust is not None else source_trust
         system = SNAPSHOT_SYSTEM_MAP.get(caller)
         if system is None:
             logger.warning("snapshot ownership violation: caller=%s", caller)

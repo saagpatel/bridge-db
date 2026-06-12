@@ -219,3 +219,27 @@ async def test_get_cost_history_invalid_system_raises(
     ctx = make_ctx(db)
     with pytest.raises(ToolError, match="Invalid system"):
         await cost_fns["get_cost_history"](system="claude_ai", ctx=ctx)
+
+
+async def test_save_snapshot_clamps_operator_label_in_db(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bridge_db import config as bridge_config
+    from bridge_db.tools import snapshots as snapshots_module
+
+    monkeypatch.setattr(bridge_config, "AUTH_MODE", "warn")
+    cap = CaptureMCP()
+    snapshots_module.register(cap)
+    result = await cap.fns["save_snapshot"](
+        caller="cc",
+        data={"active_projects": ["x"]},
+        source_trust="operator",
+        ctx=make_ctx(db, principal="cc"),
+    )
+    assert result["source_trust_clamped"] is True
+    cursor = await db.execute(
+        "SELECT source_trust FROM system_snapshots WHERE system = 'cc' ORDER BY id DESC LIMIT 1"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["source_trust"] == "agent"

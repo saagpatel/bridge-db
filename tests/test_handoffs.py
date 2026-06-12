@@ -582,3 +582,9 @@ async def test_create_handoff_clamps_operator_label(
     )
     assert result["source_trust"] == "agent"
     assert result["source_trust_clamped"] is True
+    cursor = await db.execute(
+        "SELECT source_trust FROM pending_handoffs WHERE id = ?", (result["handoff_id"],)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["source_trust"] == "agent"

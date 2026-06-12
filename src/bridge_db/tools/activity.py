@@ -99,10 +99,9 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """Log a session activity entry. Auto-prunes to the most recent 50 entries per source."""
         require_caller(ctx, caller, tool="log_activity")
-        clamped_trust, source_trust_clamped = clamp_source_trust(
+        source_trust, source_trust_clamped = clamp_source_trust(
             source_trust, caller=caller, tool="log_activity"
         )
-        source_trust = clamped_trust if clamped_trust is not None else source_trust
         db = get_db(ctx)
         ts = timestamp or str(date.today())
         resolution = resolve_project(project_name)

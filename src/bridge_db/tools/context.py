@@ -121,6 +121,8 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """Upsert a context section. Caller must be the section owner (see SECTION_OWNERS)."""
         require_caller(ctx, caller, tool="update_section")
+        # source_trust may be None here; None passes through the clamp and
+        # preserves the stored label via COALESCE in _upsert_section.
         source_trust, source_trust_clamped = clamp_source_trust(
             source_trust, caller=caller, tool="update_section"
         )
