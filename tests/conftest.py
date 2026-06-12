@@ -32,11 +32,19 @@ async def db(tmp_path: Path) -> AsyncGenerator[aiosqlite.Connection, None]:
     await conn.close()
 
 
-def make_ctx(conn: aiosqlite.Connection) -> Any:
-    """Build a minimal mock Context satisfying ctx.request_context.lifespan_context.db."""
+def make_ctx(conn: aiosqlite.Connection, principal: str | None = None) -> Any:
+    """Build a minimal mock Context satisfying ctx.request_context.lifespan_context.
+
+    `principal` mirrors AppContext.principal — the channel-bound identity used
+    by auth.require_caller. Defaults to None (unbound), matching legacy tests.
+    """
+    # Alias before the class body: `principal = principal` inside a class body
+    # raises NameError (class bodies cannot close over a name they also bind).
+    bound_principal = principal
 
     class _AppContext:
         db = conn
+        principal = bound_principal
 
     class _RequestContext:
         lifespan_context = _AppContext()

@@ -191,3 +191,38 @@ def test_clamp_inactive_in_off_mode(monkeypatch: pytest.MonkeyPatch) -> None:
         "operator",
         False,
     )
+
+
+async def test_app_lifespan_binds_principal_from_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bridge_db.server import app_lifespan
+    from bridge_db.server import mcp as server_mcp
+
+    principals_path = tmp_path / "principals.json"
+    write_principals(principals_path, {"cc": "token-cc"})
+    monkeypatch.setattr(config, "PRINCIPALS_PATH", principals_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "bind-test.db")
+    monkeypatch.setenv("BRIDGE_DB_PRINCIPAL_TOKEN", "token-cc")
+
+    async with app_lifespan(server_mcp) as app_ctx:
+        assert app_ctx.principal == "cc"
+
+
+async def test_app_lifespan_unknown_token_binds_none_and_audits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bridge_db.server import app_lifespan
+    from bridge_db.server import mcp as server_mcp
+
+    principals_path = tmp_path / "principals.json"
+    write_principals(principals_path, {"cc": "token-cc"})
+    monkeypatch.setattr(config, "PRINCIPALS_PATH", principals_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "bind-test2.db")
+    monkeypatch.setenv("BRIDGE_DB_PRINCIPAL_TOKEN", "stolen-or-stale")
+
+    async with app_lifespan(server_mcp) as app_ctx:
+        assert app_ctx.principal is None
+    events = audit_events()
+    assert events[0]["tool"] == "auth.bind"
+    assert events[0]["ok"] is False
