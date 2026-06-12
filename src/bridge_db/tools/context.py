@@ -100,7 +100,10 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
                 (section_name,),
             )
             row = await cursor.fetchone()
-            if row is not None and row["content"] == content:
+            # Normalize the same way parse_owned_sections does (strip outer
+            # newlines) so whitespace variance between the update_section write
+            # path and the file parse path can't spuriously demote a section.
+            if row is not None and str(row["content"]).strip("\n") == content.strip("\n"):
                 unchanged.append(section_name)
                 continue
             await _upsert_section(

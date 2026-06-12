@@ -467,3 +467,32 @@ async def test_sync_off_mode_keeps_legacy_label_preservation(
     row = await cursor.fetchone()
     assert row is not None
     assert row["source_trust"] == "operator"  # documented legacy laundering, off-mode only
+
+
+async def test_sync_unchanged_despite_trailing_newline_variance(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bridge_db import config as bridge_config
+    from bridge_db.tools.context import (
+        _upsert_section,  # pyright: ignore[reportPrivateUsage]
+        parse_owned_sections,
+        sync_owned_sections_from_file,
+    )
+
+    monkeypatch.setattr(bridge_config, "AUTH_MODE", "warn")
+    path = _write_bridge_file(tmp_path, "stable content")
+    parsed = parse_owned_sections(path.read_text(encoding="utf-8"))
+    # Store with trailing newline — as a direct update_section write might.
+    await _upsert_section(
+        db=db,
+        section_name="career",
+        owner="claude_ai",
+        content=parsed["career"] + "\n",
+        source_trust="operator",
+    )
+    await db.commit()
+
+    result = await sync_owned_sections_from_file(db=db, bridge_path=path)
+
+    assert "career" in result["unchanged"]
+    assert result["demoted"] == []
