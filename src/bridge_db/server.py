@@ -33,10 +33,15 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # 
     from bridge_db.audit import log_audit
     from bridge_db.auth import auth_mode, load_principals, resolve_principal
 
-    token = os.environ.get("BRIDGE_DB_PRINCIPAL_TOKEN")
+    raw_token = os.environ.get("BRIDGE_DB_PRINCIPAL_TOKEN")
+    token = raw_token.strip() if raw_token is not None else None
     principal = resolve_principal(token, load_principals(config.PRINCIPALS_PATH))
-    if token and principal is None:
-        log_audit("auth.bind", None, None, ok=False, detail="token present but not enrolled")
+    if raw_token is not None and principal is None:
+        # Env var was set but did not resolve to a principal: either blank
+        # (shell-quoting bug) or a stale/wrong token. Audit so the misconfig
+        # is visible rather than silently starting unbound.
+        reason = "token blank" if not token else "token present but not enrolled"
+        log_audit("auth.bind", None, None, ok=False, detail=reason)
     logger.info(
         "bridge-db starting, db=%s principal=%s auth_mode=%s",
         config.DB_PATH,

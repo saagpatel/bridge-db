@@ -19,9 +19,17 @@ from bridge_db.tools import recall as recall_tool
 
 @pytest.fixture(autouse=True)
 def isolate_jsonl_logs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep tests from appending audit or recall events to live operator logs."""
+    """Keep tests from appending audit or recall events to live operator logs.
+
+    Also pins AUTH_MODE to "off" so the suite is env-independent: tests that
+    call make_ctx(db) with principal=None pass regardless of the shell env.
+    Individual tests that need warn/enforce override this with their own
+    monkeypatch.setattr(config, "AUTH_MODE", ...) — monkeypatch is per-test
+    so those overrides do not bleed into other tests.
+    """
     monkeypatch.setattr(config, "AUDIT_LOG_PATH", tmp_path / "audit.jsonl")
     monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", tmp_path / "recall_query_log.jsonl")
+    monkeypatch.setattr(config, "AUTH_MODE", "off")
 
 
 @pytest.fixture
