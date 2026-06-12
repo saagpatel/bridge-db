@@ -16,11 +16,15 @@ uv run python -m bridge_db --rebuild-content-index  # repair FTS recall index dr
 uv run python -m bridge_db --log-session-boundary bridge-db  # FTS-safe CC hook logging
 uv run python -m bridge_db          # start MCP server (stdio)
 uv run python -m bridge_db.migration  # migrate from bridge markdown
+uv run python -m bridge_db --enroll cc            # enroll/rotate a principal (TTY only)
+uv run python -m bridge_db --list-principals      # show enrolled principals
+uv run python -m bridge_db --revoke-principal cc  # revoke a principal (TTY only)
+uv run python -m bridge_db --promote-section career  # operator label promotion (TTY only)
 ```
 
 ## Architecture
 
-- **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=5000`). Schema at v5 — adds nullable `activity_log.canonical_key` (resolved canonical project key, see Canonical resolution below), atop v4's `content_index` FTS5 vtable mirroring all source rows for lexical search and `shipped_sync_receipts` for downstream proof before shipped events are marked processed.
+- **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=5000`). Schema at v7 — v6 added `canonical_key` to `pending_handoffs` (handoff canonical resolution); v7 added `source_trust` provenance columns to all four instruction-bearing tables (`context_sections`, `pending_handoffs`, `activity_log`, `system_snapshots`), with a conservative backfill (`context_sections`/`pending_handoffs` pre-existing rows → `'operator'`, activity/snapshot history keeps `'agent'` default). Auth state lives in `principals.json` (not the DB); no schema change for Stage-1 auth.
 - **MCP transport**: stdio (stdout = JSON-RPC, all logging → stderr)
 - **23 MCP tools** across 9 modules: activity, handoffs, context, snapshots, cost, export, health, recall (FTS5 lexical search; Phase −1 of the semantic memory layer), audit (read-side observability over the JSONL audit + recall query logs). `health` / `status` include signals for pending handoffs, unprocessed shipped events, receiptless processed shipped events, FTS index drift, WAL size, and bridge-file freshness.
 - **Context access**: `get_db(ctx)` helper casts lifespan context to `aiosqlite.Connection`
@@ -36,6 +40,13 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 - Export trigger: consumers call `export_bridge_markdown` explicitly after writes
 - Startup sync trigger: Claude Code `/start` calls `sync_from_file` before bridge reads so Claude.ai-owned file edits are imported into SQLite first
 - Logging: `logging.basicConfig(stream=sys.stderr)` — never stdout
+- **Channel auth (Stage 1)**: each client's MCP spawn env carries `BRIDGE_DB_PRINCIPAL_TOKEN`;
+  the server binds the connection to one principal at startup (`principals.json`, managed via
+  `--enroll`). `BRIDGE_DB_AUTH_MODE` = `off` (legacy) | `warn` (allow + audit mismatches) |
+  `enforce` (reject); unrecognized values fail closed to `enforce`. With auth active:
+  no MCP write may mint `source_trust='operator'` (clamped to `agent`, audited), and
+  `sync_from_file` imports changed file content as `ingested` (promote via
+  `--promote-section`, TTY-only).
 
 ## Gotchas
 
@@ -49,7 +60,10 @@ uv run python -m bridge_db.migration  # migrate from bridge markdown
 ## Registration
 
 ```bash
-claude mcp add --scope user bridge-db -- uv run --directory ~/Projects/bridge-db python -m bridge_db
+claude mcp add --scope user bridge-db \
+  --env BRIDGE_DB_PRINCIPAL_TOKEN=<cc-token> \
+  --env BRIDGE_DB_AUTH_MODE=warn \
+  -- uv run --directory ~/Projects/bridge-db python -m bridge_db
 ```
 
 ## Test fixtures

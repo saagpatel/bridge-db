@@ -70,11 +70,20 @@ Register bridge-db in Claude Desktop's MCP config:
         "python",
         "-m",
         "bridge_db"
-      ]
+      ],
+      "env": {
+        "BRIDGE_DB_PRINCIPAL_TOKEN": "<claude_ai-token>",
+        "BRIDGE_DB_AUTH_MODE": "warn"
+      }
     }
   }
 }
 ```
+
+Once `BRIDGE_DB_AUTH_MODE` leaves `off`, the `env` block above is required: the
+`claude_ai` enrollment token (from `--enroll claude_ai`) goes in
+`BRIDGE_DB_PRINCIPAL_TOKEN`, and `BRIDGE_DB_AUTH_MODE` sets the rollout dial. In
+`off` mode the env block may be omitted and legacy behavior is fully preserved.
 
 This gives Claude.ai access to all 23 MCP tools under `mcp__bridge_db__*`, including
 the read-only `health` and `status` diagnostics, the file-import helper `sync_from_file`,
@@ -156,6 +165,14 @@ mcp__bridge_db__sync_from_file()
 This reads `BRIDGE_FILE_PATH`, extracts only the four Claude.ai-owned headings, and
 upserts them into `context_sections` with `owner="claude_ai"`. It does not touch
 handoffs, snapshots, activity, or any CC/Codex-owned section content.
+
+**With auth active (`BRIDGE_DB_AUTH_MODE` != `off`):** the file is an unauthenticated
+channel by design. Changed or new sections are imported as `source_trust='ingested'`
+and reported in the `demoted` list of the return value. Sections whose content is
+identical to what is already in the DB are skipped and their existing label is
+preserved. The operator reviews demoted sections and promotes reviewed ones via
+`uv run python -m bridge_db --promote-section <section>` (TTY-gated). Claude Code's
+`/start` skill surfaces `demoted` sections when they are present.
 
 ---
 
