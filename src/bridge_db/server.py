@@ -42,6 +42,8 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # 
         # is visible rather than silently starting unbound.
         reason = "token blank" if not token else "token present but not enrolled"
         log_audit("auth.bind", None, None, ok=False, detail=reason)
+    elif principal is not None:
+        log_audit("auth.bind", None, None, ok=True, detail=f"principal={principal}")
     logger.info(
         "bridge-db starting, db=%s principal=%s auth_mode=%s",
         config.DB_PATH,
