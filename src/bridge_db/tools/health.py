@@ -21,6 +21,7 @@ _ROW_COUNT_TABLES = (
     "system_snapshots",
     "cost_records",
     "shipped_sync_receipts",
+    "shipped_event_dispositions",
 )
 _ACTIVITY_SOURCES = ("cc", "codex", "claude_ai", "notion_os", "personal_ops")
 _SNAPSHOT_SYSTEMS = ("cc", "codex")
@@ -118,6 +119,18 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     cursor = await db.execute(
         "SELECT COUNT(*) FROM activity_log AS activity "
         "WHERE EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE value = 'SHIPPED') "
+        "AND NOT EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE value = 'PROCESSED') "
+        "AND NOT EXISTS ("
+        "  SELECT 1 FROM shipped_event_dispositions AS disposition "
+        "  WHERE disposition.activity_id = activity.id"
+        ")"
+    )
+    actionable_row = await cursor.fetchone()
+    actionable_unprocessed_shipped_count: int = actionable_row[0] if actionable_row else 0
+
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM activity_log AS activity "
+        "WHERE EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE value = 'SHIPPED') "
         "AND EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE value = 'PROCESSED') "
         "AND NOT EXISTS ("
         "  SELECT 1 FROM shipped_sync_receipts AS receipt "
@@ -158,6 +171,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "bridge_file_exists": bridge_file_exists,
         "bridge_file_age_seconds": bridge_file_age_seconds,
         "unprocessed_shipped_count": unprocessed_shipped_count,
+        "actionable_unprocessed_shipped_count": actionable_unprocessed_shipped_count,
         "processed_shipped_without_receipt_count": processed_shipped_without_receipt_count,
         "wal_size_bytes": wal_size_bytes,
         "wal_warning": wal_warning,
@@ -240,6 +254,7 @@ async def collect_status_summary(db: Any) -> dict[str, Any]:
         "signals": {
             "pending_handoffs": pending_handoffs,
             "unprocessed_shipped": health["unprocessed_shipped_count"],
+            "actionable_unprocessed_shipped": health["actionable_unprocessed_shipped_count"],
             "processed_shipped_without_receipt": health["processed_shipped_without_receipt_count"],
             "fts_missing": health["fts_index"]["missing"],
             "fts_orphaned": health["fts_index"]["orphaned"],

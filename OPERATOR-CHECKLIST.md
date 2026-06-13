@@ -58,7 +58,7 @@ Checklist
 Routine verifier refreshed on 2026-06-06. Claude Desktop registration details
 below remain from the earlier integration verification.
 
-- `uv run pytest` passes locally with 155 tests.
+- `uv run pytest` passes locally with 263 tests.
 - `uv run pyright` passes locally.
 - `uv run ruff check` passes locally.
 - `uv run python -m bridge_db --doctor` passes locally.
@@ -74,8 +74,10 @@ below remain from the earlier integration verification.
 - Claude.ai read access is confirmed with a successful `mcp__bridge_db__health()` call after restart.
 - Claude.ai direct write behavior has been proven through bridge-db MCP tools.
 - Startup sync plus export has been verified end to end.
-- Latest local repo verification is green: `155` tests, `ruff` clean, `pyright` clean.
-- Live status currently reports no pending handoffs and no unprocessed shipped events.
+- Latest local repo verification is green: `263` tests, `ruff` clean, `pyright` clean.
+- Live status currently reports no pending handoffs and no actionable unprocessed
+  shipped events; raw unprocessed rows may remain when each has a non-receipt
+  policy disposition.
 - Dependency drift was refreshed through PR #27 after Dependabot PRs #25 and #26 were superseded.
 - Bridge Sync burn-in review is complete and the one-time heartbeat is retired.
 - `POST-SYNC-REVIEW.md` is the checklist to use after future scheduled Bridge
@@ -184,8 +186,8 @@ Minimum clean proof:
 
 1. `uv run python -m bridge_db --status` reports healthy state.
 2. `uv run python -m bridge_db --dogfood` reports no pending handoffs, no
-   unprocessed shipped events, no receiptless processed shipped events, and no
-   FTS drift or WAL warning.
+   actionable unprocessed shipped events, no receiptless processed shipped
+   events, and no FTS drift or WAL warning.
 3. `mcp__bridge_db__export_bridge_markdown()` returns `ok=true` and a nonzero
    byte count.
 4. A follow-up status check shows the markdown bridge file is fresh.

@@ -10,7 +10,7 @@ import aiosqlite
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Full DDL for current schema (initial create on a fresh DB)
 _SCHEMA_DDL = """
@@ -89,6 +89,26 @@ CREATE TABLE IF NOT EXISTS shipped_sync_receipts (
 
 CREATE INDEX IF NOT EXISTS idx_shipped_sync_downstream
     ON shipped_sync_receipts(downstream_system, downstream_ref);
+
+CREATE TABLE IF NOT EXISTS shipped_event_dispositions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_id INTEGER NOT NULL UNIQUE,
+    disposition_type TEXT NOT NULL CHECK(disposition_type IN (
+        'unsynced_by_policy',
+        'no_durable_target',
+        'superseded_without_receipt',
+        'declined_mapping'
+    )),
+    policy_ref TEXT,
+    reason TEXT NOT NULL,
+    decided_by TEXT NOT NULL CHECK(decided_by IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+    decided_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    notes TEXT,
+    FOREIGN KEY(activity_id) REFERENCES activity_log(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_shipped_disposition_type
+    ON shipped_event_dispositions(disposition_type);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS content_index USING fts5(
     source_type UNINDEXED,
@@ -236,6 +256,32 @@ UPDATE pending_handoffs SET source_trust = 'operator';
 """
 
 
+# Migration v7 → v8: add shipped-event policy dispositions. This is deliberately
+# separate from shipped_sync_receipts: dispositions explain why an event is not
+# receipt-ready, while receipts prove downstream sync.
+_MIGRATION_V7_TO_V8 = """
+CREATE TABLE IF NOT EXISTS shipped_event_dispositions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_id INTEGER NOT NULL UNIQUE,
+    disposition_type TEXT NOT NULL CHECK(disposition_type IN (
+        'unsynced_by_policy',
+        'no_durable_target',
+        'superseded_without_receipt',
+        'declined_mapping'
+    )),
+    policy_ref TEXT,
+    reason TEXT NOT NULL,
+    decided_by TEXT NOT NULL CHECK(decided_by IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+    decided_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    notes TEXT,
+    FOREIGN KEY(activity_id) REFERENCES activity_log(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_shipped_disposition_type
+    ON shipped_event_dispositions(disposition_type);
+"""
+
+
 async def apply_pragmas(db: aiosqlite.Connection) -> None:
     """Apply all required PRAGMAs. Safe to call on every connection open."""
     await db.execute("PRAGMA journal_mode=WAL")
@@ -314,6 +360,13 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
             await db.execute(f"PRAGMA user_version = {current_version}")
             await db.commit()
             logger.info("Schema migrated to v7")
+        elif current_version == 7:
+            logger.info("Migrating schema v7 → v8")
+            await db.executescript(_MIGRATION_V7_TO_V8)
+            current_version = 8
+            await db.execute(f"PRAGMA user_version = {current_version}")
+            await db.commit()
+            logger.info("Schema migrated to v8")
         else:
             raise RuntimeError(f"No migration path defined from v{current_version}")
 

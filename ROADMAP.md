@@ -4,9 +4,9 @@ This roadmap captures the current scope-closed state of bridge-db. All originall
 
 ## Current Position
 
-- Core MCP server is stable, typed, and test-backed. Schema at v4 (adds FTS5 `content_index` plus shipped-event sync receipts).
-- SQLite schema and migration path are in place; step-wise migrations proven through v1→v2→v3→v4.
-- 23 MCP tools across 9 modules: activity, handoffs, context, snapshots, cost, export, health, recall, audit.
+- Core MCP server is stable, typed, and test-backed. Schema at v8 (adds FTS5 `content_index`, shipped-event sync receipts, project provenance, and shipped-event dispositions).
+- SQLite schema and migration path are in place; step-wise migrations proven through v1→current.
+- 24 MCP tools across 9 modules: activity, handoffs, context, snapshots, cost, export, health, recall, audit.
 - Markdown export works as a compatibility layer for file-based clients.
 - Claude.ai direct MCP read and write paths have both been proven locally.
 - The file path remains compatibility infrastructure, not the primary coordination path.
@@ -14,9 +14,9 @@ This roadmap captures the current scope-closed state of bridge-db. All originall
 - Audit hardening closed the correctness gaps around handoff clearing, future-schema detection, degraded health reporting, and latent v1→v2 migration gaps.
 - Phase −1 of the semantic memory arc (FTS5 + `recall`) shipped; subsequent phases closed (see below).
 - Phase 6 observability shipped: `recall_stats`, `audit_tail`, and WAL-size health metric (see below).
-- Shipped-event sync hardening shipped: `confirm_shipped_sync` records downstream proof before marking shipped activity as processed.
+- Shipped-event sync hardening shipped: `confirm_shipped_sync` records downstream proof before marking shipped activity as processed; `record_shipped_event_disposition` records non-receipt policy decisions separately.
 - FTS index health hardening shipped: `health`, `status`, and `--dogfood` now treat missing/orphaned `content_index` rows as hard recall-health drift, with CLI-only repair through `--rebuild-content-index`.
-- Repo green at `155` tests, `ruff` and `pyright` clean.
+- Repo green at `263` tests, `ruff` and `pyright` clean.
 
 ## Outcomes We Want
 

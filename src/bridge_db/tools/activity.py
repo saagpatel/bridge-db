@@ -21,6 +21,13 @@ from bridge_db.project_resolver import resolve as resolve_project
 
 logger = logging.getLogger("bridge_db.tools.activity")
 
+_SHIPPED_EVENT_DISPOSITION_TYPES = {
+    "unsynced_by_policy",
+    "no_durable_target",
+    "superseded_without_receipt",
+    "declined_mapping",
+}
+
 
 def _normalize_policy_key(value: str) -> str:
     return value.strip().lower()
@@ -246,9 +253,16 @@ def register(mcp: FastMCP) -> None:
                 r.downstream_ref,
                 r.synced_by,
                 r.synced_at,
-                r.notes AS sync_notes
+                r.notes AS sync_notes,
+                d.disposition_type,
+                d.policy_ref,
+                d.reason AS disposition_reason,
+                d.decided_by,
+                d.decided_at,
+                d.notes AS disposition_notes
             FROM activity_log AS a
             LEFT JOIN shipped_sync_receipts AS r ON r.activity_id = a.id
+            LEFT JOIN shipped_event_dispositions AS d ON d.activity_id = a.id
             {where}
             ORDER BY a.timestamp DESC
             """,
@@ -324,6 +338,18 @@ def register(mcp: FastMCP) -> None:
                             "notes": r["sync_notes"],
                         }
                         if r["downstream_ref"] is not None
+                        else None
+                    ),
+                    "policy_disposition": (
+                        {
+                            "disposition_type": r["disposition_type"],
+                            "policy_ref": r["policy_ref"],
+                            "reason": r["disposition_reason"],
+                            "decided_by": r["decided_by"],
+                            "decided_at": r["decided_at"],
+                            "notes": r["disposition_notes"],
+                        }
+                        if r["disposition_type"] is not None
                         else None
                     ),
                 }
@@ -413,6 +439,103 @@ def register(mcp: FastMCP) -> None:
             "updated_ids": updated_ids,
             "missing_ids": missing_ids,
             "shipped_bypass_ids": shipped_bypass_ids,
+        }
+
+    @mcp.tool()
+    async def record_shipped_event_disposition(
+        caller: Annotated[CallerID, Field(description="System recording the disposition")],
+        activity_id: Annotated[int, Field(description="SHIPPED activity entry to classify")],
+        disposition_type: Annotated[
+            str,
+            Field(
+                description=(
+                    "One of: unsynced_by_policy, no_durable_target, "
+                    "superseded_without_receipt, declined_mapping"
+                )
+            ),
+        ],
+        reason: Annotated[str, Field(description="Why this event is not receipt-ready")],
+        policy_ref: Annotated[
+            str | None,
+            Field(description="Optional durable policy or report reference"),
+        ] = None,
+        notes: Annotated[
+            str | None,
+            Field(description="Optional operator evidence or follow-up notes"),
+        ] = None,
+        ctx: Context = None,  # type: ignore[assignment]
+    ) -> dict[str, Any]:
+        """Record a non-receipt disposition for a SHIPPED event.
+
+        This is not a downstream receipt and does not mark the event PROCESSED.
+        It is for rows that should remain auditable but are not actionable for
+        normal bridge-sync receipt processing.
+        """
+        require_caller(ctx, caller, tool="record_shipped_event_disposition")
+        disposition = disposition_type.strip()
+        if disposition not in _SHIPPED_EVENT_DISPOSITION_TYPES:
+            allowed = ", ".join(sorted(_SHIPPED_EVENT_DISPOSITION_TYPES))
+            raise ToolError(f"disposition_type must be one of: {allowed}")
+        clean_reason = reason.strip()
+        if not clean_reason:
+            raise ToolError("reason must not be empty")
+        clean_policy_ref = policy_ref.strip() if policy_ref is not None else None
+        clean_notes = notes.strip() if notes is not None else None
+
+        db = get_db(ctx)
+        cursor = await db.execute(
+            "SELECT tags, project_name FROM activity_log WHERE id = ?", (activity_id,)
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise ToolError(f"No activity entry found with id {activity_id}")
+
+        current_tags: list[str] = json.loads(row["tags"])
+        if "SHIPPED" not in current_tags:
+            raise ToolError(f"Activity entry {activity_id} is not tagged SHIPPED")
+
+        cursor = await db.execute(
+            "SELECT downstream_ref FROM shipped_sync_receipts WHERE activity_id = ?",
+            (activity_id,),
+        )
+        receipt = await cursor.fetchone()
+        if receipt is not None:
+            raise ToolError(
+                f"Activity entry {activity_id} already has a shipped_sync_receipts row"
+            )
+
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO shipped_event_dispositions (
+                activity_id, disposition_type, policy_ref, reason, decided_by, notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (activity_id, disposition, clean_policy_ref, clean_reason, caller, clean_notes),
+        )
+        await db.commit()
+
+        detail = f"activity_id={activity_id} disposition_type={disposition}"
+        log_audit(
+            "record_shipped_event_disposition",
+            caller,
+            row["project_name"],
+            ok=True,
+            detail=detail,
+        )
+        logger.info(
+            "recorded shipped-event disposition: id=%d disposition=%s by=%s",
+            activity_id,
+            disposition,
+            caller,
+        )
+        return {
+            "ok": True,
+            "activity_id": activity_id,
+            "project_name": row["project_name"],
+            "disposition_type": disposition,
+            "policy_ref": clean_policy_ref,
+            "decided_by": caller,
         }
 
     @mcp.tool()

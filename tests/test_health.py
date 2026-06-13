@@ -153,6 +153,40 @@ async def test_health_unprocessed_shipped_count(
     assert result["unprocessed_shipped_count"] == 1
 
 
+async def test_health_actionable_unprocessed_excludes_dispositions(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
+) -> None:
+    (tmp_path / "test.db").touch()
+    cursor = await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary, tags) "
+        "VALUES ('cc', '2026-06-13', 'fable-outputs', 'artifact', ?) RETURNING id",
+        (json.dumps(["SHIPPED"]),),
+    )
+    disposed_row = await cursor.fetchone()
+    assert disposed_row is not None
+    disposed_id = int(disposed_row[0])
+    await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary, tags) "
+        "VALUES ('cc', '2026-06-13', 'personal-ops', 'merged', ?)",
+        (json.dumps(["SHIPPED"]),),
+    )
+    await db.execute(
+        """
+        INSERT INTO shipped_event_dispositions (
+            activity_id, disposition_type, reason, decided_by
+        )
+        VALUES (?, 'unsynced_by_policy', 'experimental artifact', 'codex')
+        """,
+        (disposed_id,),
+    )
+    await db.commit()
+
+    result = await fns["health"](ctx=make_ctx(db))
+
+    assert result["unprocessed_shipped_count"] == 2
+    assert result["actionable_unprocessed_shipped_count"] == 1
+
+
 async def test_health_counts_processed_shipped_without_receipts(
     db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
 ) -> None:
@@ -265,6 +299,7 @@ async def test_status_returns_compact_operator_summary(
     assert result["row_counts"]["context_sections"] == 1
     assert result["signals"]["pending_handoffs"] == 0
     assert result["signals"]["unprocessed_shipped"] == 1
+    assert result["signals"]["actionable_unprocessed_shipped"] == 1
     assert result["signals"]["processed_shipped_without_receipt"] == 0
     assert result["signals"]["fts_missing"] == 0
     assert result["signals"]["fts_orphaned"] == 0

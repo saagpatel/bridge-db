@@ -85,7 +85,7 @@ Once `BRIDGE_DB_AUTH_MODE` leaves `off`, the `env` block above is required: the
 `BRIDGE_DB_PRINCIPAL_TOKEN`, and `BRIDGE_DB_AUTH_MODE` sets the rollout dial. In
 `off` mode the env block may be omitted and legacy behavior is fully preserved.
 
-This gives Claude.ai access to all 23 MCP tools under `mcp__bridge_db__*`, including
+This gives Claude.ai access to all 24 MCP tools under `mcp__bridge_db__*`, including
 the read-only `health` and `status` diagnostics, the file-import helper `sync_from_file`,
 the `recall` FTS5 lexical search (Phase −1 of the semantic memory layer), and the
 observability tools `recall_stats` and `audit_tail` over the JSONL logs.
@@ -130,8 +130,12 @@ mcp__bridge_db__get_latest_snapshot("codex") # Codex infrastructure state
 mcp__bridge_db__get_recent_activity(limit=20) # mixed CC + Codex activity feed
 mcp__bridge_db__get_shipped_events(unprocessed_only=False) # shipped projects
 mcp__bridge_db__confirm_shipped_sync(...) # record downstream proof, then mark processed
+mcp__bridge_db__record_shipped_event_disposition(...) # record non-receipt policy disposition
 mcp__bridge_db__get_cost_history()          # cost trend
 ```
+
+`record_shipped_event_disposition` is for non-receipt decisions only. It does
+not add `PROCESSED` and does not write to `shipped_sync_receipts`.
 
 `mark_shipped_processed` remains a compatibility path only. If it appears in
 `audit_tail`, use the audit `detail` field (`activity_ids`, `updated_ids`,
