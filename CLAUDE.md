@@ -24,9 +24,9 @@ uv run python -m bridge_db --promote-section career  # operator label promotion 
 
 ## Architecture
 
-- **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=5000`). Schema at v7 — v6 added `canonical_key` to `pending_handoffs` (handoff canonical resolution); v7 added `source_trust` provenance columns to all four instruction-bearing tables (`context_sections`, `pending_handoffs`, `activity_log`, `system_snapshots`), with a conservative backfill (`context_sections`/`pending_handoffs` pre-existing rows → `'operator'`, activity/snapshot history keeps `'agent'` default). Auth state lives in `principals.json` (not the DB); no schema change for Stage-1 auth.
+- **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=5000`). Schema at v8 — v6 added `canonical_key` to `pending_handoffs` (handoff canonical resolution); v7 added `source_trust` provenance columns to all four instruction-bearing tables (`context_sections`, `pending_handoffs`, `activity_log`, `system_snapshots`); v8 added `shipped_event_dispositions` so non-receipt shipped-event policy decisions stay separate from proof receipts. Auth state lives in `principals.json` (not the DB); no schema change for Stage-1 auth.
 - **MCP transport**: stdio (stdout = JSON-RPC, all logging → stderr)
-- **23 MCP tools** across 9 modules: activity, handoffs, context, snapshots, cost, export, health, recall (FTS5 lexical search; Phase −1 of the semantic memory layer), audit (read-side observability over the JSONL audit + recall query logs). `health` / `status` include signals for pending handoffs, unprocessed shipped events, receiptless processed shipped events, FTS index drift, WAL size, and bridge-file freshness.
+- **24 MCP tools** across 9 modules: activity, handoffs, context, snapshots, cost, export, health, recall (FTS5 lexical search; Phase −1 of the semantic memory layer), audit (read-side observability over the JSONL audit + recall query logs). `health` / `status` include signals for pending handoffs, raw and actionable unprocessed shipped events, receiptless processed shipped events, FTS index drift, WAL size, and bridge-file freshness.
 - **Context access**: `get_db(ctx)` helper casts lifespan context to `aiosqlite.Connection`
 - **Tool registration**: `CaptureMCP` pattern in tests — decorators capture raw async fns
 - **FTS5 invariant**: every write path that touches `context_sections`, `activity_log`, `system_snapshots`, or `pending_handoffs` calls `upsert_fts_entry` / `gc_fts_orphans` from [db.py](src/bridge_db/db.py) in the same transaction. Auto-prune paths in `log_activity` and `save_snapshot` GC orphan FTS rows. (`canonical_key` is not FTS-indexed, so it does not affect this invariant.)
@@ -51,7 +51,7 @@ uv run python -m bridge_db --promote-section career  # operator label promotion 
 ## Gotchas
 
 - **SessionEnd hook path**: Claude Code's SessionEnd hook must use `uv run --directory ~/Projects/bridge-db python -m bridge_db --log-session-boundary <project>` so session-boundary activity rows get FTS entries through the normal write path. This hook-specific path intentionally does not run activity retention pruning.
-- **Shipped-event sync**: `confirm_shipped_sync` requires a downstream system/ref, stores a receipt, then adds `PROCESSED`. `mark_shipped_processed` is a legacy compatibility path — prefer receipt-backed `confirm_shipped_sync` for bridge-sync work.
+- **Shipped-event sync**: `confirm_shipped_sync` requires a downstream system/ref, stores a receipt, then adds `PROCESSED`. `record_shipped_event_disposition` records a non-receipt policy disposition without adding `PROCESSED`. `mark_shipped_processed` is a legacy compatibility path — prefer receipt-backed `confirm_shipped_sync` for bridge-sync work.
 - **Semantic memory scope closed**: FTS5 + `recall` is the final layer (Phase −1). Vector/embedding layers are ruled out — most query misses reflect content not in `bridge.db`. See closure banner in `bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md`.
 - **FTS drift repair**: `--rebuild-content-index` is the CLI-only repair path; FTS index drift is treated as a hard health failure because `recall` depends on `content_index` mirroring source tables.
 - **Post-sync review**: after scheduled Bridge Syncs or shipped-event reconciliation, use `POST-SYNC-REVIEW.md` to verify DB state, markdown export freshness, and scorecard updates.
@@ -81,7 +81,7 @@ bridge-db is an active local project in the ~/Projects portfolio.
 
 ## Current State
 
-This project is in steady-state maintenance. The codebase is stable, the DB is live, core features are shipped and documented, and observability over the two JSONL logs is now closed (was a half-built feedback loop). 23 MCP tools across 9 modules, 155 tests green, pyright + ruff clean. Scope is explicitly pinned to cross-system *state* coordination plus lexical `recall`, shipped-event sync receipts, plus observability — expansion into a knowledge store is ruled out.
+This project is in steady-state maintenance. The codebase is stable, the DB is live, core features are shipped and documented, and observability over the two JSONL logs is now closed (was a half-built feedback loop). 24 MCP tools across 9 modules, 263 tests green, pyright + ruff clean. Scope is explicitly pinned to cross-system *state* coordination plus lexical `recall`, shipped-event sync receipts and dispositions, plus observability — expansion into a knowledge store is ruled out.
 
 ## Stack
 
@@ -90,7 +90,7 @@ This project is in steady-state maintenance. The codebase is stable, the DB is l
 - **Database**: SQLite via `aiosqlite`
 - **Type checking**: pyright (strict)
 - **Lint**: ruff
-- **Test**: pytest (155 tests)
+- **Test**: pytest (263 tests)
 
 ## How To Run
 

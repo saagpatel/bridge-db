@@ -292,6 +292,99 @@ async def test_get_shipped_events_marks_policy_backed_meta_events(
     assert by_name["missing-project"]["notion_sync"]["state"] == "unmatched"
 
 
+async def test_record_shipped_event_disposition_is_non_receipt(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+) -> None:
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="cc",
+        project_name="fable-outputs",
+        summary="local artifact",
+        tags=["SHIPPED"],
+        ctx=ctx,
+    )
+    cursor = await db.execute("SELECT id FROM activity_log")
+    row = await cursor.fetchone()
+    assert row is not None
+    activity_id = row["id"]
+
+    result = await fns["record_shipped_event_disposition"](
+        caller="codex",
+        activity_id=activity_id,
+        disposition_type="unsynced_by_policy",
+        reason="experimental local artifact with no durable downstream target",
+        policy_ref="/Users/d/Documents/Codex/operating-system-audits/example.md",
+        notes="leave pending without receipt",
+        ctx=ctx,
+    )
+
+    assert result["ok"] is True
+    assert result["activity_id"] == activity_id
+    assert result["disposition_type"] == "unsynced_by_policy"
+
+    cursor = await db.execute(
+        """
+        SELECT a.tags, d.disposition_type, d.policy_ref, d.reason, d.decided_by, d.notes
+        FROM activity_log AS a
+        JOIN shipped_event_dispositions AS d ON d.activity_id = a.id
+        WHERE a.id = ?
+        """,
+        (activity_id,),
+    )
+    disposition = await cursor.fetchone()
+    assert disposition is not None
+    assert json.loads(disposition["tags"]) == ["SHIPPED"]
+    assert disposition["disposition_type"] == "unsynced_by_policy"
+    assert disposition["policy_ref"] == "/Users/d/Documents/Codex/operating-system-audits/example.md"
+    assert disposition["reason"] == "experimental local artifact with no durable downstream target"
+    assert disposition["decided_by"] == "codex"
+    assert disposition["notes"] == "leave pending without receipt"
+
+    cursor = await db.execute("SELECT COUNT(*) FROM shipped_sync_receipts")
+    count_row = await cursor.fetchone()
+    assert count_row is not None
+    assert count_row[0] == 0
+
+    shipped = await fns["get_shipped_events"](ctx=ctx)
+    assert shipped[0]["sync_receipt"] is None
+    assert shipped[0]["policy_disposition"]["disposition_type"] == "unsynced_by_policy"
+    assert shipped[0]["policy_disposition"]["reason"] == (
+        "experimental local artifact with no durable downstream target"
+    )
+
+
+async def test_record_shipped_event_disposition_rejects_receipted_event(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+) -> None:
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="cc", project_name="personal-ops", summary="merged", tags=["SHIPPED"], ctx=ctx
+    )
+    cursor = await db.execute("SELECT id FROM activity_log")
+    row = await cursor.fetchone()
+    assert row is not None
+    activity_id = row["id"]
+
+    await fns["confirm_shipped_sync"](
+        caller="codex",
+        activity_id=activity_id,
+        downstream_system="github",
+        downstream_ref="https://github.com/example/repo/pull/1",
+        ctx=ctx,
+    )
+
+    with pytest.raises(ToolError, match="already has a shipped_sync_receipts row"):
+        await fns["record_shipped_event_disposition"](
+            caller="codex",
+            activity_id=activity_id,
+            disposition_type="unsynced_by_policy",
+            reason="too late",
+            ctx=ctx,
+        )
+
+
 async def test_mark_shipped_processed_idempotent(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:

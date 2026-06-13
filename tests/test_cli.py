@@ -93,7 +93,8 @@ async def test_run_status_reports_healthy_summary(
     assert "contexts=1" in captured
     assert "pending_handoffs=0" in captured
     assert "unprocessed_shipped=1" in captured
-    assert "Attention: unprocessed_shipped=1" in captured
+    assert "actionable_unprocessed_shipped=1" in captured
+    assert "Attention: actionable_unprocessed_shipped=1" in captured
     assert "Pending handoff trust: operator=0, agent=0, ingested=0" in captured
     assert "dogfood will fail until cleared" in captured
     assert "cc=2026-04-17" in captured
@@ -390,8 +391,8 @@ asyncio.run(main())
     if flag == "--doctor":
         assert str(db_path) in result.stdout
         assert str(audit_log_path) in result.stdout
-        assert "23 MCP tools" in (repo_root / "README.md").read_text(encoding="utf-8")
-        assert "155 tests" in (repo_root / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "24 MCP tools" in (repo_root / "README.md").read_text(encoding="utf-8")
+        assert "263 tests" in (repo_root / "CLAUDE.md").read_text(encoding="utf-8")
     if flag == "--status":
         assert "contexts=0" in result.stdout
         assert "Attention:" not in result.stdout

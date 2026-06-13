@@ -29,7 +29,8 @@ Expected clean signals:
 - `Overall: healthy`
 - no `Attention:` line in `--status`
 - `pending_handoffs=0`
-- `unprocessed_shipped=0`
+- `actionable_unprocessed_shipped=0`; raw `unprocessed_shipped` may be nonzero
+  when every remaining row has an explicit non-receipt policy disposition.
 - `processed_shipped_without_receipt=0`
 - `fts_missing=0`
 - `fts_orphaned=0`

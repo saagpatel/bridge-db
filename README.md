@@ -2,7 +2,7 @@
 
 SQLite-backed MCP server for shared state across Claude.ai, Claude Code, Codex, and related local ops tools.
 
-bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLite store and 23 MCP tools across state, diagnostics, FTS5 lexical `recall`, shipped-event sync receipts, and observability over the audit and recall logs. The markdown bridge file is regenerated from the DB via `export_bridge_markdown` and remains available as a fallback for file-based clients.
+bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLite store and 24 MCP tools across state, diagnostics, FTS5 lexical `recall`, shipped-event sync receipts, shipped-event dispositions, and observability over the audit and recall logs. The markdown bridge file is regenerated from the DB via `export_bridge_markdown` and remains available as a fallback for file-based clients.
 
 ## Current State
 
@@ -13,6 +13,10 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
 - Phase −1 of the semantic memory arc shipped and is the **final layer**: `content_index` FTS5 vtable mirrors all content tables, `recall(query, limit, scope)` exposes it via MCP with OR-semantic multi-token queries, and health/status now verify that source rows and FTS rows stay aligned. Vector/embedding phases were closed after a dry-run showed that "missed" queries targeted content not actually in `bridge.db`. See the closure banner at the top of [bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md](bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md).
 - **Phase 6 observability shipped (2026-04-17):** `recall_stats` reads the recall query log, `audit_tail` reads the audit log, and `health` now surfaces `wal_size_bytes` + `wal_warning`. All three close half-built feedback loops without expanding scope. See the Phase 6 section in [ROADMAP.md](ROADMAP.md).
 - Shipped-event sync hardening shipped: `confirm_shipped_sync` records downstream proof in `shipped_sync_receipts` before marking a `SHIPPED` activity event `PROCESSED`.
+- Shipped-event disposition support keeps non-receipt policy decisions separate
+  from proof receipts: `record_shipped_event_disposition` records why a
+  `SHIPPED` row is intentionally not receipt-ready without adding `PROCESSED`
+  and without writing to `shipped_sync_receipts`.
 - `get_shipped_events` now includes a computed `notion_sync` contract from the
   canonical project registry. Bridge-sync agents should update Notion only when
   `notion_sync.state == "ready"` and the referenced page readback proves the
@@ -20,8 +24,8 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
   local/meta receipts that should be processed against the policy reference, not
   Notion. `unmatched`, `no_notion_target`, and `registry_unavailable` events
   stay pending instead of being guessed through fuzzy search.
-- `health` / `status` also surface `processed_shipped_without_receipt` as a soft drift signal for older or manual `mark_shipped_processed` paths, and `fts_missing` / `fts_orphaned` as hard recall-index health signals. Prefer `confirm_shipped_sync` for new downstream syncs.
-- Local verification is currently green as of 2026-06-06: `155` tests passing,
+- `health` / `status` also surface `processed_shipped_without_receipt` as a soft drift signal for older or manual `mark_shipped_processed` paths, `actionable_unprocessed_shipped` as the unprocessed shipped count after explicit dispositions are excluded, and `fts_missing` / `fts_orphaned` as hard recall-index health signals. Prefer `confirm_shipped_sync` for new downstream syncs.
+- Local verification is currently green as of 2026-06-13: `263` tests passing,
   `ruff` clean, and `pyright` clean. Live `--doctor`, `--status`, and
   `--dogfood` checks are healthy.
 - Project is in steady maintenance. Scope is pinned to cross-system *state* coordination plus lexical `recall` plus observability; it is not a knowledge store.
@@ -53,11 +57,11 @@ Codex      ──► MCP stdio ──► bridge-db process ──►  ~/.local/s
 
 No shared daemon. Each MCP client spawns its own `bridge-db` process via stdio. WAL mode + `PRAGMA busy_timeout=5000` handles concurrent writes safely.
 
-## Tools (23)
+## Tools (24)
 
 | Module | Tools |
 |---|---|
-| activity | `log_activity`, `get_recent_activity`, `get_shipped_events`, `confirm_shipped_sync`, `mark_shipped_processed` |
+| activity | `log_activity`, `get_recent_activity`, `get_shipped_events`, `confirm_shipped_sync`, `record_shipped_event_disposition`, `mark_shipped_processed` |
 | handoffs | `create_handoff`, `get_pending_handoffs`, `pick_up_handoff`, `clear_handoff` |
 | context | `update_section`, `get_section`, `get_all_sections`, `sync_from_file` |
 | snapshots | `save_snapshot`, `get_latest_snapshot` |
@@ -127,7 +131,9 @@ args = ["run", "--directory", "~/Projects/bridge-db", "python", "-m", "bridge_db
 `activity_log` retention and shipped-sync receipts are separate surfaces:
 activity rows are recent context, while `shipped_sync_receipts` is the proof
 ledger for downstream shipped-event syncs. Treat `processed_shipped_without_receipt=0`
-and `fts_missing=0` as the primary clean signals, not raw row counts alone.
+and `fts_missing=0` as primary clean signals, and use
+`actionable_unprocessed_shipped=0` when policy dispositions explain why raw
+`unprocessed_shipped` remains nonzero.
 For Notion reconciliation, treat each shipped event's `notion_sync` object as the
 machine-readable gate:
 
@@ -138,6 +144,11 @@ machine-readable gate:
   policy file after verifying the policy applies to the event.
 - `unmatched`, `no_notion_target`, or `registry_unavailable`: leave the event
   unprocessed and repair the project registry or mapping source first.
+
+For non-receipt handling, use `record_shipped_event_disposition` only when an
+operator policy says the row should remain auditable but should not proceed to a
+downstream receipt. The disposition appears as `policy_disposition` on
+`get_shipped_events`; it does not write a receipt and does not add `PROCESSED`.
 
 ## Startup Sync
 

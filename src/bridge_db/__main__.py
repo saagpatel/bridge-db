@@ -126,6 +126,7 @@ async def run_status() -> bool:
         "  Signals:"
         f" pending_handoffs={summary['signals']['pending_handoffs']},"
         f" unprocessed_shipped={summary['signals']['unprocessed_shipped']},"
+        f" actionable_unprocessed_shipped={summary['signals']['actionable_unprocessed_shipped']},"
         " processed_shipped_without_receipt="
         f"{summary['signals']['processed_shipped_without_receipt']},"
         f" fts_missing={summary['signals']['fts_missing']},"
@@ -157,8 +158,10 @@ def _status_attention(summary: dict[str, Any]) -> str | None:
     signals = summary["signals"]
     if signals["pending_handoffs"]:
         notes.append(f"pending_handoffs={signals['pending_handoffs']}")
-    if signals["unprocessed_shipped"]:
-        notes.append(f"unprocessed_shipped={signals['unprocessed_shipped']}")
+    if signals["actionable_unprocessed_shipped"]:
+        notes.append(
+            f"actionable_unprocessed_shipped={signals['actionable_unprocessed_shipped']}"
+        )
     if signals["processed_shipped_without_receipt"]:
         notes.append(
             f"processed_shipped_without_receipt={signals['processed_shipped_without_receipt']}"
@@ -213,6 +216,7 @@ async def run_dogfood() -> bool:
         "  Signals:"
         f" pending_handoffs={summary['signals']['pending_handoffs']},"
         f" unprocessed_shipped={summary['signals']['unprocessed_shipped']},"
+        f" actionable_unprocessed_shipped={summary['signals']['actionable_unprocessed_shipped']},"
         " processed_shipped_without_receipt="
         f"{summary['signals']['processed_shipped_without_receipt']}"
     )
@@ -235,7 +239,7 @@ async def run_dogfood() -> bool:
     return bool(
         summary["ok"]
         and summary["signals"]["pending_handoffs"] == 0
-        and summary["signals"]["unprocessed_shipped"] == 0
+        and summary["signals"]["actionable_unprocessed_shipped"] == 0
         and summary["signals"]["processed_shipped_without_receipt"] == 0
         and health["fts_index"]["ok"]
         and not health["wal_warning"]

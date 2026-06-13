@@ -27,6 +27,7 @@ async def test_schema_creates_all_tables(db: aiosqlite.Connection) -> None:
         "context_sections",
         "cost_records",
         "pending_handoffs",
+        "shipped_event_dispositions",
         "shipped_sync_receipts",
         "system_snapshots",
     }
@@ -39,6 +40,7 @@ async def test_schema_creates_indexes(db: aiosqlite.Connection) -> None:
     assert "idx_activity_timestamp" in indexes
     assert "idx_snapshot_system" in indexes
     assert "idx_handoff_status" in indexes
+    assert "idx_shipped_disposition_type" in indexes
     assert "idx_shipped_sync_downstream" in indexes
 
 
@@ -721,3 +723,81 @@ async def test_migration_v6_to_v7_is_idempotent(tmp_path: Path) -> None:
         assert r["source_trust"] == "operator"
     finally:
         await second.close()
+
+
+async def test_migration_v7_to_v8_adds_shipped_event_dispositions(tmp_path: Path) -> None:
+    """A v7 DB gains the non-receipt shipped-event disposition table."""
+    db = await aiosqlite.connect(str(tmp_path / "v7.db"))
+    db.row_factory = aiosqlite.Row
+    await db.executescript("""
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL CHECK(source IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+            timestamp TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            branch TEXT,
+            tags TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            canonical_key TEXT,
+            source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested'))
+        );
+        CREATE TABLE shipped_sync_receipts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            activity_id INTEGER NOT NULL UNIQUE,
+            downstream_system TEXT NOT NULL,
+            downstream_ref TEXT NOT NULL,
+            synced_by TEXT NOT NULL CHECK(synced_by IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+            synced_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            notes TEXT,
+            FOREIGN KEY(activity_id) REFERENCES activity_log(id) ON DELETE CASCADE
+        );
+        INSERT INTO activity_log (source, timestamp, project_name, summary, tags)
+            VALUES ('cc', '2026-06-13', 'fable-outputs', 'manual artifact', '["SHIPPED"]');
+        PRAGMA user_version = 7;
+    """)
+    await db.commit()
+    await db.close()
+
+    migrated = await open_db(tmp_path / "v7.db")
+    try:
+        cursor = await migrated.execute("PRAGMA user_version")
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == SCHEMA_VERSION
+
+        await migrated.execute(
+            """
+            INSERT INTO shipped_event_dispositions (
+                activity_id, disposition_type, reason, decided_by
+            )
+            VALUES (1, 'unsynced_by_policy', 'experimental artifact', 'codex')
+            """
+        )
+        await migrated.commit()
+
+        cursor = await migrated.execute(
+            "SELECT disposition_type FROM shipped_event_dispositions WHERE activity_id = 1"
+        )
+        disposition = await cursor.fetchone()
+        assert disposition is not None
+        assert disposition["disposition_type"] == "unsynced_by_policy"
+
+        await migrated.execute(
+            "INSERT INTO activity_log (source, timestamp, project_name, summary, tags) "
+            "VALUES ('cc', '2026-06-13', 'fable-outputs', 'another artifact', '[\"SHIPPED\"]')"
+        )
+        await migrated.commit()
+
+        with pytest.raises(aiosqlite.IntegrityError):
+            await migrated.execute(
+                """
+                INSERT INTO shipped_event_dispositions (
+                    activity_id, disposition_type, reason, decided_by
+                )
+                VALUES (2, 'bogus', 'invalid', 'codex')
+                """
+            )
+    finally:
+        await migrated.close()
