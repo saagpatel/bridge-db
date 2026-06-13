@@ -8,6 +8,7 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 
 from bridge_db import config
+from bridge_db.auth import auth_mode, load_principals
 from bridge_db.db import SCHEMA_VERSION, collect_fts_index_metrics, get_db
 from bridge_db.migration import SECTION_MAP, extract_sections
 
@@ -163,6 +164,11 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "fts_index": fts_index,
         "claude_ai_section_drift": claude_ai_section_drift,
         "source_trust_breakdown": source_trust_breakdown,
+        "auth": {
+            "mode": auth_mode(),
+            "principals_file_exists": config.PRINCIPALS_PATH.exists(),
+            "principals_enrolled": len(load_principals(config.PRINCIPALS_PATH)),
+        },
     }
 
 

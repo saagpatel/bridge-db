@@ -19,9 +19,17 @@ from bridge_db.tools import recall as recall_tool
 
 @pytest.fixture(autouse=True)
 def isolate_jsonl_logs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep tests from appending audit or recall events to live operator logs."""
+    """Keep tests from appending audit or recall events to live operator logs.
+
+    Also pins AUTH_MODE to "off" so the suite is env-independent: tests that
+    call make_ctx(db) with principal=None pass regardless of the shell env.
+    Individual tests that need warn/enforce override this with their own
+    monkeypatch.setattr(config, "AUTH_MODE", ...) — monkeypatch is per-test
+    so those overrides do not bleed into other tests.
+    """
     monkeypatch.setattr(config, "AUDIT_LOG_PATH", tmp_path / "audit.jsonl")
     monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", tmp_path / "recall_query_log.jsonl")
+    monkeypatch.setattr(config, "AUTH_MODE", "off")
 
 
 @pytest.fixture
@@ -32,11 +40,19 @@ async def db(tmp_path: Path) -> AsyncGenerator[aiosqlite.Connection, None]:
     await conn.close()
 
 
-def make_ctx(conn: aiosqlite.Connection) -> Any:
-    """Build a minimal mock Context satisfying ctx.request_context.lifespan_context.db."""
+def make_ctx(conn: aiosqlite.Connection, principal: str | None = None) -> Any:
+    """Build a minimal mock Context satisfying ctx.request_context.lifespan_context.
+
+    `principal` mirrors AppContext.principal — the channel-bound identity used
+    by auth.require_caller. Defaults to None (unbound), matching legacy tests.
+    """
+    # Alias before the class body: `principal = principal` inside a class body
+    # raises NameError (class bodies cannot close over a name they also bind).
+    bound_principal = principal
 
     class _AppContext:
         db = conn
+        principal = bound_principal
 
     class _RequestContext:
         lifespan_context = _AppContext()

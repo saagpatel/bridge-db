@@ -8,6 +8,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
+from bridge_db.auth import require_caller
 from bridge_db.db import get_db
 from bridge_db.models import (
     COST_SYSTEM_MAP,
@@ -37,6 +38,7 @@ def register(mcp: FastMCP) -> None:
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Upsert a monthly cost record. Caller must own the system they are updating."""
+        require_caller(ctx, caller, tool="record_cost")
         system = COST_SYSTEM_MAP.get(caller)
         if system is None:
             raise ToolError(cost_ownership_error(caller))

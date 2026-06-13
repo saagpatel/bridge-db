@@ -448,3 +448,27 @@ async def test_claude_ai_section_drift_no_file(
     assert drift["checked"] is False
     assert drift["in_sync"] is True
     assert drift["drifted_sections"] == []
+
+
+async def test_health_reports_auth_block(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json as _json
+
+    from bridge_db import config as bridge_config
+    from bridge_db.tools.health import collect_health_metrics
+
+    principals_path = tmp_path / "principals.json"
+    principals_path.write_text(
+        _json.dumps({"version": 1, "principals": {"cc": {"token_sha256": "x" * 64}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bridge_config, "PRINCIPALS_PATH", principals_path)
+    monkeypatch.setattr(bridge_config, "AUTH_MODE", "warn")
+
+    metrics = await collect_health_metrics(db)
+    assert metrics["auth"] == {
+        "mode": "warn",
+        "principals_file_exists": True,
+        "principals_enrolled": 1,
+    }

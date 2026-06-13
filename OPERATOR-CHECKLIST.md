@@ -48,7 +48,7 @@ Checklist
 2. Confirm the config contains an `mcpServers` block.
 3. Confirm there is a `bridge-db` entry with:
    - `command = "uv"`
-   - `args = ["run", "--directory", "~/Projects/bridge-db", "python", "-m", "bridge_db"]`
+   - `args = ["run", "--directory", "<path-to-bridge-db>", "python", "-m", "bridge_db"]`
 4. Restart Claude Desktop after editing the config.
 5. Verify Claude.ai can see bridge-db tools.
 6. Run one read-only tool first, preferably `health`.
@@ -204,3 +204,38 @@ dogfood, shipped-event, and export proof.
 - If `health()` reports `ok: false`, check whether the bridge markdown file is missing or stale before assuming the DB is broken.
 - If `health()` reports FTS drift, run `uv run python -m bridge_db --rebuild-content-index` rather than editing `content_index` manually.
 - If writes succeed but the markdown file looks stale, run `export_bridge_markdown` and re-check the bridge file timestamp.
+
+## Stage 1 Rollout — Channel Auth
+
+**Phase A — Enroll (one TTY session):**
+1. `uv run python -m bridge_db --enroll cc` / `--enroll codex` / `--enroll claude_ai` / `--enroll notion_os` / `--enroll personal_ops` — capture each token once.
+
+**Phase B — Wire envs (each client spawns its own server process):**
+2. **CC:** `claude mcp remove bridge-db -s user`, then re-add with `--env BRIDGE_DB_PRINCIPAL_TOKEN=<cc> --env BRIDGE_DB_AUTH_MODE=warn` (full command in CLAUDE.md Registration).
+3. **Claude Desktop (claude_ai):** add `"env": {"BRIDGE_DB_PRINCIPAL_TOKEN": "<claude_ai>", "BRIDGE_DB_AUTH_MODE": "warn"}` to the bridge-db entry in `claude_desktop_config.json`.
+4. **Codex:** add the same two vars to the bridge-db server's `env` table in `~/.codex/config.toml`.
+5. **personal-ops:** set both vars in the spawn env in `~/.local/share/personal-ops/app/src/bridge-db.ts` (it spawns bridge-db as an MCP subprocess).
+6. **notion-os:** locate its bridge-db spawn (`rg -n "bridge_db|bridge-db" ~/Projects/Notion/src`) and set both vars there.
+7. Add `~/.local/share/bridge-db/principals.json` to the harness sensitive-path guard list (`mcp-gate-policy.json`) — both CC and Codex hooks read it live.
+
+**Phase C — Warn burn-in (≥1 week):**
+8. Watch `audit_tail(tool="auth.mismatch")` and `audit_tail(tool="auth.trust_clamped")` every few days. Expected findings: any consumer skill or prompt still passing a wrong `caller` or `source_trust='operator'`. Fix consumers (grep `~/.claude/skills` and Claude.ai project prompts for `create_handoff`/`update_section` call sites — known lesson: MCP param changes don't auto-propagate to skills).
+9. Watch for `auth.bind` failures (token present but not enrolled = a client wired with a stale/wrong token).
+
+**Phase D — Enforce:**
+10. Flip `BRIDGE_DB_AUTH_MODE=enforce` in all five client configs. Verify each client can still write (one `log_activity` per system) and that a deliberately wrong-caller call is rejected.
+
+**Phase E — Legacy label cleanup (one-time):**
+11. The 20 pre-existing `operator`-labeled pending handoffs were labeled before minting was gated. Review and relabel the unconsumed ones so the pickup gate actually gates:
+    `sqlite3 ~/.local/share/bridge-db/bridge.db "UPDATE pending_handoffs SET source_trust='agent' WHERE status='pending' AND source_trust='operator';"`
+    (Run manually after eyeballing `get_pending_handoffs` — any handoff you genuinely dictated can stay `operator`.)
+12. Re-run `uv run python -m bridge_db --status` and confirm the pending-handoff trust breakdown reflects the relabel.
+
+**Rollback at any point:** set `BRIDGE_DB_AUTH_MODE=off` in the affected client(s) — restores byte-for-byte legacy behavior including sync label preservation. No DB migration to unwind.
+
+**Threat-model note:** the TTY gate on enrollment/promotion ceremonies is a
+speed bump for non-interactive agent processes, not a security boundary — any
+process that can allocate a PTY can pass it. The real Stage-1 win is that
+impersonation now requires an explicit, auditable act (stealing another
+client's token) instead of a one-string parameter. OS-level isolation is a
+later-stage decision.

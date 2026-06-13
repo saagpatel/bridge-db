@@ -2,7 +2,11 @@
 
 import argparse
 import asyncio
+import json
+import os
+import secrets
 import sys
+import tempfile
 from datetime import UTC, datetime
 from typing import Any
 
@@ -305,6 +309,148 @@ async def run_log_session_boundary(
     return bool(metrics["ok"])
 
 
+def _require_tty(action: str) -> bool:
+    """Operator ceremonies require an interactive terminal. Agents run non-TTY."""
+    if sys.stdin.isatty():
+        return True
+    print(f"refused: --{action} is an operator ceremony and requires an interactive TTY")
+    return False
+
+
+def _read_principals_file() -> dict[str, Any]:
+    from bridge_db import config
+
+    if config.PRINCIPALS_PATH.exists():
+        try:
+            data = json.loads(config.PRINCIPALS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data.get("principals"), dict):
+                return data
+        except json.JSONDecodeError:
+            print(f"warning: malformed principals file at {config.PRINCIPALS_PATH}, rewriting")
+    return {"version": 1, "principals": {}}
+
+
+def _write_principals_file(data: dict[str, Any]) -> None:
+    from bridge_db import config
+
+    config.PRINCIPALS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # 0600 from creation + atomic replace: no window where the file is
+    # world-readable or partially written.
+    fd, tmp = tempfile.mkstemp(dir=config.PRINCIPALS_PATH.parent)
+    try:
+        os.chmod(tmp, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, config.PRINCIPALS_PATH)
+    except Exception:
+        os.unlink(tmp)
+        raise
+
+
+def run_enroll(caller: str) -> bool:
+    """Generate a token for one caller, store its hash, print the token once."""
+    from bridge_db.audit import log_audit
+    from bridge_db.auth import hash_token
+    from bridge_db.models import CALLER_IDS
+
+    if caller not in CALLER_IDS:
+        print(f"refused: unknown caller '{caller}'. Known: {', '.join(CALLER_IDS)}")
+        return False
+    if not _require_tty("enroll"):
+        return False
+
+    token = secrets.token_urlsafe(32)
+    data = _read_principals_file()
+    rotated = caller in data["principals"]
+    data["principals"][caller] = {
+        "token_sha256": hash_token(token),
+        "enrolled_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    _write_principals_file(data)
+    log_audit("auth.enroll", caller, None, ok=True, detail=f"rotated={rotated}")
+
+    print(f"bridge-db enrollment — principal '{caller}' {'rotated' if rotated else 'enrolled'}")
+    print("  Set this token in the client's MCP spawn env (shown once, not stored):")
+    print(f"  token: {token}")
+    print("  env:   BRIDGE_DB_PRINCIPAL_TOKEN")
+    return True
+
+
+def run_revoke_principal(caller: str) -> bool:
+    from bridge_db.audit import log_audit
+
+    if not _require_tty("revoke-principal"):
+        return False
+    data = _read_principals_file()
+    if caller not in data["principals"]:
+        print(f"no enrollment found for '{caller}'")
+        return False
+    del data["principals"][caller]
+    _write_principals_file(data)
+    log_audit("auth.revoke", caller, None, ok=True, detail=None)
+    print(f"revoked '{caller}' — its connections bind as unbound on next spawn")
+    return True
+
+
+def run_list_principals() -> bool:
+    data = _read_principals_file()
+    if not data["principals"]:
+        print("no principals enrolled")
+        return True
+    print("enrolled principals")
+    for caller, entry in sorted(data["principals"].items()):
+        print(
+            f"  {caller}: enrolled_at={entry.get('enrolled_at', '?')}, "
+            f"hash={str(entry.get('token_sha256', ''))[:8]}…"
+        )
+    return True
+
+
+async def run_promote_section(section_name: str) -> bool:
+    """Operator-only label promotion for a context section (TTY-gated)."""
+    from bridge_db import config
+    from bridge_db.audit import log_audit
+    from bridge_db.db import open_db
+    from bridge_db.models import SECTION_OWNERS
+
+    if section_name not in SECTION_OWNERS:
+        print(f"refused: unknown section '{section_name}'. Known: {sorted(SECTION_OWNERS)}")
+        return False
+    if not _require_tty("promote-section"):
+        return False
+
+    db = await open_db(config.DB_PATH)
+    try:
+        cursor = await db.execute(
+            "SELECT source_trust, updated_at FROM context_sections WHERE section_name = ?",
+            (section_name,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            print(f"no stored section '{section_name}'")
+            return False
+        await db.execute(
+            "UPDATE context_sections SET source_trust = 'operator' WHERE section_name = ?",
+            (section_name,),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    log_audit(
+        "auth.promote_section",
+        "operator-cli",
+        None,
+        ok=True,
+        detail=f"section={section_name} {row['source_trust']}->operator",
+    )
+    print(
+        f"promoted '{section_name}': {row['source_trust']} -> operator "
+        f"(content as of {row['updated_at']})"
+    )
+    return True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="bridge-db")
     parser.add_argument("--doctor", action="store_true", help="Run diagnostics and exit")
@@ -328,6 +474,22 @@ def main() -> None:
         "--duration-minutes",
         help="Optional duration value for --log-session-boundary",
     )
+    parser.add_argument(
+        "--enroll",
+        metavar="CALLER",
+        help="Enroll a principal: generate a token, store its hash (operator TTY only)",
+    )
+    parser.add_argument(
+        "--revoke-principal",
+        metavar="CALLER",
+        help="Remove a principal's enrollment (operator TTY only)",
+    )
+    parser.add_argument("--list-principals", action="store_true", help="List enrolled principals")
+    parser.add_argument(
+        "--promote-section",
+        metavar="SECTION",
+        help="Set a context section's source_trust to 'operator' (operator TTY only)",
+    )
     args, _ = parser.parse_known_args()
 
     if args.doctor:
@@ -345,6 +507,14 @@ def main() -> None:
     if args.log_session_boundary:
         ok = asyncio.run(run_log_session_boundary(args.log_session_boundary, args.duration_minutes))
         sys.exit(0 if ok else 1)
+    if args.enroll:
+        sys.exit(0 if run_enroll(args.enroll) else 1)
+    if args.revoke_principal:
+        sys.exit(0 if run_revoke_principal(args.revoke_principal) else 1)
+    if args.list_principals:
+        sys.exit(0 if run_list_principals() else 1)
+    if args.promote_section:
+        sys.exit(0 if asyncio.run(run_promote_section(args.promote_section)) else 1)
 
     from bridge_db.server import mcp
 

@@ -8,6 +8,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db.audit import log_audit
+from bridge_db.auth import clamp_source_trust, get_principal, require_caller
 from bridge_db.db import fts_text_for_handoff, get_db, upsert_fts_entry
 from bridge_db.models import CallerID, SourceTrust
 from bridge_db.project_resolver import resolve as resolve_project
@@ -41,8 +42,12 @@ def register(mcp: FastMCP) -> None:
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Create a project handoff for Claude Code or Codex to pick up. Only claude_ai may dispatch."""
+        require_caller(ctx, caller, tool="create_handoff")
         if caller != "claude_ai":
             raise ToolError(f"Only 'claude_ai' may create handoffs; caller was '{caller}'")
+        source_trust, source_trust_clamped = clamp_source_trust(
+            source_trust, caller=caller, tool="create_handoff"
+        )
 
         db = get_db(ctx)
         resolution = resolve_project(project_name)
@@ -100,6 +105,7 @@ def register(mcp: FastMCP) -> None:
             "project_name": project_name,
             "canonical_key": resolution.canonical_key,
             "source_trust": source_trust,
+            "source_trust_clamped": source_trust_clamped,
             "status": "pending",
         }
 
@@ -157,6 +163,7 @@ def register(mcp: FastMCP) -> None:
         is refused until the handoff is promoted to operator trust. 'operator'-trust
         handoffs pick up in one call, as before.
         """
+        require_caller(ctx, caller, tool="pick_up_handoff")
         if caller not in ("cc", "codex"):
             raise ToolError(f"Only 'cc' or 'codex' may pick up handoffs; caller was '{caller}'")
 
@@ -175,21 +182,28 @@ def register(mcp: FastMCP) -> None:
         trust = row["source_trust"]
         project = row["project_name"]
 
+        # The provenance gate keys on the channel-bound principal when one is
+        # bound, falling back to the claimed caller only when unbound (auth
+        # 'off'/legacy). Without this, a principal-bound connection could dodge
+        # the Codex refusal in 'warn' mode (where require_caller audits but does
+        # not block a caller/principal mismatch) by claiming a different caller.
+        gate_identity = get_principal(ctx) or caller
+
         # Provenance gate — the pending → active transition is the dangerous step.
         if trust != "operator":
-            if caller == "codex":
+            if gate_identity == "codex":
                 log_audit(
                     "pick_up_handoff",
                     caller,
                     project,
                     ok=False,
-                    detail=f"source_trust={trust} decision=refused",
+                    detail=f"source_trust={trust} decision=refused principal={get_principal(ctx)}",
                 )
                 raise ToolError(
                     f"Codex cannot pick up a non-operator-trust handoff (source_trust='{trust}'). "
                     "Promote it to operator trust before picking up with Codex."
                 )
-            if not confirm:  # caller == 'cc'
+            if not confirm:  # gate_identity is 'cc' (or an unbound caller)
                 log_audit(
                     "pick_up_handoff",
                     caller,
@@ -246,6 +260,7 @@ def register(mcp: FastMCP) -> None:
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Clear a handoff by project name (mark as done). Called by /end after completing project work."""
+        require_caller(ctx, caller, tool="clear_handoff")
         if caller not in ("cc", "codex"):
             raise ToolError(f"Only 'cc' or 'codex' may clear handoffs; caller was '{caller}'")
 

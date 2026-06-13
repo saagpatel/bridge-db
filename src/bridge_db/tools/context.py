@@ -9,6 +9,8 @@ from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db import config
+from bridge_db.audit import log_audit
+from bridge_db.auth import auth_mode, clamp_source_trust, require_caller
 from bridge_db.db import (
     fts_text_for_section,
     get_db,
@@ -70,31 +72,77 @@ async def _upsert_section(
 
 
 async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str, Any]:
-    """Read the bridge file and upsert the Claude.ai-owned context sections."""
+    """Read the bridge file and upsert the Claude.ai-owned context sections.
+
+    With auth active (mode != 'off'), the file is an unauthenticated channel:
+    unchanged sections are skipped (label preserved), changed or new sections
+    are imported as source_trust='ingested' and reported in `demoted` so the
+    operator can review and promote via `--promote-section`. In 'off' mode the
+    legacy preserve-label upsert runs unchanged (rollback lever).
+    """
     if not bridge_path.exists():
         raise ToolError(f"Bridge file not found: {bridge_path}")
 
+    auth_active = auth_mode() != "off"
     parsed_sections = parse_owned_sections(bridge_path.read_text(encoding="utf-8"))
     synced_sections: list[str] = []
+    unchanged: list[str] = []
+    demoted: list[str] = []
 
     for section_name in SECTION_OWNERS:
         if section_name not in parsed_sections:
             continue
+        content = parsed_sections[section_name]
 
-        await _upsert_section(
-            db=db,
-            section_name=section_name,
-            owner="claude_ai",
-            content=parsed_sections[section_name],
-        )
+        if auth_active:
+            cursor = await db.execute(
+                "SELECT content FROM context_sections WHERE section_name = ?",
+                (section_name,),
+            )
+            row = await cursor.fetchone()
+            # Normalize the same way parse_owned_sections does (strip outer
+            # newlines) so whitespace variance between the update_section write
+            # path and the file parse path can't spuriously demote a section.
+            if row is not None and str(row["content"]).strip("\n") == content.strip("\n"):
+                unchanged.append(section_name)
+                continue
+            await _upsert_section(
+                db=db,
+                section_name=section_name,
+                owner="claude_ai",
+                content=content,
+                source_trust="ingested",
+            )
+            demoted.append(section_name)
+        else:
+            await _upsert_section(
+                db=db, section_name=section_name, owner="claude_ai", content=content
+            )
+
         synced_sections.append(section_name)
 
     await db.commit()
-    logger.info("synced %d claude_ai section(s) from %s", len(synced_sections), bridge_path)
+    if demoted:
+        log_audit(
+            "sync_from_file.demoted",
+            None,
+            None,
+            ok=True,
+            detail=f"sections={','.join(demoted)} label=ingested (file channel)",
+        )
+    logger.info(
+        "synced %d claude_ai section(s) from %s (unchanged=%d, demoted=%d)",
+        len(synced_sections),
+        bridge_path,
+        len(unchanged),
+        len(demoted),
+    )
     return {
         "ok": True,
         "path": str(bridge_path),
         "sections_synced": synced_sections,
+        "unchanged": unchanged,
+        "demoted": demoted,
         "count": len(synced_sections),
     }
 
@@ -119,6 +167,12 @@ def register(mcp: FastMCP) -> None:
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Upsert a context section. Caller must be the section owner (see SECTION_OWNERS)."""
+        require_caller(ctx, caller, tool="update_section")
+        # source_trust may be None here; None passes through the clamp and
+        # preserves the stored label via COALESCE in _upsert_section.
+        source_trust, source_trust_clamped = clamp_source_trust(
+            source_trust, caller=caller, tool="update_section"
+        )
         owner = SECTION_OWNERS.get(section_name)
         if owner is None:
             raise ToolError(
@@ -152,6 +206,7 @@ def register(mcp: FastMCP) -> None:
             "section_name": section_name,
             "owner": owner,
             "source_trust": stored_trust,
+            "source_trust_clamped": source_trust_clamped,
         }
 
     @mcp.tool()

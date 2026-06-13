@@ -267,9 +267,7 @@ Capability notes
     ]
 
 
-async def test_sync_from_file_is_idempotent(
-    db: aiosqlite.Connection, tmp_path: Path
-) -> None:
+async def test_sync_from_file_is_idempotent(db: aiosqlite.Connection, tmp_path: Path) -> None:
     bridge_file = tmp_path / "claude_ai_context.md"
     bridge_file.write_text(
         """## Career & Professional Target
@@ -297,6 +295,35 @@ v4
     row = await cursor.fetchone()
     assert row is not None
     assert row[0] == 4
+
+
+async def test_update_section_clamps_operator_self_promotion(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from conftest import CaptureMCP, make_ctx
+
+    from bridge_db import config as bridge_config
+    from bridge_db.tools import context as context_module
+
+    monkeypatch.setattr(bridge_config, "AUTH_MODE", "warn")
+    cap = CaptureMCP()
+    context_module.register(cap)
+    result = await cap.fns["update_section"](
+        caller="claude_ai",
+        section_name="career",
+        content="# Career\nupdated",
+        source_trust="operator",
+        ctx=make_ctx(db, principal="claude_ai"),
+    )
+    assert result["source_trust"] == "agent"
+    assert result["source_trust_clamped"] is True
+
+    cursor = await db.execute(
+        "SELECT source_trust FROM context_sections WHERE section_name = 'career'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["source_trust"] == "agent"
 
 
 async def test_sync_from_file_skips_non_owned_sections(
@@ -331,3 +358,141 @@ codex data
     row = await cursor.fetchone()
     assert row is not None
     assert row[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 6: change-detection and ingested demotion
+# ---------------------------------------------------------------------------
+
+
+def _write_bridge_file(tmp_path: Path, career_body: str) -> Path:
+    """Minimal bridge markdown containing one owned section."""
+    path = tmp_path / "bridge.md"
+    path.write_text(f"## Career & Professional Target\n\n{career_body}\n", encoding="utf-8")
+    return path
+
+
+async def test_sync_demotes_changed_section_to_ingested(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bridge_db import config as bridge_config
+    from bridge_db.tools.context import (
+        _upsert_section,  # pyright: ignore[reportPrivateUsage]
+        sync_owned_sections_from_file,
+    )
+
+    monkeypatch.setattr(bridge_config, "AUTH_MODE", "warn")
+    await _upsert_section(
+        db=db,
+        section_name="career",
+        owner="claude_ai",
+        content="original content",
+        source_trust="operator",
+    )
+    await db.commit()
+
+    path = _write_bridge_file(tmp_path, "edited on disk by who-knows-what")
+    result = await sync_owned_sections_from_file(db=db, bridge_path=path)
+
+    assert "career" in result["demoted"]
+    cursor = await db.execute(
+        "SELECT source_trust FROM context_sections WHERE section_name = 'career'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["source_trust"] == "ingested"
+
+
+async def test_sync_preserves_label_when_content_unchanged(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bridge_db import config as bridge_config
+    from bridge_db.tools.context import (
+        _upsert_section,  # pyright: ignore[reportPrivateUsage]
+        parse_owned_sections,
+        sync_owned_sections_from_file,
+    )
+
+    monkeypatch.setattr(bridge_config, "AUTH_MODE", "warn")
+    path = _write_bridge_file(tmp_path, "stable content")
+    # Seed the DB with exactly what the file parser will produce, labeled operator.
+    parsed = parse_owned_sections(path.read_text(encoding="utf-8"))
+    await _upsert_section(
+        db=db,
+        section_name="career",
+        owner="claude_ai",
+        content=parsed["career"],
+        source_trust="operator",
+    )
+    await db.commit()
+
+    result = await sync_owned_sections_from_file(db=db, bridge_path=path)
+
+    assert "career" in result["unchanged"]
+    assert result["demoted"] == []
+    cursor = await db.execute(
+        "SELECT source_trust FROM context_sections WHERE section_name = 'career'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["source_trust"] == "operator"
+
+
+async def test_sync_off_mode_keeps_legacy_label_preservation(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bridge_db import config as bridge_config
+    from bridge_db.tools.context import (
+        _upsert_section,  # pyright: ignore[reportPrivateUsage]
+        sync_owned_sections_from_file,
+    )
+
+    monkeypatch.setattr(bridge_config, "AUTH_MODE", "off")
+    await _upsert_section(
+        db=db,
+        section_name="career",
+        owner="claude_ai",
+        content="original",
+        source_trust="operator",
+    )
+    await db.commit()
+
+    path = _write_bridge_file(tmp_path, "changed content")
+    result = await sync_owned_sections_from_file(db=db, bridge_path=path)
+
+    assert result["demoted"] == []  # legacy path: no demotion bookkeeping
+    cursor = await db.execute(
+        "SELECT source_trust FROM context_sections WHERE section_name = 'career'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["source_trust"] == "operator"  # documented legacy laundering, off-mode only
+
+
+async def test_sync_unchanged_despite_trailing_newline_variance(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bridge_db import config as bridge_config
+    from bridge_db.tools.context import (
+        _upsert_section,  # pyright: ignore[reportPrivateUsage]
+        parse_owned_sections,
+        sync_owned_sections_from_file,
+    )
+
+    monkeypatch.setattr(bridge_config, "AUTH_MODE", "warn")
+    path = _write_bridge_file(tmp_path, "stable content")
+    parsed = parse_owned_sections(path.read_text(encoding="utf-8"))
+    # Store with trailing newline — as a direct update_section write might.
+    await _upsert_section(
+        db=db,
+        section_name="career",
+        owner="claude_ai",
+        content=parsed["career"] + "\n",
+        source_trust="operator",
+    )
+    await db.commit()
+
+    result = await sync_owned_sections_from_file(db=db, bridge_path=path)
+
+    assert "career" in result["unchanged"]
+    assert result["demoted"] == []

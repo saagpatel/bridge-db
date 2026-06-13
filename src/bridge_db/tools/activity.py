@@ -11,6 +11,7 @@ from pydantic import Field
 
 from bridge_db import config
 from bridge_db.audit import log_audit
+from bridge_db.auth import clamp_source_trust, require_caller
 from bridge_db.db import (
     get_db,
     insert_activity_row,
@@ -97,6 +98,10 @@ def register(mcp: FastMCP) -> None:
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Log a session activity entry. Auto-prunes to the most recent 50 entries per source."""
+        require_caller(ctx, caller, tool="log_activity")
+        source_trust, source_trust_clamped = clamp_source_trust(
+            source_trust, caller=caller, tool="log_activity"
+        )
         db = get_db(ctx)
         ts = timestamp or str(date.today())
         resolution = resolve_project(project_name)
@@ -135,6 +140,7 @@ def register(mcp: FastMCP) -> None:
             "project_name": project_name,
             "canonical_key": resolution.canonical_key,
             "source_trust": source_trust,
+            "source_trust_clamped": source_trust_clamped,
             "timestamp": ts,
         }
 
@@ -428,6 +434,7 @@ def register(mcp: FastMCP) -> None:
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Record downstream proof, then mark one SHIPPED activity event PROCESSED."""
+        require_caller(ctx, caller, tool="confirm_shipped_sync")
         system = downstream_system.strip()
         ref = downstream_ref.strip()
         if not system:
