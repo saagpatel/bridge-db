@@ -48,7 +48,7 @@ Checklist
 2. Confirm the config contains an `mcpServers` block.
 3. Confirm there is a `bridge-db` entry with:
    - `command = "uv"`
-   - `args = ["run", "--directory", "~/Projects/bridge-db", "python", "-m", "bridge_db"]`
+   - `args = ["run", "--directory", "<path-to-bridge-db>", "python", "-m", "bridge_db"]`
 4. Restart Claude Desktop after editing the config.
 5. Verify Claude.ai can see bridge-db tools.
 6. Run one read-only tool first, preferably `health`.

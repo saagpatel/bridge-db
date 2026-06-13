@@ -66,7 +66,7 @@ Register bridge-db in Claude Desktop's MCP config:
       "args": [
         "run",
         "--directory",
-        "~/Projects/bridge-db",
+        "<path-to-bridge-db>",
         "python",
         "-m",
         "bridge_db"

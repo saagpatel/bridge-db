@@ -77,7 +77,7 @@ claude mcp add --scope user bridge-db \
 
 ## What This Project Is
 
-bridge-db is an active local project in the /Users/d/Projects portfolio.
+bridge-db is an active local project in the ~/Projects portfolio.
 
 ## Current State
 
