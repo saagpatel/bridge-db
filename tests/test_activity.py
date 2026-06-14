@@ -386,10 +386,16 @@ async def test_record_shipped_event_disposition_rejects_receipted_event(
 
 
 async def test_mark_shipped_processed_idempotent(
-    db: aiosqlite.Connection, fns: dict[str, Any]
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", tmp_path / "bridge.md")
     ctx = make_ctx(db)
-    await fns["log_activity"](caller="cc", project_name="A", summary="s", tags=["SHIPPED"], ctx=ctx)
+    await fns["log_activity"](
+        caller="cc", project_name="A", summary="s", tags=["TASK_DONE"], ctx=ctx
+    )
     cursor = await db.execute("SELECT id FROM activity_log")
     row = await cursor.fetchone()
     assert row is not None
@@ -419,9 +425,12 @@ async def test_mark_shipped_processed_audit_names_activity_ids(
     """Compatibility processing audit rows should be enough to review what was touched."""
     audit_path = tmp_path / "audit.jsonl"
     monkeypatch.setattr(config, "AUDIT_LOG_PATH", audit_path)
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", tmp_path / "bridge.md")
 
     ctx = make_ctx(db)
-    await fns["log_activity"](caller="cc", project_name="A", summary="s", tags=["SHIPPED"], ctx=ctx)
+    await fns["log_activity"](
+        caller="cc", project_name="A", summary="s", tags=["TASK_DONE"], ctx=ctx
+    )
     cursor = await db.execute("SELECT id FROM activity_log")
     row = await cursor.fetchone()
     assert row is not None
@@ -450,14 +459,14 @@ async def test_mark_shipped_processed_empty_raises(
         await fns["mark_shipped_processed"](activity_ids=[], ctx=ctx)
 
 
-async def test_mark_shipped_processed_flags_shipped_bypass(
+async def test_mark_shipped_processed_rejects_shipped_rows(
     db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """F7: a SHIPPED event processed via the receiptless path is flagged (and audited
-    non-ok) so the drift vector is observable at the source, while a non-shipped
-    operational event passes through clean."""
+    """F7: SHIPPED rows require proof or disposition, while non-shipped operational
+    events still pass through the compatibility path."""
     audit_path = tmp_path / "audit.jsonl"
     monkeypatch.setattr(config, "AUDIT_LOG_PATH", audit_path)
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", tmp_path / "bridge.md")
     ctx = make_ctx(db)
 
     # operational (non-shipped) event — legitimate use, no receipt lifecycle
@@ -475,14 +484,18 @@ async def test_mark_shipped_processed_flags_shipped_bypass(
     ops_result = await fns["mark_shipped_processed"](activity_ids=[ops_id], ctx=ctx)
     assert ops_result["shipped_bypass_ids"] == []
 
-    shipped_result = await fns["mark_shipped_processed"](activity_ids=[shipped_id], ctx=ctx)
-    assert shipped_result["shipped_bypass_ids"] == [shipped_id]
-    assert shipped_result["updated"] == 1  # still processed — guard is non-breaking
+    with pytest.raises(ToolError, match="confirm_shipped_sync"):
+        await fns["mark_shipped_processed"](activity_ids=[shipped_id], ctx=ctx)
 
     last = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
     assert last["tool"] == "mark_shipped_processed"
     assert last["ok"] is False
-    assert f"shipped_bypass_ids=[{shipped_id}]" in last["detail"]
+    assert f"blocked_shipped_ids=[{shipped_id}]" in last["detail"]
+
+    cursor2 = await db.execute("SELECT tags FROM activity_log WHERE id = ?", (shipped_id,))
+    row2 = await cursor2.fetchone()
+    assert row2 is not None
+    assert "PROCESSED" not in json.loads(row2["tags"])
 
 
 async def test_confirm_shipped_sync_requires_downstream_proof(
@@ -753,7 +766,11 @@ async def test_mark_shipped_processed_triggers_auto_export(
 
     ctx = make_ctx(db)
     await fns["log_activity"](
-        caller="cc", project_name="TestProject", summary="shipped v1", tags=["SHIPPED"], ctx=ctx
+        caller="cc",
+        project_name="TestProject",
+        summary="operational v1",
+        tags=["TASK_DONE"],
+        ctx=ctx,
     )
     cursor = await db.execute("SELECT id FROM activity_log")
     row = await cursor.fetchone()

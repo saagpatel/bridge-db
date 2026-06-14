@@ -137,10 +137,13 @@ mcp__bridge_db__get_cost_history()          # cost trend
 `record_shipped_event_disposition` is for non-receipt decisions only. It does
 not add `PROCESSED` and does not write to `shipped_sync_receipts`.
 
-`mark_shipped_processed` remains a compatibility path only. If it appears in
-`audit_tail`, use the audit `detail` field (`activity_ids`, `updated_ids`,
-`missing_ids`) plus `status.processed_shipped_without_receipt` to confirm no
-receipt-backed shipped event was bypassed.
+`mark_shipped_processed` remains a compatibility path only for non-shipped
+operational rows. It refuses `SHIPPED` activity ids before updating anything.
+If a blocked `mark_shipped_processed` attempt appears in `audit_tail`, route the
+row to `confirm_shipped_sync` with downstream proof or
+`record_shipped_event_disposition` with an explicit policy reason. If
+`status.processed_shipped_without_receipt` is nonzero, treat it as historical or
+manual drift until proven otherwise.
 
 ### update_section (Claude.ai writes)
 

@@ -189,6 +189,19 @@ def _has_detailed_mark_audit(rows: list[dict[str, Any]]) -> bool:
     return all(token in detail for token in ("activity_ids=", "updated_ids=", "missing_ids="))
 
 
+def mark_audit_posture(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "none observed"
+    detail = str(rows[0].get("detail") or "")
+    if "blocked_shipped_ids=" in detail:
+        return "blocked shipped misuse observed"
+    if "shipped_bypass_ids=" in detail:
+        return "legacy shipped bypass observed"
+    if _has_detailed_mark_audit(rows):
+        return "non-shipped compatibility detail current"
+    return "legacy terse detail observed"
+
+
 async def run_dogfood() -> bool:
     """Run the read-only bridge observability dogfood checklist."""
     from bridge_db import config
@@ -208,7 +221,7 @@ async def run_dogfood() -> bool:
     recent_confirm = collect_audit_tail(tool="confirm_shipped_sync", limit=10)
     recent_mark = collect_audit_tail(tool="mark_shipped_processed", limit=10)
     recall = collect_recall_stats(days=7)
-    mark_detail_is_current = _has_detailed_mark_audit(recent_mark)
+    mark_posture = mark_audit_posture(recent_mark)
 
     print("bridge-db dogfood")
     print(f"  Overall: {summary['overall']}")
@@ -231,10 +244,7 @@ async def run_dogfood() -> bool:
     print(f"  Recent audit rows checked: {len(recent_audit)}")
     print(f"  Latest confirm_shipped_sync: {_latest_detail(recent_confirm)}")
     print(f"  Latest mark_shipped_processed: {_latest_detail(recent_mark)}")
-    print(
-        "  Compatibility audit detail:"
-        f" {'current' if mark_detail_is_current else 'legacy terse detail observed'}"
-    )
+    print(f"  Compatibility audit posture: {mark_posture}")
 
     return bool(
         summary["ok"]

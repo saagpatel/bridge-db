@@ -17,6 +17,10 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
   from proof receipts: `record_shipped_event_disposition` records why a
   `SHIPPED` row is intentionally not receipt-ready without adding `PROCESSED`
   and without writing to `shipped_sync_receipts`.
+- The legacy `mark_shipped_processed` path is now non-shipped-only. It refuses
+  any `SHIPPED` activity id before updating rows; shipped artifacts require
+  `confirm_shipped_sync` with downstream proof or an explicit
+  `record_shipped_event_disposition` decision.
 - `get_shipped_events` now includes a computed `notion_sync` contract from the
   canonical project registry. Bridge-sync agents should update Notion only when
   `notion_sync.state == "ready"` and the referenced page readback proves the
@@ -24,7 +28,7 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
   local/meta receipts that should be processed against the policy reference, not
   Notion. `unmatched`, `no_notion_target`, and `registry_unavailable` events
   stay pending instead of being guessed through fuzzy search.
-- `health` / `status` also surface `processed_shipped_without_receipt` as a soft drift signal for older or manual `mark_shipped_processed` paths, `actionable_unprocessed_shipped` as the unprocessed shipped count after explicit dispositions are excluded, and `fts_missing` / `fts_orphaned` as hard recall-index health signals. Prefer `confirm_shipped_sync` for new downstream syncs.
+- `health` / `status` also surface `processed_shipped_without_receipt` as a soft drift signal for historical or manual receiptless paths, `actionable_unprocessed_shipped` as the unprocessed shipped count after explicit dispositions are excluded, and `fts_missing` / `fts_orphaned` as hard recall-index health signals. Prefer `confirm_shipped_sync` for new downstream syncs.
 - Local verification should be refreshed from source before making current-state
   claims: run `uv run pytest`, `uv run pyright`, `uv run ruff check`, and the
   live `--doctor`, `--status`, and `--dogfood` checks.
@@ -153,6 +157,9 @@ For non-receipt handling, use `record_shipped_event_disposition` only when an
 operator policy says the row should remain auditable but should not proceed to a
 downstream receipt. The disposition appears as `policy_disposition` on
 `get_shipped_events`; it does not write a receipt and does not add `PROCESSED`.
+Do not use `mark_shipped_processed` for `SHIPPED` rows; it is retained only for
+non-shipped operational events such as `TASK_DONE`, `APPROVAL_SENT`,
+`PLANNING_APPLIED`, or `REVIEW_CLOSED`.
 
 ## Startup Sync
 

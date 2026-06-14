@@ -36,7 +36,8 @@ Expected clean signals:
 - `fts_orphaned=0`
 - `wal_warning=False`
 - latest shipped-sync audit rows use `confirm_shipped_sync` with downstream
-  proof, not only `mark_shipped_processed`
+  proof or `record_shipped_event_disposition` with an explicit policy reason,
+  not receiptless `mark_shipped_processed`
 - each unprocessed shipped event has an inspected `notion_sync` state from
   `get_shipped_events(unprocessed_only=True)`. Only `ready` events may proceed
   to Notion update/readback/`confirm_shipped_sync`; `meta_no_target` events may
@@ -46,6 +47,10 @@ Expected clean signals:
   search.
 - if a Claude Code session ended since the last review, the newest
   `CC session ended` row has a matching `content_index` row
+- any `mark_shipped_processed` audit row that mentions `blocked_shipped_ids`
+  represents a refused legacy-path attempt. Re-route those ids to proof-backed
+  `confirm_shipped_sync` or explicit `record_shipped_event_disposition`; do not
+  treat the attempt as processed.
 
 If FTS drift appears, run:
 
