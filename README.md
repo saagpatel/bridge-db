@@ -2,7 +2,7 @@
 
 SQLite-backed MCP server for shared state across Claude.ai, Claude Code, Codex, and related local ops tools.
 
-bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLite store and 24 MCP tools across state, diagnostics, FTS5 lexical `recall`, shipped-event sync receipts, shipped-event dispositions, and observability over the audit and recall logs. The markdown bridge file is regenerated from the DB via `export_bridge_markdown` and remains available as a fallback for file-based clients.
+bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLite store and a focused MCP tool surface across state, diagnostics, FTS5 lexical `recall`, shipped-event sync receipts, shipped-event dispositions, and observability over the audit and recall logs. The markdown bridge file is regenerated from the DB via `export_bridge_markdown` and remains available as a fallback for file-based clients.
 
 ## Current State
 
@@ -25,9 +25,9 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
   Notion. `unmatched`, `no_notion_target`, and `registry_unavailable` events
   stay pending instead of being guessed through fuzzy search.
 - `health` / `status` also surface `processed_shipped_without_receipt` as a soft drift signal for older or manual `mark_shipped_processed` paths, `actionable_unprocessed_shipped` as the unprocessed shipped count after explicit dispositions are excluded, and `fts_missing` / `fts_orphaned` as hard recall-index health signals. Prefer `confirm_shipped_sync` for new downstream syncs.
-- Local verification is currently green as of 2026-06-13: `263` tests passing,
-  `ruff` clean, and `pyright` clean. Live `--doctor`, `--status`, and
-  `--dogfood` checks are healthy.
+- Local verification should be refreshed from source before making current-state
+  claims: run `uv run pytest`, `uv run pyright`, `uv run ruff check`, and the
+  live `--doctor`, `--status`, and `--dogfood` checks.
 - Project is in steady maintenance. Scope is pinned to cross-system *state* coordination plus lexical `recall` plus observability; it is not a knowledge store.
 - The Bridge Sync burn-in heartbeat has been retired after a clean post-run
   review. The 2026-05-30 dependency refresh updated the lockfile for current
@@ -57,7 +57,11 @@ Codex      ──► MCP stdio ──► bridge-db process ──►  ~/.local/s
 
 No shared daemon. Each MCP client spawns its own `bridge-db` process via stdio. WAL mode + `PRAGMA busy_timeout=5000` handles concurrent writes safely.
 
-## Tools (24)
+## Tools
+
+Verify the current tool count from source with
+`rg '@mcp\.tool' src/bridge_db -c`. As of the 2026-06-14 source check, the
+surface is 24 tools across these 9 modules:
 
 | Module | Tools |
 |---|---|

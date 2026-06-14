@@ -26,7 +26,7 @@ uv run python -m bridge_db --promote-section career  # operator label promotion 
 
 - **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=5000`). Schema at v8 — v6 added `canonical_key` to `pending_handoffs` (handoff canonical resolution); v7 added `source_trust` provenance columns to all four instruction-bearing tables (`context_sections`, `pending_handoffs`, `activity_log`, `system_snapshots`); v8 added `shipped_event_dispositions` so non-receipt shipped-event policy decisions stay separate from proof receipts. Auth state lives in `principals.json` (not the DB); no schema change for Stage-1 auth.
 - **MCP transport**: stdio (stdout = JSON-RPC, all logging → stderr)
-- **24 MCP tools** across 9 modules: activity, handoffs, context, snapshots, cost, export, health, recall (FTS5 lexical search; Phase −1 of the semantic memory layer), audit (read-side observability over the JSONL audit + recall query logs). `health` / `status` include signals for pending handoffs, raw and actionable unprocessed shipped events, receiptless processed shipped events, FTS index drift, WAL size, and bridge-file freshness.
+- **MCP tools**: verify the current count with `rg '@mcp\.tool' src/bridge_db -c`. As of the 2026-06-14 source check, there are 24 tools across 9 modules: activity, handoffs, context, snapshots, cost, export, health, recall (FTS5 lexical search; Phase −1 of the semantic memory layer), audit (read-side observability over the JSONL audit + recall query logs). `health` / `status` include signals for pending handoffs, raw and actionable unprocessed shipped events, receiptless processed shipped events, FTS index drift, WAL size, and bridge-file freshness.
 - **Context access**: `get_db(ctx)` helper casts lifespan context to `aiosqlite.Connection`
 - **Tool registration**: `CaptureMCP` pattern in tests — decorators capture raw async fns
 - **FTS5 invariant**: every write path that touches `context_sections`, `activity_log`, `system_snapshots`, or `pending_handoffs` calls `upsert_fts_entry` / `gc_fts_orphans` from [db.py](src/bridge_db/db.py) in the same transaction. Auto-prune paths in `log_activity` and `save_snapshot` GC orphan FTS rows. (`canonical_key` is not FTS-indexed, so it does not affect this invariant.)
@@ -81,7 +81,7 @@ bridge-db is an active local project in the ~/Projects portfolio.
 
 ## Current State
 
-This project is in steady-state maintenance. The codebase is stable, the DB is live, core features are shipped and documented, and observability over the two JSONL logs is now closed (was a half-built feedback loop). 24 MCP tools across 9 modules, 263 tests green, pyright + ruff clean. Scope is explicitly pinned to cross-system *state* coordination plus lexical `recall`, shipped-event sync receipts and dispositions, plus observability — expansion into a knowledge store is ruled out.
+This project is in steady-state maintenance. The codebase is stable, the DB is live, core features are shipped and documented, and observability over the two JSONL logs is now closed (was a half-built feedback loop). The current tool surface should be verified from source with `rg '@mcp\.tool' src/bridge_db -c`; the verifier is `uv run pytest`, `uv run pyright`, and `uv run ruff check`. Scope is explicitly pinned to cross-system *state* coordination plus lexical `recall`, shipped-event sync receipts and dispositions, plus observability — expansion into a knowledge store is ruled out.
 
 ## Stack
 
@@ -90,7 +90,7 @@ This project is in steady-state maintenance. The codebase is stable, the DB is l
 - **Database**: SQLite via `aiosqlite`
 - **Type checking**: pyright (strict)
 - **Lint**: ruff
-- **Test**: pytest (263 tests)
+- **Test**: pytest (`uv run pytest`; do not hardcode the current test count)
 
 ## How To Run
 

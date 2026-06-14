@@ -58,7 +58,8 @@ Checklist
 Routine verifier refreshed on 2026-06-06. Claude Desktop registration details
 below remain from the earlier integration verification.
 
-- `uv run pytest` passes locally with 263 tests.
+- `uv run pytest` passes locally. Use fresh output for the current test count;
+  do not copy old counts from historical docs.
 - `uv run pyright` passes locally.
 - `uv run ruff check` passes locally.
 - `uv run python -m bridge_db --doctor` passes locally.
@@ -74,7 +75,8 @@ below remain from the earlier integration verification.
 - Claude.ai read access is confirmed with a successful `mcp__bridge_db__health()` call after restart.
 - Claude.ai direct write behavior has been proven through bridge-db MCP tools.
 - Startup sync plus export has been verified end to end.
-- Latest local repo verification is green: `263` tests, `ruff` clean, `pyright` clean.
+- Latest local repo verification should be stated from fresh verifier output:
+  `uv run pytest`, `uv run pyright`, and `uv run ruff check`.
 - Live status currently reports no pending handoffs and no actionable unprocessed
   shipped events; raw unprocessed rows may remain when each has a non-receipt
   policy disposition.
