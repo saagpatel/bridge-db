@@ -13,6 +13,7 @@ import bridge_db.config as cfg
 import bridge_db.tools.recall as recall_tool
 from bridge_db import auth, config
 from bridge_db.__main__ import (
+    mark_audit_posture,
     run_dogfood,
     run_enroll,
     run_list_principals,
@@ -31,6 +32,26 @@ from bridge_db.db import (
     open_db,
     upsert_fts_entry,
 )
+
+
+def test_mark_audit_posture_classifies_legacy_and_blocked_rows() -> None:
+    assert (
+        mark_audit_posture(
+            [
+                {
+                    "detail": (
+                        "activity_ids=[1] updated_ids=[1] missing_ids=[] "
+                        "updated=1/1 shipped_bypass_ids=[1]"
+                    )
+                }
+            ]
+        )
+        == "legacy shipped bypass observed"
+    )
+    assert (
+        mark_audit_posture([{"detail": "activity_ids=[1] blocked_shipped_ids=[1]"}])
+        == "blocked shipped misuse observed"
+    )
 
 
 @pytest.mark.asyncio
@@ -189,7 +210,7 @@ async def test_run_dogfood_reports_read_only_observability(
     assert "processed_shipped_without_receipt=0" in captured
     assert "FTS: expected=0, indexed=0, missing=0, orphaned=0" in captured
     assert "Latest confirm_shipped_sync: activity_id=1 downstream=notion:abc" in captured
-    assert "Compatibility audit detail: current" in captured
+    assert "Compatibility audit posture: non-shipped compatibility detail current" in captured
 
 
 @pytest.mark.asyncio
@@ -391,8 +412,12 @@ asyncio.run(main())
     if flag == "--doctor":
         assert str(db_path) in result.stdout
         assert str(audit_log_path) in result.stdout
-        assert "24 MCP tools" in (repo_root / "README.md").read_text(encoding="utf-8")
-        assert "263 tests" in (repo_root / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "Verify the current tool count from source" in (
+            repo_root / "README.md"
+        ).read_text(encoding="utf-8")
+        assert "do not hardcode the current test count" in (
+            repo_root / "CLAUDE.md"
+        ).read_text(encoding="utf-8")
     if flag == "--status":
         assert "contexts=0" in result.stdout
         assert "Attention:" not in result.stdout

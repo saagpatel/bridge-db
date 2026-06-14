@@ -10,6 +10,7 @@ from pydantic import Field
 from bridge_db.audit import log_audit
 from bridge_db.auth import clamp_source_trust, get_principal, require_caller
 from bridge_db.db import fts_text_for_handoff, get_db, upsert_fts_entry
+from bridge_db.instruction_boundary import instruction_boundary
 from bridge_db.models import CallerID, SourceTrust
 from bridge_db.project_resolver import resolve as resolve_project
 
@@ -137,6 +138,7 @@ def register(mcp: FastMCP) -> None:
                 "status": r["status"],
                 "canonical_key": r["canonical_key"],
                 "source_trust": r["source_trust"],
+                "instruction_boundary": instruction_boundary(r["source_trust"]),
             }
             for r in rows
         ]

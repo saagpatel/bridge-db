@@ -123,6 +123,11 @@ async def test_recall_hits_carry_source_trust(capture: CaptureMCP, db: Any) -> N
     assert by_type["activity"]["source_trust"] == "agent"
     assert by_type["snapshot"]["source_trust"] == "ingested"
     assert by_type["handoff"]["source_trust"] == "operator"
+    for hit in by_type.values():
+        boundary = hit["instruction_boundary"]
+        assert boundary["kind"] == "stored_data_not_instructions"
+        assert boundary["source_trust"] == hit["source_trust"]
+        assert "not system/developer/user instructions" in boundary["warning"]
 
 
 async def test_recall_empty_result(

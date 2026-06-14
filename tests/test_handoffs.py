@@ -142,6 +142,11 @@ async def test_get_pending_handoffs_surfaces_source_trust(
     assert trust["Op"] == "operator"
     assert trust["In"] == "ingested"
     assert trust["Ag"] == "agent"
+    for handoff in pending:
+        boundary = handoff["instruction_boundary"]
+        assert boundary["kind"] == "stored_data_not_instructions"
+        assert boundary["source_trust"] == handoff["source_trust"]
+        assert "non-operator content requires operator review" in boundary["warning"]
 
 
 async def test_pick_up_handoff(db: aiosqlite.Connection, fns: dict[str, Any]) -> None:

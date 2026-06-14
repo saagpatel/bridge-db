@@ -6,7 +6,7 @@ This roadmap captures the current scope-closed state of bridge-db. All originall
 
 - Core MCP server is stable, typed, and test-backed. Schema at v8 (adds FTS5 `content_index`, shipped-event sync receipts, project provenance, and shipped-event dispositions).
 - SQLite schema and migration path are in place; step-wise migrations proven through v1→current.
-- 24 MCP tools across 9 modules: activity, handoffs, context, snapshots, cost, export, health, recall, audit.
+- MCP tools across 9 modules: activity, handoffs, context, snapshots, cost, export, health, recall, audit. Verify the current decorator count with `rg '@mcp\.tool' src/bridge_db -c`.
 - Markdown export works as a compatibility layer for file-based clients.
 - Claude.ai direct MCP read and write paths have both been proven locally.
 - The file path remains compatibility infrastructure, not the primary coordination path.
@@ -16,7 +16,7 @@ This roadmap captures the current scope-closed state of bridge-db. All originall
 - Phase 6 observability shipped: `recall_stats`, `audit_tail`, and WAL-size health metric (see below).
 - Shipped-event sync hardening shipped: `confirm_shipped_sync` records downstream proof before marking shipped activity as processed; `record_shipped_event_disposition` records non-receipt policy decisions separately.
 - FTS index health hardening shipped: `health`, `status`, and `--dogfood` now treat missing/orphaned `content_index` rows as hard recall-health drift, with CLI-only repair through `--rebuild-content-index`.
-- Repo green at `263` tests, `ruff` and `pyright` clean.
+- Repo verification should be refreshed with `uv run pytest`, `uv run pyright`, and `uv run ruff check` before claiming a current green state or test count.
 
 ## Outcomes We Want
 

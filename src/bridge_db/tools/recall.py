@@ -14,6 +14,7 @@ from pydantic import Field
 from bridge_db import config
 from bridge_db.audit import iter_jsonl
 from bridge_db.db import get_db
+from bridge_db.instruction_boundary import instruction_boundary
 
 logger = logging.getLogger("bridge_db.tools.recall")
 
@@ -222,6 +223,7 @@ def register(mcp: FastMCP) -> None:
                     "bm25_score": r["bm25_score"],
                     "preview": preview,
                     "source_trust": source_trust,
+                    "instruction_boundary": instruction_boundary(source_trust),
                 }
             )
 

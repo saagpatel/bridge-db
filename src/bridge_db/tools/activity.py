@@ -371,12 +371,10 @@ def register(mcp: FastMCP) -> None:
         operational events (TASK_DONE / APPROVAL_SENT / PLANNING_APPLIED /
         REVIEW_CLOSED) that have no shipped-receipt lifecycle.
 
-        Guard (F7): if any passed id IS tagged SHIPPED, processing it here bypasses
-        the receipt and creates exactly the drift ``health.processed_shipped_without_receipt``
-        detects. We still process it (non-breaking for existing callers) but flag it
-        loudly via a warning + a non-ok audit record and return the offending ids in
-        ``shipped_bypass_ids`` so the misuse is observable at the source, not only
-        after the fact.
+        Guard (F7): if any passed id is tagged SHIPPED, this tool refuses the
+        whole batch before updating rows. SHIPPED rows must either get
+        receipt-backed processing through ``confirm_shipped_sync`` or an explicit
+        non-receipt policy decision through ``record_shipped_event_disposition``.
         """
         if not activity_ids:
             raise ToolError("activity_ids must not be empty")
@@ -385,7 +383,8 @@ def register(mcp: FastMCP) -> None:
         updated = 0
         updated_ids: list[int] = []
         missing_ids: list[int] = []
-        shipped_bypass_ids: list[int] = []
+        blocked_shipped_ids: list[int] = []
+        tags_by_activity_id: dict[int, list[str]] = {}
 
         # Tags are not indexed in content_index (see fts_text_for_activity), so
         # updating tags does not require re-indexing. If fts_text_for_activity
@@ -398,8 +397,34 @@ def register(mcp: FastMCP) -> None:
                 missing_ids.append(activity_id)
                 continue
             current_tags: list[str] = json.loads(row["tags"])
+            tags_by_activity_id[activity_id] = current_tags
             if "SHIPPED" in current_tags:
-                shipped_bypass_ids.append(activity_id)
+                blocked_shipped_ids.append(activity_id)
+
+        if blocked_shipped_ids:
+            logger.warning(
+                "mark_shipped_processed: refused SHIPPED ids %s; use confirm_shipped_sync "
+                "for receipt-backed shipped artifacts or record_shipped_event_disposition "
+                "for explicit non-receipt decisions",
+                blocked_shipped_ids,
+            )
+            log_audit(
+                "mark_shipped_processed",
+                None,
+                None,
+                ok=False,
+                detail=(
+                    f"activity_ids={activity_ids} missing_ids={missing_ids} "
+                    f"blocked_shipped_ids={blocked_shipped_ids}"
+                ),
+            )
+            raise ToolError(
+                "mark_shipped_processed refuses SHIPPED activity ids "
+                f"{blocked_shipped_ids}; use confirm_shipped_sync with downstream proof "
+                "or record_shipped_event_disposition for an explicit non-receipt decision"
+            )
+
+        for activity_id, current_tags in tags_by_activity_id.items():
             if "PROCESSED" not in current_tags:
                 current_tags.append("PROCESSED")
                 await db.execute(
@@ -413,21 +438,14 @@ def register(mcp: FastMCP) -> None:
 
         await _export_bridge_markdown_after_processing(db)
 
-        if shipped_bypass_ids:
-            logger.warning(
-                "mark_shipped_processed: SHIPPED ids %s processed without a receipt — "
-                "use confirm_shipped_sync for shipped artifacts (F7 drift vector)",
-                shipped_bypass_ids,
-            )
         log_audit(
             "mark_shipped_processed",
             None,
             None,
-            ok=not shipped_bypass_ids,
+            ok=True,
             detail=(
                 f"activity_ids={activity_ids} updated_ids={updated_ids} "
                 f"missing_ids={missing_ids} updated={updated}/{len(activity_ids)}"
-                + (f" shipped_bypass_ids={shipped_bypass_ids}" if shipped_bypass_ids else "")
             ),
         )
         logger.info("mark_shipped_processed: updated %d/%d entries", updated, len(activity_ids))
@@ -438,7 +456,7 @@ def register(mcp: FastMCP) -> None:
             "activity_ids": activity_ids,
             "updated_ids": updated_ids,
             "missing_ids": missing_ids,
-            "shipped_bypass_ids": shipped_bypass_ids,
+            "shipped_bypass_ids": [],
         }
 
     @mcp.tool()

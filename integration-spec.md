@@ -137,10 +137,13 @@ mcp__bridge_db__get_cost_history()          # cost trend
 `record_shipped_event_disposition` is for non-receipt decisions only. It does
 not add `PROCESSED` and does not write to `shipped_sync_receipts`.
 
-`mark_shipped_processed` remains a compatibility path only. If it appears in
-`audit_tail`, use the audit `detail` field (`activity_ids`, `updated_ids`,
-`missing_ids`) plus `status.processed_shipped_without_receipt` to confirm no
-receipt-backed shipped event was bypassed.
+`mark_shipped_processed` remains a compatibility path only for non-shipped
+operational rows. It refuses `SHIPPED` activity ids before updating anything.
+If a blocked `mark_shipped_processed` attempt appears in `audit_tail`, route the
+row to `confirm_shipped_sync` with downstream proof or
+`record_shipped_event_disposition` with an explicit policy reason. If
+`status.processed_shipped_without_receipt` is nonzero, treat it as historical or
+manual drift until proven otherwise.
 
 ### update_section (Claude.ai writes)
 
@@ -219,6 +222,32 @@ The `update_section` tool enforces this at the DB layer — no path bypasses it
 for MCP writes. Compatibility file edits are limited to Claude.ai-owned sections
 and are imported through `sync_from_file` on Claude Code startup or explicit call;
 the live watcher remains deferred.
+
+## Principal Capability Matrix
+
+Auth is currently a canary, not a global enforcement flip. In
+`BRIDGE_DB_AUTH_MODE=warn`, a connection-bound principal/caller mismatch is
+allowed but audited through `auth.mismatch`; in future `enforce` canaries, the
+same mismatch is rejected. Do not move the machine-wide default to `enforce`
+until each active client has a current enrolled token, verified spawn env, and a
+green read/write smoke check.
+
+All principals may use read-side tools for bridge-owned state:
+`health`, `status`, `get_recent_activity`, `get_shipped_events`,
+`get_pending_handoffs`, `get_section`, `get_all_sections`, `get_latest_snapshot`,
+`get_cost_history`, `recall`, `recall_stats`, and `audit_tail`.
+
+| Principal | Write capabilities | Boundaries |
+|---|---|---|
+| `codex` | `log_activity(caller="codex")`, `save_snapshot(caller="codex")`, `record_cost(caller="codex")`, `confirm_shipped_sync(caller="codex")`, `record_shipped_event_disposition(caller="codex")`, `pick_up_handoff`/`clear_handoff` where the handoff gate allows it | Owns Codex truth and verification; must not write or refresh `cc` snapshots or Claude.ai sections |
+| `cc` | `log_activity(caller="cc")`, `save_snapshot(caller="cc")`, `record_cost(caller="cc")`, `confirm_shipped_sync(caller="cc")`, `record_shipped_event_disposition(caller="cc")`, `pick_up_handoff`/`clear_handoff` where the handoff gate allows it | Owns Claude Code state and session telemetry; must not write Codex snapshots or Claude.ai sections |
+| `claude_ai` | `update_section` for `career`, `speaking`, `research`, and `capabilities`; `create_handoff(caller="claude_ai")`; compatibility file edits to those four sections followed by `sync_from_file` | Advisory and dispatch surface; must not write Codex/CC snapshots or act as local execution proof |
+| `notion_os` | `log_activity(caller="notion_os")`, `record_cost(caller="notion_os")`, `confirm_shipped_sync(caller="notion_os")`, `record_shipped_event_disposition(caller="notion_os")` | Owns Notion-side receipts/activity it actually verified; must not infer project mappings beyond `notion_sync` |
+| `personal_ops` | `log_activity(caller="personal_ops")`, `record_cost(caller="personal_ops")`, `confirm_shipped_sync(caller="personal_ops")`, `record_shipped_event_disposition(caller="personal_ops")` | Owns operator-facing coordination receipts; must not replace repo-local or bridge-db verification |
+
+`mark_shipped_processed` is intentionally absent from the shipped-event write
+path above. It remains available only for non-shipped operational rows and
+refuses `SHIPPED` activity ids.
 
 ---
 

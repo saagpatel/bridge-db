@@ -16,6 +16,7 @@ from bridge_db.db import (
     get_db,
     upsert_fts_entry,
 )
+from bridge_db.instruction_boundary import instruction_boundary
 from bridge_db.models import SECTION_OWNERS, CallerID, SourceTrust, ownership_error
 
 logger = logging.getLogger("bridge_db.tools.context")
@@ -217,7 +218,7 @@ def register(mcp: FastMCP) -> None:
         """Return a single context section's content and metadata."""
         db = get_db(ctx)
         cursor = await db.execute(
-            "SELECT section_name, owner, content, updated_at FROM context_sections WHERE section_name = ?",
+            "SELECT section_name, owner, content, updated_at, source_trust FROM context_sections WHERE section_name = ?",
             (section_name,),
         )
         row = await cursor.fetchone()
@@ -228,6 +229,8 @@ def register(mcp: FastMCP) -> None:
             "owner": row["owner"],
             "content": row["content"],
             "updated_at": row["updated_at"],
+            "source_trust": row["source_trust"],
+            "instruction_boundary": instruction_boundary(row["source_trust"]),
         }
 
     @mcp.tool()
@@ -237,7 +240,7 @@ def register(mcp: FastMCP) -> None:
         """Return all context sections as a dict keyed by section_name."""
         db = get_db(ctx)
         cursor = await db.execute(
-            "SELECT section_name, owner, content, updated_at FROM context_sections ORDER BY section_name"
+            "SELECT section_name, owner, content, updated_at, source_trust FROM context_sections ORDER BY section_name"
         )
         rows = await cursor.fetchall()
         return {
@@ -245,6 +248,8 @@ def register(mcp: FastMCP) -> None:
                 "owner": r["owner"],
                 "content": r["content"],
                 "updated_at": r["updated_at"],
+                "source_trust": r["source_trust"],
+                "instruction_boundary": instruction_boundary(r["source_trust"]),
             }
             for r in rows
         }
