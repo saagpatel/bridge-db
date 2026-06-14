@@ -177,7 +177,7 @@ Scope note
 
 Future work is maintenance-only:
 - Keep docs and tool contracts aligned when MCP surfaces change.
-- Prefer `confirm_shipped_sync` over raw `mark_shipped_processed` whenever a shipped event was synced to a downstream system.
+- Do not use `mark_shipped_processed` for `SHIPPED` rows; shipped rows require `confirm_shipped_sync` with proof or `record_shipped_event_disposition` with an explicit policy reason.
 - Watch for WAL bloat via `health.wal_warning` (>10 MiB). Run `PRAGMA wal_checkpoint(TRUNCATE)` if needed.
 - Watch for FTS drift via `status.signals.fts_missing` and `status.signals.fts_orphaned`. Run `uv run python -m bridge_db --rebuild-content-index` if drift appears, then rerun `--status` and `--dogfood`.
 - Keep local hooks and external writers on bridge-db CLI/MCP write paths. Do not reintroduce direct `sqlite3` inserts into `activity_log`.

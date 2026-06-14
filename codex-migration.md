@@ -23,7 +23,7 @@ After registration, bridge-db tools appear as `bridge-db__log_activity`, etc.
 | `bridge-db__get_recent_activity` | — | Read recent activity (CC + Codex) |
 | `bridge-db__get_shipped_events` | — | Get SHIPPED-tagged events |
 | `bridge-db__confirm_shipped_sync` | `"codex"` | Record downstream proof, then mark one SHIPPED entry PROCESSED |
-| `bridge-db__mark_shipped_processed` | — | Compatibility-only processed marker for legacy/manual paths |
+| `bridge-db__mark_shipped_processed` | — | Compatibility-only processed marker for non-shipped operational rows; do not use for `SHIPPED` |
 | `bridge-db__create_handoff` | `"claude_ai"` | Create a project handoff (Claude.ai only) |
 | `bridge-db__get_pending_handoffs` | — | List pending handoffs |
 | `bridge-db__pick_up_handoff` | `"codex"` | Mark handoff as active |
