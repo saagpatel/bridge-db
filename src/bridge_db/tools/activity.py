@@ -27,6 +27,66 @@ _SHIPPED_EVENT_DISPOSITION_TYPES = {
     "superseded_without_receipt",
     "declined_mapping",
 }
+_SESSION_BOUNDARY_TAG = "session-boundary"
+_LIFECYCLE_ACTIVITY_SQL = """
+(
+    source = 'cc'
+    AND (
+        summary LIKE 'CC session ended%'
+        OR EXISTS (SELECT 1 FROM json_each(tags) WHERE value = 'session-boundary')
+    )
+)
+"""
+
+
+def _decode_tags(raw: str) -> list[str]:
+    parsed: object = json.loads(raw)
+    return [str(tag) for tag in cast(list[object], parsed)] if isinstance(parsed, list) else []
+
+
+def _activity_payload(row: Any, *, kind: str | None = None) -> dict[str, Any]:
+    payload = {
+        "id": row["id"],
+        "source": row["source"],
+        "timestamp": row["timestamp"],
+        "project_name": row["project_name"],
+        "summary": row["summary"],
+        "branch": row["branch"],
+        "tags": _decode_tags(row["tags"]),
+        "created_at": row["created_at"],
+        "canonical_key": row["canonical_key"],
+    }
+    if kind is not None:
+        payload["kind"] = kind
+    return payload
+
+
+def _activity_time_bucket(timestamp: str) -> str:
+    if len(timestamp) >= 13 and timestamp[10:11] == "T":
+        return timestamp[:13]
+    return timestamp[:10]
+
+
+def _activity_signal_sort_key(entry: dict[str, Any]) -> tuple[str, str, int]:
+    timestamp = entry["last_ts"] if entry["kind"] == "lifecycle_aggregate" else entry["timestamp"]
+    created_at = entry["created_at"]
+    activity_id = entry.get("latest_activity_id", entry.get("id", 0))
+    return (timestamp, created_at, int(activity_id or 0))
+
+
+def _select_activity_signal_entries(entries: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    entries.sort(key=_activity_signal_sort_key, reverse=True)
+    selected = entries[:limit]
+    if not selected or any(entry["kind"] == "activity" for entry in selected):
+        return selected
+
+    newest_substantive = next((entry for entry in entries if entry["kind"] == "activity"), None)
+    if newest_substantive is None:
+        return selected
+
+    selected = [*selected[: limit - 1], newest_substantive]
+    selected.sort(key=_activity_signal_sort_key, reverse=True)
+    return selected[:limit]
 
 
 def _normalize_policy_key(value: str) -> str:
@@ -197,20 +257,125 @@ def register(mcp: FastMCP) -> None:
             params,
         )
         rows = await cursor.fetchall()
-        return [
-            {
-                "id": r["id"],
-                "source": r["source"],
-                "timestamp": r["timestamp"],
-                "project_name": r["project_name"],
-                "summary": r["summary"],
-                "branch": r["branch"],
-                "tags": json.loads(r["tags"]),
-                "created_at": r["created_at"],
-                "canonical_key": r["canonical_key"],
-            }
-            for r in rows
+        return [_activity_payload(r) for r in rows]
+
+    @mcp.tool()
+    async def get_activity_signal(
+        source: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Filter by source: 'cc', 'codex', 'claude_ai', "
+                    "'notion_os', or 'personal_ops'. Omit for all."
+                )
+            ),
+        ] = None,
+        limit: Annotated[int, Field(description="Max signal entries to return", ge=1, le=200)] = 20,
+        since: Annotated[
+            str | None, Field(description="Only entries on or after this YYYY-MM-DD date")
+        ] = None,
+        ctx: Context = None,  # type: ignore[assignment]
+    ) -> list[dict[str, Any]]:
+        """Return operator-facing activity with lifecycle session-boundary rows compressed."""
+        db = get_db(ctx)
+
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        if source is not None:
+            if source not in ACTIVITY_SOURCES:
+                raise ToolError(invalid_source_error(source))
+            conditions.append("source = ?")
+            params.append(source)
+        if since is not None:
+            conditions.append("timestamp >= ?")
+            params.append(since)
+
+        lifecycle_where = (
+            "WHERE " + " AND ".join([*conditions, _LIFECYCLE_ACTIVITY_SQL])
+            if conditions
+            else f"WHERE {_LIFECYCLE_ACTIVITY_SQL}"
+        )
+        substantive_where = (
+            "WHERE " + " AND ".join([*conditions, f"NOT {_LIFECYCLE_ACTIVITY_SQL}"])
+            if conditions
+            else f"WHERE NOT {_LIFECYCLE_ACTIVITY_SQL}"
+        )
+
+        lifecycle_cursor = await db.execute(
+            f"""
+            SELECT
+                source,
+                project_name,
+                CASE
+                    WHEN summary LIKE 'CC session ended%' THEN 'CC session ended'
+                    ELSE summary
+                END AS summary_family,
+                timestamp,
+                created_at,
+                id,
+                canonical_key
+            FROM activity_log
+            {lifecycle_where}
+            """,
+            params,
+        )
+        lifecycle_rows = await lifecycle_cursor.fetchall()
+
+        aggregates: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        for row in lifecycle_rows:
+            summary_family = row["summary_family"]
+            time_bucket = _activity_time_bucket(row["timestamp"])
+            key = (row["source"], row["project_name"], summary_family, time_bucket)
+            current = aggregates.get(key)
+            if current is None:
+                aggregates[key] = {
+                    "kind": "lifecycle_aggregate",
+                    "source": row["source"],
+                    "project_name": row["project_name"],
+                    "summary": summary_family,
+                    "summary_family": summary_family,
+                    "time_bucket": time_bucket,
+                    "count": 1,
+                    "first_ts": row["timestamp"],
+                    "last_ts": row["timestamp"],
+                    "latest_activity_id": row["id"],
+                    "created_at": row["created_at"],
+                    "canonical_key": row["canonical_key"],
+                    "tags": [_SESSION_BOUNDARY_TAG],
+                }
+                continue
+
+            if (row["timestamp"], row["created_at"], row["id"]) > (
+                current["last_ts"],
+                current["created_at"],
+                current["latest_activity_id"],
+            ):
+                current["latest_activity_id"] = row["id"]
+                current["created_at"] = row["created_at"]
+                current["canonical_key"] = row["canonical_key"]
+            current["count"] += 1
+            current["first_ts"] = min(current["first_ts"], row["timestamp"])
+            current["last_ts"] = max(current["last_ts"], row["timestamp"])
+
+        substantive_params = [*params, limit]
+        substantive_cursor = await db.execute(
+            f"""
+            SELECT id, source, timestamp, project_name, summary, branch, tags, created_at, canonical_key
+            FROM activity_log
+            {substantive_where}
+            ORDER BY timestamp DESC, created_at DESC, id DESC
+            LIMIT ?
+            """,
+            substantive_params,
+        )
+        substantive_rows = await substantive_cursor.fetchall()
+
+        entries = [
+            *aggregates.values(),
+            *[_activity_payload(r, kind="activity") for r in substantive_rows],
         ]
+        return _select_activity_signal_entries(entries, limit)
 
     @mcp.tool()
     async def get_shipped_events(

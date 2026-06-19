@@ -64,12 +64,12 @@ No shared daemon. Each MCP client spawns its own `bridge-db` process via stdio. 
 ## Tools
 
 Verify the current tool count from source with
-`rg '@mcp\.tool' src/bridge_db -c`. As of the 2026-06-14 source check, the
-surface is 24 tools across these 9 modules:
+`rg '@mcp\.tool' src/bridge_db -c`. As of the 2026-06-19 source check, the
+surface is 25 tools across these 9 modules:
 
 | Module | Tools |
 |---|---|
-| activity | `log_activity`, `get_recent_activity`, `get_shipped_events`, `confirm_shipped_sync`, `record_shipped_event_disposition`, `mark_shipped_processed` |
+| activity | `log_activity`, `get_recent_activity`, `get_activity_signal`, `get_shipped_events`, `confirm_shipped_sync`, `record_shipped_event_disposition`, `mark_shipped_processed` |
 | handoffs | `create_handoff`, `get_pending_handoffs`, `pick_up_handoff`, `clear_handoff` |
 | context | `update_section`, `get_section`, `get_all_sections`, `sync_from_file` |
 | snapshots | `save_snapshot`, `get_latest_snapshot` |
@@ -142,6 +142,15 @@ ledger for downstream shipped-event syncs. Treat `processed_shipped_without_rece
 and `fts_missing=0` as primary clean signals, and use
 `actionable_unprocessed_shipped=0` when policy dispositions explain why raw
 `unprocessed_shipped` remains nonzero.
+
+`get_recent_activity` is the raw compatibility feed: it returns individual
+activity rows exactly as stored, including high-volume lifecycle telemetry such
+as Claude Code `SessionEnd` rows tagged `session-boundary`. Operator-facing
+consumers should use `get_activity_signal` instead. It keeps substantive rows
+visible while compressing repeated lifecycle rows into aggregates keyed by
+source, project, summary family, and hour/day time bucket. Raw rows and audit
+events remain available for debugging and forensic review.
+
 For Notion reconciliation, treat each shipped event's `notion_sync` object as the
 machine-readable gate:
 

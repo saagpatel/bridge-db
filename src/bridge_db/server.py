@@ -63,7 +63,8 @@ mcp = FastMCP(
     instructions=(
         "SQLite-backed bridge for shared state between Claude.ai, Claude Code, "
         "Codex, Notion OS, and personal-ops. "
-        "Use log_activity/get_recent_activity for session activity, "
+        "Use log_activity/get_recent_activity for raw session activity, "
+        "get_activity_signal for operator-facing activity with lifecycle telemetry compressed, "
         "get_shipped_events/confirm_shipped_sync/record_shipped_event_disposition "
         "for shipped-event sync, mark_shipped_processed only for non-shipped "
         "operational rows, "
