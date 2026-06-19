@@ -10,7 +10,7 @@ import aiosqlite
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # Full DDL for current schema (initial create on a fresh DB)
 _SCHEMA_DDL = """
@@ -109,6 +109,20 @@ CREATE TABLE IF NOT EXISTS shipped_event_dispositions (
 
 CREATE INDEX IF NOT EXISTS idx_shipped_disposition_type
     ON shipped_event_dispositions(disposition_type);
+
+
+CREATE TABLE IF NOT EXISTS session_costs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT    NOT NULL UNIQUE,
+    project_name    TEXT,
+    started_at      TEXT    NOT NULL,
+    cost_usd        REAL    NOT NULL,
+    model_breakdown TEXT,
+    source          TEXT    NOT NULL DEFAULT 'cc',
+    recorded_at     TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sc_project ON session_costs(project_name);
+CREATE INDEX IF NOT EXISTS idx_sc_started ON session_costs(started_at DESC);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS content_index USING fts5(
     source_type UNINDEXED,
@@ -282,6 +296,24 @@ CREATE INDEX IF NOT EXISTS idx_shipped_disposition_type
 """
 
 
+# Migration v8 → v9: add session_costs table for per-project cost attribution.
+# Structured cost table — not FTS-indexed, no content_index changes required.
+_MIGRATION_V8_TO_V9 = """
+CREATE TABLE IF NOT EXISTS session_costs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT    NOT NULL UNIQUE,
+    project_name    TEXT,
+    started_at      TEXT    NOT NULL,
+    cost_usd        REAL    NOT NULL,
+    model_breakdown TEXT,
+    source          TEXT    NOT NULL DEFAULT 'cc',
+    recorded_at     TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sc_project ON session_costs(project_name);
+CREATE INDEX IF NOT EXISTS idx_sc_started ON session_costs(started_at DESC);
+"""
+
+
 async def apply_pragmas(db: aiosqlite.Connection) -> None:
     """Apply all required PRAGMAs. Safe to call on every connection open."""
     await db.execute("PRAGMA journal_mode=WAL")
@@ -367,6 +399,13 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
             await db.execute(f"PRAGMA user_version = {current_version}")
             await db.commit()
             logger.info("Schema migrated to v8")
+        elif current_version == 8:
+            logger.info("Migrating schema v8 → v9")
+            await db.executescript(_MIGRATION_V8_TO_V9)
+            current_version = 9
+            await db.execute(f"PRAGMA user_version = {current_version}")
+            await db.commit()
+            logger.info("Schema migrated to v9")
         else:
             raise RuntimeError(f"No migration path defined from v{current_version}")
 

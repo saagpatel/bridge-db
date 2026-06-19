@@ -27,6 +27,7 @@ async def test_schema_creates_all_tables(db: aiosqlite.Connection) -> None:
         "context_sections",
         "cost_records",
         "pending_handoffs",
+        "session_costs",
         "shipped_event_dispositions",
         "shipped_sync_receipts",
         "system_snapshots",
@@ -42,6 +43,8 @@ async def test_schema_creates_indexes(db: aiosqlite.Connection) -> None:
     assert "idx_handoff_status" in indexes
     assert "idx_shipped_disposition_type" in indexes
     assert "idx_shipped_sync_downstream" in indexes
+    assert "idx_sc_project" in indexes
+    assert "idx_sc_started" in indexes
 
 
 async def test_pragma_wal_mode(db: aiosqlite.Connection) -> None:
