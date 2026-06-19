@@ -2,6 +2,7 @@
 
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -11,6 +12,10 @@ logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
 SCHEMA_VERSION = 9
+
+# A migration post-hook runs after its DDL, before the version bump+commit
+# (e.g. FTS repopulation). Its return value is ignored.
+_PostHook = Callable[[aiosqlite.Connection], Awaitable[object]]
 
 # Full DDL for current schema (initial create on a fresh DB)
 _SCHEMA_DDL = """
@@ -346,69 +351,38 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         logger.info("Schema v%d initialized", SCHEMA_VERSION)
         return
 
-    # Step-wise migration: each step advances user_version by 1 and commits,
-    # so a failure mid-sequence leaves the DB at the last fully-migrated version.
-    while current_version < SCHEMA_VERSION:
-        if current_version == 1:
-            logger.info("Migrating schema v1 → v2")
-            await db.executescript(_MIGRATION_V1_TO_V2)
-            current_version = 2
-            await db.execute(f"PRAGMA user_version = {current_version}")
-            await db.commit()
-            logger.info("Schema migrated to v2")
-        elif current_version == 2:
-            logger.info("Migrating schema v2 → v3")
-            await db.executescript(_MIGRATION_V2_TO_V3)
-            await repopulate_content_index(db)
-            current_version = 3
-            await db.execute(f"PRAGMA user_version = {current_version}")
-            await db.commit()
-            logger.info("Schema migrated to v3")
-        elif current_version == 3:
-            logger.info("Migrating schema v3 → v4")
-            await db.executescript(_MIGRATION_V3_TO_V4)
-            current_version = 4
-            await db.execute(f"PRAGMA user_version = {current_version}")
-            await db.commit()
-            logger.info("Schema migrated to v4")
-        elif current_version == 4:
-            logger.info("Migrating schema v4 → v5")
-            await db.executescript(_MIGRATION_V4_TO_V5)
-            current_version = 5
-            await db.execute(f"PRAGMA user_version = {current_version}")
-            await db.commit()
-            logger.info("Schema migrated to v5")
-        elif current_version == 5:
-            logger.info("Migrating schema v5 → v6")
-            await db.executescript(_MIGRATION_V5_TO_V6)
-            current_version = 6
-            await db.execute(f"PRAGMA user_version = {current_version}")
-            await db.commit()
-            logger.info("Schema migrated to v6")
-        elif current_version == 6:
-            logger.info("Migrating schema v6 → v7")
-            await db.executescript(_MIGRATION_V6_TO_V7)
-            current_version = 7
-            await db.execute(f"PRAGMA user_version = {current_version}")
-            await db.commit()
-            logger.info("Schema migrated to v7")
-        elif current_version == 7:
-            logger.info("Migrating schema v7 → v8")
-            await db.executescript(_MIGRATION_V7_TO_V8)
-            current_version = 8
-            await db.execute(f"PRAGMA user_version = {current_version}")
-            await db.commit()
-            logger.info("Schema migrated to v8")
-        elif current_version == 8:
-            logger.info("Migrating schema v8 → v9")
-            await db.executescript(_MIGRATION_V8_TO_V9)
-            current_version = 9
-            await db.execute(f"PRAGMA user_version = {current_version}")
-            await db.commit()
-            logger.info("Schema migrated to v9")
-        else:
-            raise RuntimeError(f"No migration path defined from v{current_version}")
+    # Step-wise migration ladder: (target_version, ddl, post_hook), applied in
+    # order. Each step advances user_version by one and commits independently, so a
+    # mid-sequence failure leaves the DB at the last fully-migrated version. The
+    # post_hook (e.g. FTS repopulation) runs after the DDL, before the version bump.
+    # Built here rather than at module scope because repopulate_content_index is
+    # defined below and resolves at call time.
+    migrations: list[tuple[int, str, _PostHook | None]] = [
+        (2, _MIGRATION_V1_TO_V2, None),
+        (3, _MIGRATION_V2_TO_V3, repopulate_content_index),
+        (4, _MIGRATION_V3_TO_V4, None),
+        (5, _MIGRATION_V4_TO_V5, None),
+        (6, _MIGRATION_V5_TO_V6, None),
+        (7, _MIGRATION_V6_TO_V7, None),
+        (8, _MIGRATION_V7_TO_V8, None),
+        (9, _MIGRATION_V8_TO_V9, None),
+    ]
+    for target, ddl, post_hook in migrations:
+        if current_version >= target:
+            continue
+        logger.info("Migrating schema v%d → v%d", current_version, target)
+        await db.executescript(ddl)
+        if post_hook is not None:
+            await post_hook(db)
+        current_version = target
+        await db.execute(f"PRAGMA user_version = {current_version}")
+        await db.commit()
+        logger.info("Schema migrated to v%d", target)
 
+    if current_version != SCHEMA_VERSION:
+        raise RuntimeError(
+            f"Migration ladder ended at v{current_version}, expected v{SCHEMA_VERSION}"
+        )
     logger.debug("Schema at v%d", current_version)
 
 
