@@ -159,9 +159,7 @@ def _status_attention(summary: dict[str, Any]) -> str | None:
     if signals["pending_handoffs"]:
         notes.append(f"pending_handoffs={signals['pending_handoffs']}")
     if signals["actionable_unprocessed_shipped"]:
-        notes.append(
-            f"actionable_unprocessed_shipped={signals['actionable_unprocessed_shipped']}"
-        )
+        notes.append(f"actionable_unprocessed_shipped={signals['actionable_unprocessed_shipped']}")
     if signals["processed_shipped_without_receipt"]:
         notes.append(
             f"processed_shipped_without_receipt={signals['processed_shipped_without_receipt']}"
@@ -279,6 +277,27 @@ async def run_rebuild_content_index() -> bool:
     print(f"  FTS: {_fts_detail(metrics)}")
     print(f"  Overall: {'healthy' if metrics['ok'] else 'degraded'}")
     return bool(metrics["ok"])
+
+
+async def run_checkpoint() -> bool:
+    """Force a WAL checkpoint to bound -wal growth (register #3 / FMEA 1.3)."""
+    from bridge_db import config
+    from bridge_db.db import checkpoint_wal, open_db
+
+    db = await open_db(config.DB_PATH)
+    try:
+        result = await checkpoint_wal(db)
+    finally:
+        await db.close()
+
+    print("bridge-db WAL checkpoint (TRUNCATE)")
+    print(
+        f"  busy={result['busy']} log_frames={result['log_frames']} "
+        f"checkpointed={result['checkpointed']}"
+    )
+    ok = result["busy"] == 0
+    print(f"  Overall: {'truncated' if ok else 'partial (readers active — retry when idle)'}")
+    return ok
 
 
 async def run_log_session_boundary(
@@ -480,6 +499,11 @@ def main() -> None:
         help="Rebuild the FTS content_index from source tables and verify it",
     )
     parser.add_argument(
+        "--checkpoint",
+        action="store_true",
+        help="Force a WAL checkpoint (TRUNCATE) to bound -wal growth",
+    )
+    parser.add_argument(
         "--log-session-boundary",
         metavar="PROJECT_NAME",
         help="Log a Claude Code session-boundary activity entry through the FTS-safe path",
@@ -517,6 +541,9 @@ def main() -> None:
         sys.exit(0 if ok else 1)
     if args.rebuild_content_index:
         ok = asyncio.run(run_rebuild_content_index())
+        sys.exit(0 if ok else 1)
+    if args.checkpoint:
+        ok = asyncio.run(run_checkpoint())
         sys.exit(0 if ok else 1)
     if args.log_session_boundary:
         ok = asyncio.run(run_log_session_boundary(args.log_session_boundary, args.duration_minutes))

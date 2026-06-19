@@ -318,10 +318,27 @@ async def apply_pragmas(db: aiosqlite.Connection) -> None:
     """Apply all required PRAGMAs. Safe to call on every connection open."""
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("PRAGMA synchronous=NORMAL")
-    await db.execute("PRAGMA busy_timeout=5000")
+    await db.execute("PRAGMA busy_timeout=15000")
     await db.execute("PRAGMA foreign_keys=ON")
     await db.execute("PRAGMA cache_size=-64000")
     await db.commit()
+
+
+async def checkpoint_wal(db: aiosqlite.Connection) -> dict[str, int]:
+    """Force a WAL checkpoint (TRUNCATE) to bound -wal growth (FMEA 1.3).
+
+    Under WAL with many always-open reader connections the passive
+    autocheckpoint can starve — there is never a reader-free moment — so the
+    -wal grows unbounded (observed at 4.2 MB against a 901 KB main DB). A
+    periodic TRUNCATE checkpoint reclaims it. Must be called outside a write
+    transaction. Returns the checkpoint row: busy (1 = could not fully complete,
+    readers active), log_frames, checkpointed.
+    """
+    cursor = await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    row = await cursor.fetchone()
+    if row is None:
+        return {"busy": 1, "log_frames": -1, "checkpointed": -1}
+    return {"busy": int(row[0]), "log_frames": int(row[1]), "checkpointed": int(row[2])}
 
 
 async def ensure_schema(db: aiosqlite.Connection) -> None:
