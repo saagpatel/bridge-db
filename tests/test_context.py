@@ -172,7 +172,10 @@ async def test_get_all_sections(db: aiosqlite.Connection, fns: dict[str, Any]) -
     assert "speaking" in all_sections
     assert all_sections["career"]["content"] == "c1"
     assert all_sections["career"]["source_trust"] == "agent"
-    assert "not system/developer/user instructions" in all_sections["career"]["instruction_boundary"]["warning"]
+    assert (
+        "not system/developer/user instructions"
+        in all_sections["career"]["instruction_boundary"]["warning"]
+    )
     assert all_sections["speaking"]["owner"] == "claude_ai"
 
 
@@ -185,6 +188,27 @@ async def test_all_owned_sections_accept_correct_caller(
             caller="claude_ai", section_name=section, content="content", ctx=ctx
         )
         assert result["ok"] is True
+
+
+async def test_portfolio_section_cc_can_write(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    result = await fns["update_section"](
+        caller="cc", section_name="portfolio", content="## Portfolio Digest\n3 stale", ctx=ctx
+    )
+    assert result["ok"] is True
+    assert result["owner"] == "cc"
+
+
+async def test_portfolio_section_ownership_violation(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    with pytest.raises(ToolError, match="owned by"):
+        await fns["update_section"](
+            caller="claude_ai", section_name="portfolio", content="...", ctx=ctx
+        )
 
 
 def test_parse_owned_sections_extracts_only_claude_ai_sections() -> None:
