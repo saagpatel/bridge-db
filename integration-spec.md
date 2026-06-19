@@ -127,12 +127,22 @@ weekly-review reads claude_ai_context.md via Filesystem MCP
 mcp__bridge_db__get_all_sections()          # career, speaking, research, capabilities
 mcp__bridge_db__get_latest_snapshot("cc")   # CC active projects, lessons, patterns
 mcp__bridge_db__get_latest_snapshot("codex") # Codex infrastructure state
-mcp__bridge_db__get_recent_activity(limit=20) # mixed CC + Codex activity feed
+mcp__bridge_db__get_recent_activity(limit=20) # raw mixed activity feed
+mcp__bridge_db__get_activity_signal(limit=20) # operator feed with lifecycle rows compressed
 mcp__bridge_db__get_shipped_events(unprocessed_only=False) # shipped projects
 mcp__bridge_db__confirm_shipped_sync(...) # record downstream proof, then mark processed
 mcp__bridge_db__record_shipped_event_disposition(...) # record non-receipt policy disposition
 mcp__bridge_db__get_cost_history()          # cost trend
 ```
+
+Use `get_recent_activity` when raw row-level activity is required. It includes
+each stored row, including Claude Code `SessionEnd` lifecycle telemetry tagged
+`session-boundary`. Use `get_activity_signal` for startup briefs, dashboards,
+morning briefs, cross-provider review intake, and other operator-facing
+contexts; it returns substantive rows plus compressed lifecycle aggregates with
+counts and first/last timestamps. This is a read-side signal policy only: it
+does not delete activity rows, alter audit history, or change shipped/handoff
+semantics.
 
 `record_shipped_event_disposition` is for non-receipt decisions only. It does
 not add `PROCESSED` and does not write to `shipped_sync_receipts`.
@@ -233,7 +243,7 @@ until each active client has a current enrolled token, verified spawn env, and a
 green read/write smoke check.
 
 All principals may use read-side tools for bridge-owned state:
-`health`, `status`, `get_recent_activity`, `get_shipped_events`,
+`health`, `status`, `get_recent_activity`, `get_activity_signal`, `get_shipped_events`,
 `get_pending_handoffs`, `get_section`, `get_all_sections`, `get_latest_snapshot`,
 `get_cost_history`, `recall`, `recall_stats`, and `audit_tail`.
 

@@ -147,6 +147,155 @@ async def test_get_recent_activity_invalid_source_raises(
         await fns["get_recent_activity"](source="bogus", ctx=ctx)
 
 
+async def test_get_activity_signal_compresses_session_boundaries(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    for timestamp in (
+        "2026-06-19T05:04:16Z",
+        "2026-06-19T05:05:16Z",
+        "2026-06-19T05:06:16Z",
+    ):
+        await insert_activity_row(
+            db,
+            source="cc",
+            timestamp=timestamp,
+            project_name="operant",
+            summary="CC session ended",
+            tags=["session-boundary"],
+        )
+    await insert_activity_row(
+        db,
+        source="cc",
+        timestamp="2026-06-18",
+        project_name="evals",
+        summary="Built LLM judge",
+        tags=["eval"],
+    )
+    await db.commit()
+
+    raw = await fns["get_recent_activity"](limit=10, ctx=ctx)
+    assert len(raw) == 4
+    assert sum(1 for row in raw if "session-boundary" in row["tags"]) == 3
+
+    signal = await fns["get_activity_signal"](limit=10, ctx=ctx)
+    assert len(signal) == 2
+    aggregate = signal[0]
+    assert aggregate["kind"] == "lifecycle_aggregate"
+    assert aggregate["source"] == "cc"
+    assert aggregate["project_name"] == "operant"
+    assert aggregate["summary_family"] == "CC session ended"
+    assert aggregate["time_bucket"] == "2026-06-19T05"
+    assert aggregate["count"] == 3
+    assert aggregate["first_ts"] == "2026-06-19T05:04:16Z"
+    assert aggregate["last_ts"] == "2026-06-19T05:06:16Z"
+    assert aggregate["tags"] == ["session-boundary"]
+
+    substantive = signal[1]
+    assert substantive["kind"] == "activity"
+    assert substantive["project_name"] == "evals"
+    assert substantive["summary"] == "Built LLM judge"
+
+
+async def test_get_activity_signal_keeps_substantive_rows_visible_under_noise(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    for minute in range(30):
+        await insert_activity_row(
+            db,
+            source="cc",
+            timestamp=f"2026-06-19T05:{minute:02d}:00Z",
+            project_name="operant",
+            summary="CC session ended",
+            tags=["session-boundary"],
+        )
+    await insert_activity_row(
+        db,
+        source="cc",
+        timestamp="2026-06-18",
+        project_name="evals",
+        summary="Substantive eval result",
+        tags=["eval"],
+    )
+    await db.commit()
+
+    signal = await fns["get_activity_signal"](limit=2, ctx=ctx)
+
+    assert [entry["kind"] for entry in signal] == ["lifecycle_aggregate", "activity"]
+    assert signal[0]["count"] == 30
+    assert signal[1]["project_name"] == "evals"
+
+
+async def test_get_activity_signal_filters_source_and_since(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await insert_activity_row(
+        db,
+        source="cc",
+        timestamp="2026-06-19T05:00:00Z",
+        project_name="operant",
+        summary="CC session ended",
+        tags=["session-boundary"],
+    )
+    await insert_activity_row(
+        db,
+        source="cc",
+        timestamp="2026-06-19T05:30:00Z",
+        project_name="operant",
+        summary="CC session ended",
+        tags=["session-boundary"],
+    )
+    await insert_activity_row(
+        db,
+        source="codex",
+        timestamp="2026-06-19T05:30:00Z",
+        project_name="bridge-db",
+        summary="Read-only audit",
+    )
+    await db.commit()
+
+    cc_signal = await fns["get_activity_signal"](
+        source="cc", since="2026-06-19T05:10:00Z", ctx=ctx
+    )
+    assert len(cc_signal) == 1
+    assert cc_signal[0]["kind"] == "lifecycle_aggregate"
+    assert cc_signal[0]["count"] == 1
+    assert cc_signal[0]["first_ts"] == "2026-06-19T05:30:00Z"
+
+    codex_signal = await fns["get_activity_signal"](source="codex", ctx=ctx)
+    assert len(codex_signal) == 1
+    assert codex_signal[0]["kind"] == "activity"
+    assert codex_signal[0]["source"] == "codex"
+
+    with pytest.raises(ToolError, match="Invalid source"):
+        await fns["get_activity_signal"](source="bogus", ctx=ctx)
+
+
+async def test_get_activity_signal_does_not_mutate_fts_or_audit(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await insert_activity_row(
+        db,
+        source="cc",
+        timestamp="2026-06-19T05:00:00Z",
+        project_name="operant",
+        summary="CC session ended",
+        tags=["session-boundary"],
+    )
+    await db.commit()
+    before = await collect_fts_index_metrics(db)
+
+    signal = await fns["get_activity_signal"](ctx=ctx)
+
+    after = await collect_fts_index_metrics(db)
+    assert signal[0]["kind"] == "lifecycle_aggregate"
+    assert after == before
+    assert not config.AUDIT_LOG_PATH.exists()
+
+
 async def test_get_shipped_events(db: aiosqlite.Connection, fns: dict[str, Any]) -> None:
     ctx = make_ctx(db)
     await fns["log_activity"](
