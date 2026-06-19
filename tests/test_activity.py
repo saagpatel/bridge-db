@@ -227,6 +227,38 @@ async def test_get_activity_signal_keeps_substantive_rows_visible_under_noise(
     assert signal[1]["project_name"] == "evals"
 
 
+async def test_get_activity_signal_reserves_substantive_row_when_lifecycle_buckets_exceed_limit(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    for hour in range(24):
+        await insert_activity_row(
+            db,
+            source="cc",
+            timestamp=f"2026-06-19T{hour:02d}:00:00Z",
+            project_name=f"project-{hour:02d}",
+            summary="CC session ended",
+            tags=["session-boundary"],
+        )
+    await insert_activity_row(
+        db,
+        source="cc",
+        timestamp="2026-06-18T23:00:00Z",
+        project_name="evals",
+        summary="Substantive eval result",
+        tags=["eval"],
+    )
+    await db.commit()
+
+    signal = await fns["get_activity_signal"](limit=20, ctx=ctx)
+
+    assert len(signal) == 20
+    assert sum(1 for entry in signal if entry["kind"] == "lifecycle_aggregate") == 19
+    assert any(
+        entry["kind"] == "activity" and entry["project_name"] == "evals" for entry in signal
+    )
+
+
 async def test_get_activity_signal_filters_source_and_since(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:

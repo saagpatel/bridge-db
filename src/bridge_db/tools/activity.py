@@ -74,6 +74,21 @@ def _activity_signal_sort_key(entry: dict[str, Any]) -> tuple[str, str, int]:
     return (timestamp, created_at, int(activity_id or 0))
 
 
+def _select_activity_signal_entries(entries: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    entries.sort(key=_activity_signal_sort_key, reverse=True)
+    selected = entries[:limit]
+    if not selected or any(entry["kind"] == "activity" for entry in selected):
+        return selected
+
+    newest_substantive = next((entry for entry in entries if entry["kind"] == "activity"), None)
+    if newest_substantive is None:
+        return selected
+
+    selected = [*selected[: limit - 1], newest_substantive]
+    selected.sort(key=_activity_signal_sort_key, reverse=True)
+    return selected[:limit]
+
+
 def _normalize_policy_key(value: str) -> str:
     return value.strip().lower()
 
@@ -360,8 +375,7 @@ def register(mcp: FastMCP) -> None:
             *aggregates.values(),
             *[_activity_payload(r, kind="activity") for r in substantive_rows],
         ]
-        entries.sort(key=_activity_signal_sort_key, reverse=True)
-        return entries[:limit]
+        return _select_activity_signal_entries(entries, limit)
 
     @mcp.tool()
     async def get_shipped_events(
