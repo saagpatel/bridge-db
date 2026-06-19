@@ -3,6 +3,7 @@ name = "bridge-db"
 version = "0.1.0"
 description = "SQLite-backed MCP server for cross-system state sharing between Claude.ai, Claude Code, Codex, Notion OS, and personal-ops"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.20",
@@ -44,8 +45,8 @@ reportUnusedFunction = "none"
 
 [tool.ruff]
 target-version = "py312"
-line-length = 100
+extend = "../ruff.toml"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = ["E501"]
+extend-select = ["B", "SIM"]

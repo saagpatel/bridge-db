@@ -154,7 +154,9 @@ def register(mcp: FastMCP) -> None:
         caller: Annotated[CallerID, Field(description="The system updating this section")],
         section_name: Annotated[
             str,
-            Field(description="Section key, e.g. 'career', 'speaking', 'research', 'capabilities'"),
+            Field(
+                description="Section key, e.g. 'career', 'speaking', 'research', 'capabilities', 'portfolio'"
+            ),
         ],
         content: Annotated[str, Field(description="Full markdown content for this section")],
         source_trust: Annotated[

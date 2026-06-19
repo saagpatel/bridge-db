@@ -46,6 +46,7 @@ SECTION_OWNERS: dict[str, CallerID] = {
     "speaking": "claude_ai",
     "research": "claude_ai",
     "capabilities": "claude_ai",
+    "portfolio": "cc",
 }
 
 # Callers allowed to log activity per source column value.
