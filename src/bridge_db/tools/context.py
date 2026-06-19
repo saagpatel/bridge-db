@@ -54,22 +54,47 @@ async def _upsert_section(
     owner: str,
     content: str,
     source_trust: SourceTrust | None = None,
-) -> None:
+    *,
+    if_match: str | None = None,
+) -> bool:
     # source_trust is COALESCEd: a fresh row with no assertion takes 'agent'; a
     # content-only update (source_trust=None) preserves the row's existing label
     # rather than relabelling operator-authored sections on a routine re-sync.
-    await db.execute(
-        """
-        INSERT INTO context_sections (section_name, owner, content, source_trust, updated_at)
-        VALUES (?, ?, ?, COALESCE(?, 'agent'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        ON CONFLICT(section_name) DO UPDATE SET
-            content = excluded.content,
-            updated_at = excluded.updated_at,
-            source_trust = COALESCE(?, context_sections.source_trust)
-        """,
-        (section_name, owner, content, source_trust, source_trust),
-    )
+    #
+    # if_match enables optimistic concurrency. When given, the write is a
+    # conditional UPDATE that applies only if the stored updated_at still equals
+    # if_match — i.e. the section has not changed since the caller read it. A
+    # mismatch (or missing row) returns False without writing, so a stale
+    # read-modify-write cannot silently clobber a concurrent update. When if_match
+    # is None the historical blind upsert runs unchanged (backward compatible).
+    # Returns True iff a row was written.
+    if if_match is not None:
+        cursor = await db.execute(
+            """
+            UPDATE context_sections SET
+                content = ?,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                source_trust = COALESCE(?, source_trust)
+            WHERE section_name = ? AND updated_at = ?
+            """,
+            (content, source_trust, section_name, if_match),
+        )
+        if cursor.rowcount == 0:
+            return False
+    else:
+        await db.execute(
+            """
+            INSERT INTO context_sections (section_name, owner, content, source_trust, updated_at)
+            VALUES (?, ?, ?, COALESCE(?, 'agent'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            ON CONFLICT(section_name) DO UPDATE SET
+                content = excluded.content,
+                updated_at = excluded.updated_at,
+                source_trust = COALESCE(?, context_sections.source_trust)
+            """,
+            (section_name, owner, content, source_trust, source_trust),
+        )
     await upsert_fts_entry(db, "section", section_name, fts_text_for_section(section_name, content))
+    return True
 
 
 async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str, Any]:
@@ -167,6 +192,18 @@ def register(mcp: FastMCP) -> None:
                 "preserve the section's current label ('agent' on first write)."
             ),
         ] = None,
+        if_match_updated_at: Annotated[
+            str | None,
+            Field(
+                description="Optional optimistic-concurrency guard. Pass the `updated_at` "
+                "value you got from get_section; the write applies only if the section has "
+                "not changed since then. On a mismatch the call returns ok=False with "
+                "conflict=True instead of clobbering a concurrent update. Note: updated_at "
+                "has 1-second resolution, so two writes within the same wall-clock second "
+                "cannot be distinguished by this guard. Omit for a blind upsert (legacy "
+                "behavior)."
+            ),
+        ] = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Upsert a context section. Caller must be the section owner (see SECTION_OWNERS)."""
@@ -188,13 +225,46 @@ def register(mcp: FastMCP) -> None:
             raise ToolError(ownership_error(caller, section_name, owner))
 
         db = get_db(ctx)
-        await _upsert_section(
+        written = await _upsert_section(
             db=db,
             section_name=section_name,
             owner=owner,
             content=content,
             source_trust=source_trust,
+            if_match=if_match_updated_at,
         )
+        if not written:
+            # Optimistic-concurrency conflict: the section changed since the caller
+            # read it. The conditional UPDATE matched 0 rows but still opened an
+            # implicit write transaction — roll it back to release the lock before
+            # the diagnostic read below. This tool performs no DB write above
+            # _upsert_section, so the rollback discards nothing else (keep that
+            # invariant if this function is ever extended).
+            await db.rollback()
+            cursor = await db.execute(
+                "SELECT updated_at, source_trust FROM context_sections WHERE section_name = ?",
+                (section_name,),
+            )
+            current = await cursor.fetchone()
+            logger.info(
+                "section update conflict: %s by %s (stale if_match=%s)",
+                section_name,
+                caller,
+                if_match_updated_at,
+            )
+            return {
+                "ok": False,
+                "conflict": True,
+                "section_name": section_name,
+                "owner": owner,
+                "current_updated_at": current["updated_at"] if current is not None else None,
+                "current_source_trust": current["source_trust"] if current is not None else None,
+                "reason": (
+                    "Section changed since you read it (optimistic-concurrency conflict) "
+                    "or was removed. Re-read it with get_section and retry update_section "
+                    "with the new updated_at as if_match_updated_at."
+                ),
+            }
         await db.commit()
         # Echo the label actually stored (not the param): on a preserve-update the
         # stored value is the pre-existing label, not the None that was passed in.

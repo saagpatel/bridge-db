@@ -17,6 +17,7 @@ from bridge_db.db import (
     get_db,
     upsert_fts_entry,
 )
+from bridge_db.instruction_boundary import instruction_boundary
 from bridge_db.models import SNAPSHOT_SYSTEM_MAP, CallerID, SourceTrust, snapshot_ownership_error
 
 logger = logging.getLogger("bridge_db.tools.snapshots")
@@ -145,7 +146,7 @@ def register(mcp: FastMCP) -> None:
         db = get_db(ctx)
         cursor = await db.execute(
             """
-            SELECT id, system, snapshot_date, data, created_at
+            SELECT id, system, snapshot_date, data, created_at, source_trust
             FROM system_snapshots
             WHERE system = ?
             ORDER BY created_at DESC, id DESC
@@ -163,4 +164,6 @@ def register(mcp: FastMCP) -> None:
             "snapshot_date": row["snapshot_date"],
             "data": json.loads(row["data"]),
             "created_at": row["created_at"],
+            "source_trust": row["source_trust"],
+            "instruction_boundary": instruction_boundary(row["source_trust"]),
         }

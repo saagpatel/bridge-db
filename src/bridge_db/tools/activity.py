@@ -16,6 +16,7 @@ from bridge_db.db import (
     get_db,
     insert_activity_row,
 )
+from bridge_db.instruction_boundary import instruction_boundary
 from bridge_db.models import ACTIVITY_SOURCES, CallerID, SourceTrust, invalid_source_error
 from bridge_db.project_resolver import resolve as resolve_project
 
@@ -55,6 +56,8 @@ def _activity_payload(row: Any, *, kind: str | None = None) -> dict[str, Any]:
         "tags": _decode_tags(row["tags"]),
         "created_at": row["created_at"],
         "canonical_key": row["canonical_key"],
+        "source_trust": row["source_trust"],
+        "instruction_boundary": instruction_boundary(row["source_trust"]),
     }
     if kind is not None:
         payload["kind"] = kind
@@ -74,7 +77,9 @@ def _activity_signal_sort_key(entry: dict[str, Any]) -> tuple[str, str, int]:
     return (timestamp, created_at, int(activity_id or 0))
 
 
-def _select_activity_signal_entries(entries: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+def _select_activity_signal_entries(
+    entries: list[dict[str, Any]], limit: int
+) -> list[dict[str, Any]]:
     entries.sort(key=_activity_signal_sort_key, reverse=True)
     selected = entries[:limit]
     if not selected or any(entry["kind"] == "activity" for entry in selected):
@@ -248,7 +253,7 @@ def register(mcp: FastMCP) -> None:
 
         cursor = await db.execute(
             f"""
-            SELECT id, source, timestamp, project_name, summary, branch, tags, created_at, canonical_key
+            SELECT id, source, timestamp, project_name, summary, branch, tags, created_at, canonical_key, source_trust
             FROM activity_log
             {where}
             ORDER BY timestamp DESC, created_at DESC, id DESC
@@ -361,7 +366,7 @@ def register(mcp: FastMCP) -> None:
         substantive_params = [*params, limit]
         substantive_cursor = await db.execute(
             f"""
-            SELECT id, source, timestamp, project_name, summary, branch, tags, created_at, canonical_key
+            SELECT id, source, timestamp, project_name, summary, branch, tags, created_at, canonical_key, source_trust
             FROM activity_log
             {substantive_where}
             ORDER BY timestamp DESC, created_at DESC, id DESC
@@ -683,9 +688,7 @@ def register(mcp: FastMCP) -> None:
         )
         receipt = await cursor.fetchone()
         if receipt is not None:
-            raise ToolError(
-                f"Activity entry {activity_id} already has a shipped_sync_receipts row"
-            )
+            raise ToolError(f"Activity entry {activity_id} already has a shipped_sync_receipts row")
 
         await db.execute(
             """

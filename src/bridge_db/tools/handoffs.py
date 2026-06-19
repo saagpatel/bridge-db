@@ -226,14 +226,31 @@ def register(mcp: FastMCP) -> None:
                 }
             # cc + confirm=True → confirmed override; fall through to the transition.
 
-        await db.execute(
+        cursor = await db.execute(
             """
             UPDATE pending_handoffs
             SET status = 'active', picked_up_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-            WHERE id = ?
+            WHERE id = ? AND status = 'pending'
             """,
             (handoff_id,),
         )
+        if cursor.rowcount == 0:
+            # CAS guard: another 'cc'/'codex' caller transitioned this handoff out
+            # of 'pending' between our SELECT above and this UPDATE (the TOCTOU
+            # window). The status-guarded UPDATE — not the earlier SELECT — is the
+            # real, single-winner claim.
+            await db.rollback()
+            log_audit(
+                "pick_up_handoff",
+                caller,
+                project,
+                ok=False,
+                detail=f"source_trust={trust} decision=raced",
+            )
+            raise ToolError(
+                f"Handoff {handoff_id} was picked up by another caller before this "
+                "pickup completed; re-check get_pending_handoffs and retry if still needed."
+            )
         await db.commit()
         decision = "allowed confirm=true" if (trust != "operator" and confirm) else "allowed"
         log_audit(
