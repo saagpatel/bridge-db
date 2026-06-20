@@ -81,7 +81,7 @@ bridge-db__confirm_shipped_sync(
     activity_id=event_id,
     downstream_system="notion",
     downstream_ref=confirmed_notion_page_id_or_url,
-    notes="Status=Shipped; Pipeline Stage=Post-Build Review Done; Date Updated=YYYY-MM-DD"
+    notes="Status=Shipped; Pipeline Stage=Post-Build Review Done; Last Active=YYYY-MM-DD"
 )
 ```
 
