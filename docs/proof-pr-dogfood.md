@@ -9,10 +9,11 @@ environment and render the proof block from the generated receipt:
 ```bash
 python3 -m venv /tmp/proof-pr-dogfood-venv
 /tmp/proof-pr-dogfood-venv/bin/python -m pip install \
-  git+https://github.com/saagpatel/proof-pr.git@v0.2.11
+  git+https://github.com/saagpatel/proof-pr.git@v0.2.12
 /tmp/proof-pr-dogfood-venv/bin/proof-pr init \
   --cwd . \
   --tier T1 \
+  --example "Test-only maintenance" \
   --summary "Short PR summary" \
   --output /tmp/proof-pr-dogfood.json
 /tmp/proof-pr-dogfood-venv/bin/proof-pr collect \
