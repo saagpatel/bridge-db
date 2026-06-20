@@ -7,7 +7,7 @@ license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.20",
-    "mcp>=1.25,<2.0",
+    "mcp>=1.28.0,<2.0",
     "pydantic>=2.10",
 ]
 
@@ -17,9 +17,9 @@ bridge-db = "bridge_db.__main__:main"
 [dependency-groups]
 dev = [
     "pyright>=1.1.390",
-    "pytest>=8",
+    "pytest>=9.1.0",
     "pytest-asyncio>=1.4.0",
-    "ruff>=0.15.15",
+    "ruff>=0.15.17",
 ]
 
 [build-system]
