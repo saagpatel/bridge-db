@@ -13,14 +13,17 @@ A branch is safe to delete when at least one of these is true:
 - It is ancestor-merged into `main`.
 - `git cherry -v main <branch>` shows every branch-side commit with `-`, meaning
   the patch content is already represented on `main`.
+- Its tree is identical to current `main`, even if the commit topology differs
+  because a connector or contents API recreated the same file state through
+  different commits.
 - A merged PR identifies the branch as its head ref and the merge is confirmed
   on GitHub.
 - The branch was created during the current cleanup session, contains no unique
   useful work, and remote verification confirms no open PR depends on it.
 
 For local branches, prefer `git branch -d`. Use `git branch -D` only when the
-hook can prove patch-equivalence or the operator explicitly approves preserving
-the evidence elsewhere first.
+hook can prove patch-equivalence or identical tree state, or when the operator
+explicitly approves preserving the evidence elsewhere first.
 
 ## Preserve Or Archive
 
@@ -48,6 +51,7 @@ git branch -vv --sort=refname
 git branch -r --sort=refname
 git merge-base --is-ancestor <branch> main
 git cherry -v main <branch>
+git rev-parse main^{tree} <branch>^{tree}
 git rev-list --left-right --count --cherry-pick main...<branch>
 git diff --stat main..<branch>
 gh pr list --state all --head <branch-name> --json number,state,title,mergedAt,url,headRefName
@@ -56,6 +60,8 @@ gh pr list --state all --head <branch-name> --json number,state,title,mergedAt,u
 Interpretation:
 
 - Ancestor-merged: delete.
+- Tree-identical to `main`: safe to delete locally; for remote branches, still
+  confirm no active PR points at the branch before deleting.
 - All `git cherry` rows are `-`: delete after confirming no active PR points at
   the branch.
 - Branch-side non-equivalent commits exist: preserve, archive, or request an
