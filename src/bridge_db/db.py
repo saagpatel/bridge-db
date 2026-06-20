@@ -1,5 +1,6 @@
 """Database schema, migrations, and connection setup."""
 
+import hashlib
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -11,7 +12,7 @@ import aiosqlite
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # A migration post-hook runs after its DDL, before the version bump+commit
 # (e.g. FTS repopulation). Its return value is ignored.
@@ -24,8 +25,43 @@ CREATE TABLE IF NOT EXISTS context_sections (
     owner TEXT NOT NULL CHECK(owner IN ('claude_ai', 'cc', 'codex')),
     content TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested'))
+    source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested')),
+    version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1)
 );
+
+CREATE TABLE IF NOT EXISTS context_section_export_state (
+    section_name TEXT PRIMARY KEY,
+    exported_version INTEGER NOT NULL,
+    exported_content_sha256 TEXT NOT NULL,
+    exported_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    FOREIGN KEY(section_name) REFERENCES context_sections(section_name) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS write_conflicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    surface TEXT NOT NULL CHECK(surface IN ('context_section', 'markdown_sync', 'handoff')),
+    target_key TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    attempted_by TEXT,
+    principal TEXT,
+    stale_version INTEGER,
+    current_version INTEGER,
+    stale_updated_at TEXT,
+    current_updated_at TEXT,
+    attempted_source_trust TEXT,
+    current_source_trust TEXT,
+    attempted_content_sha256 TEXT,
+    current_content_sha256 TEXT,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'acknowledged', 'resolved', 'ignored')),
+    detail_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_write_conflicts_status_created
+    ON write_conflicts(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_write_conflicts_surface_target
+    ON write_conflicts(surface, target_key);
 
 CREATE TABLE IF NOT EXISTS activity_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -319,6 +355,48 @@ CREATE INDEX IF NOT EXISTS idx_sc_started ON session_costs(started_at DESC);
 """
 
 
+# Migration v9 → v10: add integer-version CAS for context sections plus durable
+# conflict receipts and markdown-export base state. FTS-neutral: no indexed text
+# changes.
+_MIGRATION_V9_TO_V10 = """
+ALTER TABLE context_sections ADD COLUMN version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1);
+
+CREATE TABLE IF NOT EXISTS context_section_export_state (
+    section_name TEXT PRIMARY KEY,
+    exported_version INTEGER NOT NULL,
+    exported_content_sha256 TEXT NOT NULL,
+    exported_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    FOREIGN KEY(section_name) REFERENCES context_sections(section_name) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS write_conflicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    surface TEXT NOT NULL CHECK(surface IN ('context_section', 'markdown_sync', 'handoff')),
+    target_key TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    attempted_by TEXT,
+    principal TEXT,
+    stale_version INTEGER,
+    current_version INTEGER,
+    stale_updated_at TEXT,
+    current_updated_at TEXT,
+    attempted_source_trust TEXT,
+    current_source_trust TEXT,
+    attempted_content_sha256 TEXT,
+    current_content_sha256 TEXT,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'acknowledged', 'resolved', 'ignored')),
+    detail_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_write_conflicts_status_created
+    ON write_conflicts(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_write_conflicts_surface_target
+    ON write_conflicts(surface, target_key);
+"""
+
+
 async def apply_pragmas(db: aiosqlite.Connection) -> None:
     """Apply all required PRAGMAs. Safe to call on every connection open."""
     await db.execute("PRAGMA journal_mode=WAL")
@@ -383,6 +461,7 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         (7, _MIGRATION_V6_TO_V7, None),
         (8, _MIGRATION_V7_TO_V8, None),
         (9, _MIGRATION_V8_TO_V9, None),
+        (10, _MIGRATION_V9_TO_V10, None),
     ]
     for target, ddl, post_hook in migrations:
         if current_version >= target:
@@ -419,6 +498,65 @@ def get_db(ctx: Any) -> aiosqlite.Connection:
     The MCP SDK types lifespan_context as Unknown; this cast surfaces the real type.
     """
     return cast(aiosqlite.Connection, ctx.request_context.lifespan_context.db)
+
+
+def content_sha256(content: str) -> str:
+    """Return a stable hash for conflict receipts and export-base comparisons."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+async def record_write_conflict(
+    db: aiosqlite.Connection,
+    *,
+    surface: str,
+    target_key: str,
+    operation: str,
+    reason: str,
+    attempted_by: str | None = None,
+    principal: str | None = None,
+    stale_version: int | None = None,
+    current_version: int | None = None,
+    stale_updated_at: str | None = None,
+    current_updated_at: str | None = None,
+    attempted_source_trust: str | None = None,
+    current_source_trust: str | None = None,
+    attempted_content_sha256: str | None = None,
+    current_content_sha256: str | None = None,
+    detail: dict[str, Any] | None = None,
+) -> int:
+    """Stage a durable write-conflict receipt. Caller owns commit/rollback."""
+    cursor = await db.execute(
+        """
+        INSERT INTO write_conflicts (
+            surface, target_key, operation, attempted_by, principal,
+            stale_version, current_version, stale_updated_at, current_updated_at,
+            attempted_source_trust, current_source_trust,
+            attempted_content_sha256, current_content_sha256,
+            reason, detail_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            surface,
+            target_key,
+            operation,
+            attempted_by,
+            principal,
+            stale_version,
+            current_version,
+            stale_updated_at,
+            current_updated_at,
+            attempted_source_trust,
+            current_source_trust,
+            attempted_content_sha256,
+            current_content_sha256,
+            reason,
+            json.dumps(detail or {}, sort_keys=True),
+        ),
+    )
+    if cursor.lastrowid is None:
+        raise RuntimeError("write_conflicts insert did not return a row id")
+    return int(cursor.lastrowid)
 
 
 # ── FTS5 content index helpers ───────────────────────────────────────────────

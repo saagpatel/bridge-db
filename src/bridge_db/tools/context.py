@@ -10,16 +10,20 @@ from pydantic import Field
 
 from bridge_db import config
 from bridge_db.audit import log_audit
-from bridge_db.auth import auth_mode, clamp_source_trust, require_caller
+from bridge_db.auth import auth_mode, clamp_source_trust, get_principal, require_caller
 from bridge_db.db import (
+    content_sha256,
     fts_text_for_section,
     get_db,
+    record_write_conflict,
     upsert_fts_entry,
 )
 from bridge_db.instruction_boundary import instruction_boundary
 from bridge_db.models import SECTION_OWNERS, CallerID, SourceTrust, ownership_error
 
 logger = logging.getLogger("bridge_db.tools.context")
+
+_CAS_MODES = frozenset({"warn", "enforce"})
 
 _SECTION_HEADING_MAP: dict[str, str] = {
     "Career & Professional Target": "career",
@@ -48,6 +52,15 @@ def parse_owned_sections(markdown: str) -> dict[str, str]:
     return {section_name: "\n".join(lines).strip("\n") for section_name, lines in parsed.items()}
 
 
+def _normalized_section_content(content: str) -> str:
+    return content.strip("\n")
+
+
+def _context_cas_mode() -> str:
+    mode = config.CONTEXT_CAS_MODE.strip().lower()
+    return mode if mode in _CAS_MODES else "enforce"
+
+
 async def _upsert_section(
     db: Any,
     section_name: str,
@@ -55,46 +68,120 @@ async def _upsert_section(
     content: str,
     source_trust: SourceTrust | None = None,
     *,
-    if_match: str | None = None,
-) -> bool:
+    if_match_updated_at: str | None = None,
+    if_match_version: int | None = None,
+) -> dict[str, Any]:
     # source_trust is COALESCEd: a fresh row with no assertion takes 'agent'; a
     # content-only update (source_trust=None) preserves the row's existing label
     # rather than relabelling operator-authored sections on a routine re-sync.
     #
-    # if_match enables optimistic concurrency. When given, the write is a
-    # conditional UPDATE that applies only if the stored updated_at still equals
-    # if_match — i.e. the section has not changed since the caller read it. A
-    # mismatch (or missing row) returns False without writing, so a stale
-    # read-modify-write cannot silently clobber a concurrent update. When if_match
-    # is None the historical blind upsert runs unchanged (backward compatible).
-    # Returns True iff a row was written.
-    if if_match is not None:
+    # if_match_version is the real CAS token. if_match_updated_at remains a
+    # compatibility guard for existing callers and is enforced when supplied.
+    if if_match_version is not None or if_match_updated_at is not None:
+        conditions = ["section_name = ?"]
+        params: list[Any] = [content, source_trust, section_name]
+        if if_match_version is not None:
+            conditions.append("version = ?")
+            params.append(if_match_version)
+        if if_match_updated_at is not None:
+            conditions.append("updated_at = ?")
+            params.append(if_match_updated_at)
         cursor = await db.execute(
-            """
+            f"""
             UPDATE context_sections SET
                 content = ?,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-                source_trust = COALESCE(?, source_trust)
-            WHERE section_name = ? AND updated_at = ?
-            """,
-            (content, source_trust, section_name, if_match),
+                source_trust = COALESCE(?, source_trust),
+                version = version + 1
+            WHERE {" AND ".join(conditions)}
+            """,  # noqa: S608 — conditions are assembled from fixed predicates only.
+            params,
         )
         if cursor.rowcount == 0:
-            return False
-    else:
+            return {"written": False, "reason": "stale_cas"}
+        await upsert_fts_entry(db, "section", section_name, fts_text_for_section(section_name, content))
+        return {"written": True, "legacy_blind_write": False}
+
+    cursor = await db.execute(
+        "SELECT version FROM context_sections WHERE section_name = ?",
+        (section_name,),
+    )
+    existing = await cursor.fetchone()
+    legacy_blind_write = existing is not None
+    if legacy_blind_write and _context_cas_mode() == "enforce":
+        return {"written": False, "reason": "missing_cas"}
+
+    if existing is None:
         await db.execute(
             """
             INSERT INTO context_sections (section_name, owner, content, source_trust, updated_at)
             VALUES (?, ?, ?, COALESCE(?, 'agent'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-            ON CONFLICT(section_name) DO UPDATE SET
-                content = excluded.content,
-                updated_at = excluded.updated_at,
-                source_trust = COALESCE(?, context_sections.source_trust)
             """,
-            (section_name, owner, content, source_trust, source_trust),
+            (section_name, owner, content, source_trust),
+        )
+    else:
+        await db.execute(
+            """
+            UPDATE context_sections SET
+                content = ?,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                source_trust = COALESCE(?, source_trust),
+                version = version + 1
+            WHERE section_name = ?
+            """,
+            (content, source_trust, section_name),
         )
     await upsert_fts_entry(db, "section", section_name, fts_text_for_section(section_name, content))
-    return True
+    return {"written": True, "legacy_blind_write": legacy_blind_write}
+
+
+async def _section_row(db: Any, section_name: str) -> Any | None:
+    cursor = await db.execute(
+        """
+        SELECT section_name, owner, content, updated_at, source_trust, version
+        FROM context_sections
+        WHERE section_name = ?
+        """,
+        (section_name,),
+    )
+    return await cursor.fetchone()
+
+
+async def _record_section_conflict(
+    db: Any,
+    *,
+    section_name: str,
+    caller: str,
+    operation: str,
+    reason: str,
+    attempted_content: str,
+    attempted_source_trust: str | None,
+    principal: str | None = None,
+    stale_version: int | None = None,
+    stale_updated_at: str | None = None,
+    surface: str = "context_section",
+    detail: dict[str, Any] | None = None,
+) -> tuple[int, Any | None]:
+    current = await _section_row(db, section_name)
+    receipt_id = await record_write_conflict(
+        db,
+        surface=surface,
+        target_key=section_name,
+        operation=operation,
+        attempted_by=caller,
+        principal=principal,
+        stale_version=stale_version,
+        current_version=current["version"] if current is not None else None,
+        stale_updated_at=stale_updated_at,
+        current_updated_at=current["updated_at"] if current is not None else None,
+        attempted_source_trust=attempted_source_trust,
+        current_source_trust=current["source_trust"] if current is not None else None,
+        attempted_content_sha256=content_sha256(attempted_content),
+        current_content_sha256=content_sha256(current["content"]) if current is not None else None,
+        reason=reason,
+        detail=detail,
+    )
+    return receipt_id, current
 
 
 async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str, Any]:
@@ -114,36 +201,128 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
     synced_sections: list[str] = []
     unchanged: list[str] = []
     demoted: list[str] = []
+    conflicts: list[dict[str, Any]] = []
+    legacy_imports: list[str] = []
 
     for section_name in SECTION_OWNERS:
         if section_name not in parsed_sections:
             continue
         content = parsed_sections[section_name]
+        current = await _section_row(db, section_name)
 
-        if auth_active:
-            cursor = await db.execute(
-                "SELECT content FROM context_sections WHERE section_name = ?",
+        if current is not None and _normalized_section_content(str(current["content"])) == (
+            _normalized_section_content(content)
+        ):
+            unchanged.append(section_name)
+            continue
+
+        if current is not None:
+            exported_cursor = await db.execute(
+                """
+                SELECT exported_version, exported_content_sha256
+                FROM context_section_export_state
+                WHERE section_name = ?
+                """,
                 (section_name,),
             )
-            row = await cursor.fetchone()
-            # Normalize the same way parse_owned_sections does (strip outer
-            # newlines) so whitespace variance between the update_section write
-            # path and the file parse path can't spuriously demote a section.
-            if row is not None and str(row["content"]).strip("\n") == content.strip("\n"):
-                unchanged.append(section_name)
-                continue
-            await _upsert_section(
+            exported = await exported_cursor.fetchone()
+            if exported is None:
+                legacy_imports.append(section_name)
+            else:
+                current_hash = content_sha256(_normalized_section_content(str(current["content"])))
+                if (
+                    int(current["version"]) != int(exported["exported_version"])
+                    or current_hash != exported["exported_content_sha256"]
+                ):
+                    receipt_id, refreshed = await _record_section_conflict(
+                        db,
+                        section_name=section_name,
+                        caller="sync_from_file",
+                        operation="sync_from_file",
+                        reason="stale_export_base",
+                        attempted_content=content,
+                        attempted_source_trust="ingested" if auth_active else None,
+                        principal=None,
+                        stale_version=int(exported["exported_version"]),
+                        surface="markdown_sync",
+                        detail={"exported_content_sha256": exported["exported_content_sha256"]},
+                    )
+                    conflicts.append(
+                        {
+                            "section_name": section_name,
+                            "receipt_id": receipt_id,
+                            "reason": "stale_export_base",
+                            "current_version": refreshed["version"] if refreshed is not None else None,
+                            "current_updated_at": refreshed["updated_at"]
+                            if refreshed is not None
+                            else None,
+                            "current_source_trust": refreshed["source_trust"]
+                            if refreshed is not None
+                            else None,
+                        }
+                    )
+                    continue
+
+        if auth_active:
+            result = await _upsert_section(
                 db=db,
                 section_name=section_name,
                 owner="claude_ai",
                 content=content,
                 source_trust="ingested",
+                if_match_version=current["version"] if current is not None else None,
             )
+            if not result["written"]:
+                receipt_id, refreshed = await _record_section_conflict(
+                    db,
+                    section_name=section_name,
+                    caller="sync_from_file",
+                    operation="sync_from_file",
+                    reason=result["reason"],
+                    attempted_content=content,
+                    attempted_source_trust="ingested",
+                    stale_version=current["version"] if current is not None else None,
+                    surface="markdown_sync",
+                )
+                conflicts.append(
+                    {
+                        "section_name": section_name,
+                        "receipt_id": receipt_id,
+                        "reason": result["reason"],
+                        "current_version": refreshed["version"] if refreshed is not None else None,
+                    }
+                )
+                continue
             demoted.append(section_name)
         else:
-            await _upsert_section(
-                db=db, section_name=section_name, owner="claude_ai", content=content
+            result = await _upsert_section(
+                db=db,
+                section_name=section_name,
+                owner="claude_ai",
+                content=content,
+                if_match_version=current["version"] if current is not None else None,
             )
+            if not result["written"]:
+                receipt_id, refreshed = await _record_section_conflict(
+                    db,
+                    section_name=section_name,
+                    caller="sync_from_file",
+                    operation="sync_from_file",
+                    reason=result["reason"],
+                    attempted_content=content,
+                    attempted_source_trust=None,
+                    stale_version=current["version"] if current is not None else None,
+                    surface="markdown_sync",
+                )
+                conflicts.append(
+                    {
+                        "section_name": section_name,
+                        "receipt_id": receipt_id,
+                        "reason": result["reason"],
+                        "current_version": refreshed["version"] if refreshed is not None else None,
+                    }
+                )
+                continue
 
         synced_sections.append(section_name)
 
@@ -169,6 +348,9 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
         "sections_synced": synced_sections,
         "unchanged": unchanged,
         "demoted": demoted,
+        "conflicts": conflicts,
+        "conflict_count": len(conflicts),
+        "legacy_imports": legacy_imports,
         "count": len(synced_sections),
     }
 
@@ -204,6 +386,15 @@ def register(mcp: FastMCP) -> None:
                 "behavior)."
             ),
         ] = None,
+        if_match_version: Annotated[
+            int | None,
+            Field(
+                description="Preferred optimistic-concurrency guard. Pass the `version` "
+                "from get_section; the write applies only if the section has not changed. "
+                "On mismatch the call returns ok=False with conflict=True and a durable "
+                "receipt_id. Omit only for legacy blind-write compatibility."
+            ),
+        ] = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Upsert a context section. Caller must be the section owner (see SECTION_OWNERS)."""
@@ -225,15 +416,16 @@ def register(mcp: FastMCP) -> None:
             raise ToolError(ownership_error(caller, section_name, owner))
 
         db = get_db(ctx)
-        written = await _upsert_section(
+        result = await _upsert_section(
             db=db,
             section_name=section_name,
             owner=owner,
             content=content,
             source_trust=source_trust,
-            if_match=if_match_updated_at,
+            if_match_updated_at=if_match_updated_at,
+            if_match_version=if_match_version,
         )
-        if not written:
+        if not result["written"]:
             # Optimistic-concurrency conflict: the section changed since the caller
             # read it. The conditional UPDATE matched 0 rows but still opened an
             # implicit write transaction — roll it back to release the lock before
@@ -241,45 +433,74 @@ def register(mcp: FastMCP) -> None:
             # _upsert_section, so the rollback discards nothing else (keep that
             # invariant if this function is ever extended).
             await db.rollback()
-            cursor = await db.execute(
-                "SELECT updated_at, source_trust FROM context_sections WHERE section_name = ?",
-                (section_name,),
+            receipt_id, current = await _record_section_conflict(
+                db,
+                section_name=section_name,
+                caller=caller,
+                operation="update_section",
+                reason=result["reason"],
+                attempted_content=content,
+                attempted_source_trust=source_trust,
+                principal=get_principal(ctx),
+                stale_version=if_match_version,
+                stale_updated_at=if_match_updated_at,
             )
-            current = await cursor.fetchone()
+            await db.commit()
             logger.info(
-                "section update conflict: %s by %s (stale if_match=%s)",
+                "section update conflict: %s by %s (reason=%s receipt=%s)",
                 section_name,
                 caller,
-                if_match_updated_at,
+                result["reason"],
+                receipt_id,
             )
             return {
                 "ok": False,
                 "conflict": True,
+                "receipt_id": receipt_id,
                 "section_name": section_name,
                 "owner": owner,
                 "current_updated_at": current["updated_at"] if current is not None else None,
+                "current_version": current["version"] if current is not None else None,
                 "current_source_trust": current["source_trust"] if current is not None else None,
+                "current_content_sha256": content_sha256(current["content"])
+                if current is not None
+                else None,
+                "reason_code": result["reason"],
                 "reason": (
-                    "Section changed since you read it (optimistic-concurrency conflict) "
-                    "or was removed. Re-read it with get_section and retry update_section "
-                    "with the new updated_at as if_match_updated_at."
+                    "Section changed since you read it, the required CAS token was missing, "
+                    "or the row was removed. Re-read it with get_section and retry "
+                    "update_section with the current version as if_match_version."
                 ),
             }
         await db.commit()
         # Echo the label actually stored (not the param): on a preserve-update the
         # stored value is the pre-existing label, not the None that was passed in.
         cursor = await db.execute(
-            "SELECT source_trust FROM context_sections WHERE section_name = ?", (section_name,)
+            "SELECT content, updated_at, source_trust, version FROM context_sections WHERE section_name = ?",
+            (section_name,),
         )
         row = await cursor.fetchone()
         stored_trust = row["source_trust"] if row is not None else source_trust
+        legacy_blind_write = bool(result.get("legacy_blind_write"))
+        if legacy_blind_write:
+            log_audit(
+                "update_section.legacy_blind_write",
+                caller,
+                section_name,
+                ok=True,
+                detail=f"mode={_context_cas_mode()}",
+            )
         logger.info("section updated: %s by %s", section_name, caller)
         return {
             "ok": True,
             "section_name": section_name,
             "owner": owner,
+            "updated_at": row["updated_at"] if row is not None else None,
+            "version": row["version"] if row is not None else None,
+            "content_sha256": content_sha256(row["content"]) if row is not None else None,
             "source_trust": stored_trust,
             "source_trust_clamped": source_trust_clamped,
+            "legacy_blind_write": legacy_blind_write,
         }
 
     @mcp.tool()
@@ -290,7 +511,11 @@ def register(mcp: FastMCP) -> None:
         """Return a single context section's content and metadata."""
         db = get_db(ctx)
         cursor = await db.execute(
-            "SELECT section_name, owner, content, updated_at, source_trust FROM context_sections WHERE section_name = ?",
+            """
+            SELECT section_name, owner, content, updated_at, source_trust, version
+            FROM context_sections
+            WHERE section_name = ?
+            """,
             (section_name,),
         )
         row = await cursor.fetchone()
@@ -301,6 +526,8 @@ def register(mcp: FastMCP) -> None:
             "owner": row["owner"],
             "content": row["content"],
             "updated_at": row["updated_at"],
+            "version": row["version"],
+            "content_sha256": content_sha256(row["content"]),
             "source_trust": row["source_trust"],
             "instruction_boundary": instruction_boundary(row["source_trust"]),
         }
@@ -312,7 +539,11 @@ def register(mcp: FastMCP) -> None:
         """Return all context sections as a dict keyed by section_name."""
         db = get_db(ctx)
         cursor = await db.execute(
-            "SELECT section_name, owner, content, updated_at, source_trust FROM context_sections ORDER BY section_name"
+            """
+            SELECT section_name, owner, content, updated_at, source_trust, version
+            FROM context_sections
+            ORDER BY section_name
+            """
         )
         rows = await cursor.fetchall()
         return {
@@ -320,6 +551,8 @@ def register(mcp: FastMCP) -> None:
                 "owner": r["owner"],
                 "content": r["content"],
                 "updated_at": r["updated_at"],
+                "version": r["version"],
+                "content_sha256": content_sha256(r["content"]),
                 "source_trust": r["source_trust"],
                 "instruction_boundary": instruction_boundary(r["source_trust"]),
             }

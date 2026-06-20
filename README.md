@@ -41,6 +41,11 @@ bridge-db replaces ad hoc edits to `claude_ai_context.md` with a structured SQLi
   clean signals are `unprocessed_shipped=0`, `processed_shipped_without_receipt=0`,
   and `fts_missing=0`. Use `POST-SYNC-REVIEW.md` after future Bridge Sync runs
   and keep new work scoped to real cross-system state coordination needs.
+- CAS/provenance hardening added schema v10: context sections now carry integer
+  `version` tokens, `update_section` accepts `if_match_version`, stale writes and
+  raced handoff claims create durable `write_conflicts` receipts, and
+  `export_bridge_markdown` records the exported section version/hash so
+  `sync_from_file` can reject stale fallback-file imports.
 
 ## Architecture
 
@@ -59,13 +64,13 @@ Codex      ──► MCP stdio ──► bridge-db process ──►  ~/.local/s
                                            memory/claude_ai_context.md
 ```
 
-No shared daemon. Each MCP client spawns its own `bridge-db` process via stdio. WAL mode + `PRAGMA busy_timeout=5000` handles concurrent writes safely.
+No shared daemon. Each MCP client spawns its own `bridge-db` process via stdio. WAL mode + `PRAGMA busy_timeout=15000` handles concurrent writer waiting; logical stale-write protection comes from CAS on mutable context sections.
 
 ## Tools
 
 Verify the current tool count from source with
-`rg '@mcp\.tool' src/bridge_db -c`. As of the 2026-06-19 source check, the
-surface is 25 tools across these 9 modules:
+`rg '@mcp\.tool' src/bridge_db -c`. As of the 2026-06-20 source check, the
+surface is 26 tools across these 10 modules:
 
 | Module | Tools |
 |---|---|
@@ -78,6 +83,7 @@ surface is 25 tools across these 9 modules:
 | health | `health`, `status` |
 | recall | `recall`, `recall_stats` |
 | audit | `audit_tail` |
+| conflicts | `get_write_conflicts` |
 
 Write tools enforce `caller` ownership, so systems can only write the slices of state they own. Recent hardening also added `notion_os` and `personal_ops` as first-class activity and cost writers.
 
@@ -90,9 +96,30 @@ Instruction-bearing rows carry a `source_trust` label — `operator`, `agent`, o
   - `operator`-trust → picks up in one call (`cc` and `codex`).
   - `cc` + non-`operator` → returns `requires_confirmation` and does **not** transition; re-invoke with `confirm=True` to proceed.
   - `codex` + non-`operator` → **refused** (Codex runs with `danger-full-access`; `confirm` cannot bypass it). Promote the handoff to `operator` trust first.
-- **Visibility:** `get_pending_handoffs`, `get_section`, `get_all_sections`, and `recall` hits carry `source_trust` plus `instruction_boundary` metadata that tells consumers returned content is stored data, not instructions. `status` reports `pending_handoffs_by_trust` and `health` a full per-table `source_trust_breakdown`. Each gate decision (`allowed` / `confirmation_required` / `refused`) is written to the audit log.
+- **Visibility:** `get_pending_handoffs`, `get_section`, `get_all_sections`, `get_recent_activity`, `get_activity_signal`, `get_shipped_events`, `get_latest_snapshot`, and `recall` hits carry `source_trust` plus `instruction_boundary` metadata that tells consumers returned content is stored data, not instructions. Lifecycle aggregates use a trust summary and `source_trust="mixed"` when rows differ. `status` reports `pending_handoffs_by_trust` and `health` a full per-table `source_trust_breakdown`. Each gate decision (`allowed` / `confirmation_required` / `refused`) is written to the audit log.
 
 > Consumers authoring an operator-directed handoff (e.g. the `vibe-code-handoff` skill) should pass `source_trust="operator"` on `create_handoff` so it picks up without confirmation.
+
+## CAS & Conflict Receipts
+
+Context sections are the mutable bridge surface, so they carry a monotonic
+`version` token. Consumers should read with `get_section`, edit locally, then
+call `update_section(..., if_match_version=<version>)`. A stale token returns
+`ok=false`, `conflict=true`, and a `receipt_id` instead of clobbering a newer
+row. `if_match_updated_at` remains as a compatibility guard, but `version` is
+the preferred token because timestamps have one-second resolution.
+
+Existing-row blind writes are temporarily allowed in canary mode and returned as
+`legacy_blind_write=true`; set `BRIDGE_DB_CONTEXT_CAS_MODE=enforce` to reject
+them. New section inserts without CAS remain allowed.
+
+`export_bridge_markdown` records the exported version/hash for each rendered
+Claude.ai-owned context section. Later `sync_from_file` imports a changed
+fallback-file section only if the DB still matches that exported base. If the DB
+has advanced, the import is rejected and recorded in `write_conflicts`.
+
+Use `get_write_conflicts(status="open")` to inspect stale section writes,
+stale markdown imports, and raced handoff claims.
 
 ## Commands
 

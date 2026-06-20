@@ -85,10 +85,10 @@ Once `BRIDGE_DB_AUTH_MODE` leaves `off`, the `env` block above is required: the
 `BRIDGE_DB_PRINCIPAL_TOKEN`, and `BRIDGE_DB_AUTH_MODE` sets the rollout dial. In
 `off` mode the env block may be omitted and legacy behavior is fully preserved.
 
-This gives Claude.ai access to all 24 MCP tools under `mcp__bridge_db__*`, including
+This gives Claude.ai access to all 26 MCP tools under `mcp__bridge_db__*`, including
 the read-only `health` and `status` diagnostics, the file-import helper `sync_from_file`,
 the `recall` FTS5 lexical search (Phase −1 of the semantic memory layer), and the
-observability tools `recall_stats` and `audit_tail` over the JSONL logs.
+observability tools `recall_stats`, `audit_tail`, and `get_write_conflicts`.
 
 This exact `uv`-based stdio launch path is the documented local target and has been
 validated in the current setup.
@@ -157,19 +157,28 @@ manual drift until proven otherwise.
 
 ### update_section (Claude.ai writes)
 
-When Claude.ai edits Career, Speaking, Research, or Capabilities sections:
+When Claude.ai edits Career, Speaking, Research, or Capabilities sections, it
+should first read the current section and then pass the returned `version` back
+as `if_match_version`:
 
 ```python
+current = mcp__bridge_db__get_section(section_name="career")
 mcp__bridge_db__update_section(
     caller="claude_ai",
     section_name="career",
     content="<new content>",
+    if_match_version=current["version"],
 )
 mcp__bridge_db__export_bridge_markdown()  # keep file in sync for Codex fallback
 ```
 
 The `update_section` tool enforces ownership — only `caller="claude_ai"` can write
 these sections. CC and Codex calls with these section names will receive a ToolError.
+If the section changed since `current` was read, `update_section` returns
+`ok=False`, `conflict=True`, and a `receipt_id`; re-read, merge deliberately, and
+retry with the new version. Existing-row blind writes are temporarily allowed for
+compatibility and returned as `legacy_blind_write=True`, but consumers should not
+depend on that path.
 
 ### sync_from_file (startup safety net)
 
@@ -180,8 +189,12 @@ mcp__bridge_db__sync_from_file()
 ```
 
 This reads `BRIDGE_FILE_PATH`, extracts only the four Claude.ai-owned headings, and
-upserts them into `context_sections` with `owner="claude_ai"`. It does not touch
+imports them into `context_sections` with `owner="claude_ai"` only when the DB still
+matches the version/hash last written by `export_bridge_markdown`. It does not touch
 handoffs, snapshots, activity, or any CC/Codex-owned section content.
+If the DB changed after the fallback file was exported, the file import is
+rejected for that section and recorded in `write_conflicts`; the DB row wins until
+an operator or client re-reads and merges.
 
 **With auth active (`BRIDGE_DB_AUTH_MODE` != `off`):** the file is an unauthenticated
 channel by design. Changed or new sections are imported as `source_trust='ingested'`
@@ -265,7 +278,9 @@ refuses `SHIPPED` activity ids.
 
 Each MCP client (CC, Codex, Claude Desktop) launches its own `bridge-db` process via
 stdio. All processes share the same SQLite file at `~/.local/share/bridge-db/bridge.db`
-with WAL mode + `PRAGMA busy_timeout=5000` for safe concurrent access.
+with WAL mode + `PRAGMA busy_timeout=15000` for concurrent writer waiting. Logical
+lost-update protection is handled by context-section CAS and handoff claim guards,
+not by WAL alone.
 
 There is no shared bridge-db daemon, no HTTP transport, and no need for a LaunchAgent.
 The stdio model is client-managed: the server process lives exactly as long as the

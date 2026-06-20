@@ -10,6 +10,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 import bridge_db.config as cfg
 from bridge_db.tools import context as mod
+from bridge_db.tools import export as exp_mod
 
 
 @pytest.fixture
@@ -317,12 +318,61 @@ v4
     second = await mod.sync_owned_sections_from_file(db=db, bridge_path=bridge_file)
 
     assert first["count"] == 4
-    assert second["count"] == 4
+    assert second["count"] == 0
+    assert second["unchanged"] == ["career", "speaking", "research", "capabilities"]
 
     cursor = await db.execute("SELECT COUNT(*) FROM context_sections")
     row = await cursor.fetchone()
     assert row is not None
     assert row[0] == 4
+
+
+async def test_sync_from_file_conflicts_when_db_changed_since_export(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
+) -> None:
+    bridge_file = tmp_path / "claude_ai_context.md"
+    original = cfg.BRIDGE_FILE_PATH
+    cfg.BRIDGE_FILE_PATH = bridge_file
+    cap = CaptureMCP()
+    exp_mod.register(cap)
+    try:
+        ctx = make_ctx(db)
+        await fns["update_section"](
+            caller="claude_ai", section_name="career", content="exported v1", ctx=ctx
+        )
+        await cap.fns["export_bridge_markdown"](ctx=ctx)
+        await fns["update_section"](
+            caller="claude_ai",
+            section_name="career",
+            content="db v2",
+            if_match_version=(await fns["get_section"](section_name="career", ctx=ctx))["version"],
+            ctx=ctx,
+        )
+        bridge_file.write_text(
+            """## Career & Professional Target
+stale file edit
+""",
+            encoding="utf-8",
+        )
+
+        result = await fns["sync_from_file"](ctx=ctx)
+    finally:
+        cfg.BRIDGE_FILE_PATH = original
+
+    assert result["count"] == 0
+    assert result["conflict_count"] == 1
+    assert result["conflicts"][0]["section_name"] == "career"
+    section = await fns["get_section"](section_name="career", ctx=ctx)
+    assert section["content"] == "db v2"
+    cursor = await db.execute(
+        "SELECT surface, target_key, reason FROM write_conflicts WHERE id = ?",
+        (result["conflicts"][0]["receipt_id"],),
+    )
+    receipt = await cursor.fetchone()
+    assert receipt is not None
+    assert receipt["surface"] == "markdown_sync"
+    assert receipt["target_key"] == "career"
+    assert receipt["reason"] == "stale_export_base"
 
 
 async def test_update_section_clamps_operator_self_promotion(

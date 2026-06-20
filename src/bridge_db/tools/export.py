@@ -11,7 +11,7 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 
 from bridge_db import config
-from bridge_db.db import get_db
+from bridge_db.db import content_sha256, get_db
 
 logger = logging.getLogger("bridge_db.tools.export")
 
@@ -241,6 +241,40 @@ async def build_markdown(db: Any) -> str:
     return "\n".join(parts)
 
 
+async def record_context_export_state(db: Any) -> int:
+    """Record the context-section versions/hashes represented in the markdown export."""
+    cursor = await db.execute(
+        """
+        SELECT section_name, content, version
+        FROM context_sections
+        WHERE section_name IN (?, ?, ?, ?)
+        """,
+        tuple(_SECTION_ORDER),
+    )
+    rows = await cursor.fetchall()
+    exported = 0
+    for row in rows:
+        await db.execute(
+            """
+            INSERT INTO context_section_export_state (
+                section_name, exported_version, exported_content_sha256, exported_at
+            )
+            VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            ON CONFLICT(section_name) DO UPDATE SET
+                exported_version = excluded.exported_version,
+                exported_content_sha256 = excluded.exported_content_sha256,
+                exported_at = excluded.exported_at
+            """,
+            (
+                row["section_name"],
+                row["version"],
+                content_sha256(str(row["content"]).strip("\n")),
+            ),
+        )
+        exported += 1
+    return exported
+
+
 def register(mcp: FastMCP) -> None:
     @mcp.tool()
     async def export_bridge_markdown(
@@ -251,7 +285,14 @@ def register(mcp: FastMCP) -> None:
         content = await build_markdown(db)
 
         write_bridge_file(content)
+        exported_context_sections = await record_context_export_state(db)
+        await db.commit()
         bridge_path = config.BRIDGE_FILE_PATH
 
         logger.info("bridge markdown exported: %s (%d bytes)", bridge_path, len(content))
-        return {"ok": True, "path": str(bridge_path), "bytes": len(content)}
+        return {
+            "ok": True,
+            "path": str(bridge_path),
+            "bytes": len(content),
+            "exported_context_sections": exported_context_sections,
+        }

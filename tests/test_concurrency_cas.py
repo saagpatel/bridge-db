@@ -18,6 +18,8 @@ import pytest
 from conftest import CaptureMCP, make_ctx
 from mcp.server.fastmcp.exceptions import ToolError
 
+from bridge_db import config
+from bridge_db.tools import conflicts as conflict_mod
 from bridge_db.tools import context as c_mod
 from bridge_db.tools import handoffs as h_mod
 
@@ -59,6 +61,28 @@ async def test_update_section_if_match_success(
     assert refreshed["content"] == "v2"
 
 
+async def test_update_section_if_match_version_success_increments_version(
+    db: aiosqlite.Connection, c_fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await c_fns["update_section"](caller="claude_ai", section_name="career", content="v1", ctx=ctx)
+    current = await c_fns["get_section"](section_name="career", ctx=ctx)
+
+    result = await c_fns["update_section"](
+        caller="claude_ai",
+        section_name="career",
+        content="v2",
+        if_match_version=current["version"],
+        ctx=ctx,
+    )
+
+    assert result["ok"] is True
+    assert result["version"] == current["version"] + 1
+    refreshed = await c_fns["get_section"](section_name="career", ctx=ctx)
+    assert refreshed["content"] == "v2"
+    assert refreshed["version"] == result["version"]
+
+
 async def test_update_section_if_match_conflict_preserves_concurrent_write(
     db: aiosqlite.Connection, c_fns: dict[str, Any]
 ) -> None:
@@ -94,6 +118,41 @@ async def test_update_section_if_match_conflict_preserves_concurrent_write(
     assert survivor["content"] == "concurrent edit"
 
 
+async def test_update_section_version_cas_catches_same_second_conflict(
+    db: aiosqlite.Connection, c_fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await c_fns["update_section"](caller="claude_ai", section_name="career", content="v1", ctx=ctx)
+    await db.execute(
+        "UPDATE context_sections SET updated_at = '2026-01-01T00:00:00Z', version = 1 "
+        "WHERE section_name = 'career'"
+    )
+    await db.commit()
+    stale = await c_fns["get_section"](section_name="career", ctx=ctx)
+
+    await db.execute(
+        "UPDATE context_sections SET content = 'concurrent same-second edit', "
+        "updated_at = '2026-01-01T00:00:00Z', version = 2 WHERE section_name = 'career'"
+    )
+    await db.commit()
+
+    result = await c_fns["update_section"](
+        caller="claude_ai",
+        section_name="career",
+        content="stale clobber",
+        if_match_updated_at=stale["updated_at"],
+        if_match_version=stale["version"],
+        ctx=ctx,
+    )
+
+    assert result["ok"] is False
+    assert result["conflict"] is True
+    assert result["receipt_id"]
+    assert result["current_version"] == 2
+    survivor = await c_fns["get_section"](section_name="career", ctx=ctx)
+    assert survivor["content"] == "concurrent same-second edit"
+
+
 async def test_update_section_without_if_match_is_blind_backcompat(
     db: aiosqlite.Connection, c_fns: dict[str, Any]
 ) -> None:
@@ -104,8 +163,58 @@ async def test_update_section_without_if_match_is_blind_backcompat(
         caller="claude_ai", section_name="career", content="v2", ctx=ctx
     )
     assert result["ok"] is True
+    assert result["legacy_blind_write"] is True
     section = await c_fns["get_section"](section_name="career", ctx=ctx)
     assert section["content"] == "v2"
+
+
+async def test_update_section_without_if_match_can_be_enforced(
+    db: aiosqlite.Connection, c_fns: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx = make_ctx(db)
+    await c_fns["update_section"](caller="claude_ai", section_name="career", content="v1", ctx=ctx)
+    monkeypatch.setattr(config, "CONTEXT_CAS_MODE", "enforce")
+
+    result = await c_fns["update_section"](
+        caller="claude_ai", section_name="career", content="blind v2", ctx=ctx
+    )
+
+    assert result["ok"] is False
+    assert result["conflict"] is True
+    assert result["reason_code"] == "missing_cas"
+    survivor = await c_fns["get_section"](section_name="career", ctx=ctx)
+    assert survivor["content"] == "v1"
+
+
+async def test_get_write_conflicts_reads_section_conflict_receipts(
+    db: aiosqlite.Connection, c_fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await c_fns["update_section"](caller="claude_ai", section_name="career", content="v1", ctx=ctx)
+    stale = await c_fns["get_section"](section_name="career", ctx=ctx)
+    await c_fns["update_section"](
+        caller="claude_ai",
+        section_name="career",
+        content="v2",
+        if_match_version=stale["version"],
+        ctx=ctx,
+    )
+    conflict = await c_fns["update_section"](
+        caller="claude_ai",
+        section_name="career",
+        content="stale",
+        if_match_version=stale["version"],
+        ctx=ctx,
+    )
+
+    cap = CaptureMCP()
+    conflict_mod.register(cap)
+    receipts = await cap.fns["get_write_conflicts"](ctx=ctx)
+
+    assert receipts[0]["id"] == conflict["receipt_id"]
+    assert receipts[0]["surface"] == "context_section"
+    assert receipts[0]["target_key"] == "career"
+    assert receipts[0]["reason"] == "stale_cas"
 
 
 # ── pick_up_handoff double-claim TOCTOU (rank #6) ────────────────────────────
@@ -171,6 +280,15 @@ async def test_pick_up_handoff_rejects_concurrent_claim(
     row = await cursor.fetchone()
     assert row is not None
     assert row["status"] == "active"
+    receipt_cursor = await db.execute(
+        "SELECT surface, target_key, operation, reason FROM write_conflicts"
+    )
+    receipt = await receipt_cursor.fetchone()
+    assert receipt is not None
+    assert receipt["surface"] == "handoff"
+    assert receipt["target_key"] == str(handoff_id)
+    assert receipt["operation"] == "pick_up_handoff"
+    assert receipt["reason"] == "raced_claim"
 
 
 async def test_pick_up_handoff_normal_path_still_works(

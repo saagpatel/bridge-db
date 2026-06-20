@@ -62,6 +62,52 @@ async def test_get_activity_signal_carries_instruction_boundary(
     _assert_boundary(substantive[0]["instruction_boundary"], "agent")
 
 
+async def test_get_activity_signal_lifecycle_aggregate_carries_trust_summary(
+    db: aiosqlite.Connection, a_fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await a_fns["log_activity"](
+        caller="cc",
+        project_name="P",
+        summary="CC session ended",
+        tags=["session-boundary"],
+        source_trust="agent",
+        ctx=ctx,
+    )
+    await a_fns["log_activity"](
+        caller="cc",
+        project_name="P",
+        summary="CC session ended",
+        tags=["session-boundary"],
+        source_trust="ingested",
+        ctx=ctx,
+    )
+
+    entries = await a_fns["get_activity_signal"](ctx=ctx)
+    aggregate = next(e for e in entries if e.get("kind") == "lifecycle_aggregate")
+    assert aggregate["source_trust"] == "mixed"
+    assert aggregate["source_trust_summary"] == {"agent": 1, "ingested": 1}
+    _assert_boundary(aggregate["instruction_boundary"], "mixed")
+
+
+async def test_get_shipped_events_carries_instruction_boundary(
+    db: aiosqlite.Connection, a_fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await a_fns["log_activity"](
+        caller="cc",
+        project_name="P",
+        summary="shipped",
+        tags=["SHIPPED"],
+        source_trust="ingested",
+        ctx=ctx,
+    )
+
+    shipped = await a_fns["get_shipped_events"](ctx=ctx)
+    assert shipped[0]["source_trust"] == "ingested"
+    _assert_boundary(shipped[0]["instruction_boundary"], "ingested")
+
+
 async def test_get_latest_snapshot_carries_instruction_boundary(
     db: aiosqlite.Connection, s_fns: dict[str, Any]
 ) -> None:

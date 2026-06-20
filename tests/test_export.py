@@ -113,6 +113,37 @@ async def test_export_writes_to_file(
     cfg.BRIDGE_FILE_PATH = original  # restore
 
 
+async def test_export_records_context_section_export_state(
+    db: aiosqlite.Connection, all_fns: dict[str, Any], tmp_path: Path
+) -> None:
+    import bridge_db.config as cfg
+
+    original = cfg.BRIDGE_FILE_PATH
+    cfg.BRIDGE_FILE_PATH = tmp_path / "bridge.md"
+    try:
+        ctx = make_ctx(db)
+        await all_fns["update_section"](
+            caller="claude_ai", section_name="career", content="exported career", ctx=ctx
+        )
+        result = await all_fns["export_bridge_markdown"](ctx=ctx)
+    finally:
+        cfg.BRIDGE_FILE_PATH = original
+
+    assert result["exported_context_sections"] == 1
+    cursor = await db.execute(
+        """
+        SELECT s.version, e.exported_version, e.exported_content_sha256
+        FROM context_sections AS s
+        JOIN context_section_export_state AS e ON e.section_name = s.section_name
+        WHERE s.section_name = 'career'
+        """
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["exported_version"] == row["version"]
+    assert row["exported_content_sha256"]
+
+
 async def test_export_frontmatter_present(db: aiosqlite.Connection) -> None:
     md = await _build_markdown(db)
     assert "---" in md

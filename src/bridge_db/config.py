@@ -72,3 +72,7 @@ PRINCIPALS_PATH: Path = Path(
 # 'enforce' (reject mismatches and unbound writes). Unrecognized values are
 # treated as 'enforce' by auth.auth_mode() — fail closed.
 AUTH_MODE: str = os.environ.get("BRIDGE_DB_AUTH_MODE", "off")
+
+# Context-section CAS rollout dial: 'warn' keeps legacy existing-row blind writes
+# compatible but marks/audits them; 'enforce' rejects existing-row blind writes.
+CONTEXT_CAS_MODE: str = os.environ.get("BRIDGE_DB_CONTEXT_CAS_MODE", "warn")
