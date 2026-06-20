@@ -22,8 +22,8 @@ A branch is safe to delete when at least one of these is true:
   useful work, and remote verification confirms no open PR depends on it.
 
 For local branches, prefer `git branch -d`. Use `git branch -D` only when the
-hook can prove patch-equivalence or identical tree state, or when the operator
-explicitly approves preserving the evidence elsewhere first.
+hook can prove patch-equivalence or identical tree state, or when the ref is
+already in the explicit retired-ref namespace `archive/`.
 
 ## Preserve Or Archive
 
@@ -39,6 +39,12 @@ Preserve or rename it under `archive/` when:
 For local-only branches, an `archive/<topic>-<date>` rename is usually enough.
 For shared remote branches, leave the ref in place until there is explicit owner
 or repo-policy approval to delete it.
+
+Archived local refs are not permanent by default. After their evidence and
+abandonment decision are recorded in the session report or bridge activity, the
+local `archive/*` pointer may be deleted with `git branch -D`. This keeps
+non-equivalent work from disappearing accidentally while still letting cleanup
+finish once the branch has been intentionally retired.
 
 ## Evidence Checklist
 
@@ -66,6 +72,8 @@ Interpretation:
   the branch.
 - Branch-side non-equivalent commits exist: preserve, archive, or request an
   explicit abandonment decision.
+- Branch-side non-equivalent commits already live under `archive/`: delete only
+  after the abandonment decision has been recorded.
 - The diff removes current schema, auth, workflow, or test surfaces from `main`:
   treat it as stale/regressive unless a current owner says otherwise.
 
