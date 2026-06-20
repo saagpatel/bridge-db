@@ -211,6 +211,7 @@ The current operating model is:
 ## Docs
 
 - [`OPERATOR-CHECKLIST.md`](OPERATOR-CHECKLIST.md) — Local verification and Claude.ai registration checklist
+- [`docs/BRANCH-RETIREMENT.md`](docs/BRANCH-RETIREMENT.md) — Branch cleanup and stale-ref disposition policy
 - [`POST-SYNC-REVIEW.md`](POST-SYNC-REVIEW.md) — Bridge-sync and shipped-event post-run evidence checklist
 - [`docs/EXTERNAL-WRITER-AUDIT.md`](docs/EXTERNAL-WRITER-AUDIT.md) — Direct bridge-db writer audit outside the repo
 - [`ROADMAP.md`](ROADMAP.md) — Execution roadmap for the next integration phases
