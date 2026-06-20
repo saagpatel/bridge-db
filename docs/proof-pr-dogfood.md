@@ -9,7 +9,7 @@ environment and render the proof block from the generated receipt:
 ```bash
 python3 -m venv /tmp/proof-pr-dogfood-venv
 /tmp/proof-pr-dogfood-venv/bin/python -m pip install \
-  git+https://github.com/saagpatel/proof-pr.git@v0.2.12
+  git+https://github.com/saagpatel/proof-pr.git@v0.2.13
 /tmp/proof-pr-dogfood-venv/bin/proof-pr init \
   --cwd . \
   --tier T1 \
@@ -39,6 +39,8 @@ The reusable workflow writes the normal hygiene report plus a focused public git
 metadata fix block to the GitHub job summary when that finding exists.
 If no focused fix is needed, the block prints a clean no-action-needed note.
 Use `proof-pr examples` when choosing which receipt pattern to copy.
+The reusable workflow uploads `proof-pr-summary.md` with the rendered proof
+block alongside the receipt and any configured proof artifacts.
 
 For bridge-db, keep the risk tier honest:
 
