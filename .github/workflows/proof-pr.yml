@@ -5,6 +5,9 @@ on:
 
 jobs:
   proof:
+    permissions:
+      contents: read
+      actions: read
     uses: saagpatel/proof-pr/.github/workflows/proof-pr-receipt.yml@v0.1.2
     with:
       receipt_path: docs/proof-pr-dogfood.receipt.json
