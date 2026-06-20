@@ -16,6 +16,9 @@ Expected result
 - Local `main` is not behind `origin/main`.
 - `HEAD` and `origin/main` match before declaring repo state current.
 - Merged local or remote work branches are treated as cleanup candidates.
+- Branch cleanup follows [docs/BRANCH-RETIREMENT.md](docs/BRANCH-RETIREMENT.md):
+  delete only ancestor-merged, patch-equivalent, or explicitly abandoned refs;
+  archive or preserve non-equivalent branches until a disposition is recorded.
 
 Then run these commands from the repo root:
 
