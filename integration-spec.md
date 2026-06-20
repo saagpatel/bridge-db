@@ -3,7 +3,7 @@
 This document describes how Claude.ai interacts with bridge-db — current direct MCP
 usage, the file fallback path, and the remaining limitations.
 
-See `ROADMAP.md` for the closed roadmap state, and `OPERATOR-CHECKLIST.md` for the
+See `ROADMAP.md` for the closed roadmap state, and `docs/internal/OPERATOR-CHECKLIST.md` for the
 local verification and registration checklist.
 
 ## Current State

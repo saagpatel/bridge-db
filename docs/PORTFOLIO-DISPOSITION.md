@@ -40,12 +40,12 @@ Only `origin` (`saagpatel/bridge-db`). Clean migration state.
 - Repo tree includes:
   - `src/` (Python source for 24 MCP tools)
   - `tests/` (263 tests)
-  - `OPERATOR-CHECKLIST.md` + `POST-SYNC-REVIEW.md` + `ROADMAP.md`
-    + `PHASE-3-DECISION.md` (operator-authored governance)
-  - `integration-spec.md` + `codex-migration.md`
-  - `bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2{,.1}.md`
+  - `docs/internal/OPERATOR-CHECKLIST.md` + `docs/internal/POST-SYNC-REVIEW.md` + `ROADMAP.md`
+    + `docs/internal/PHASE-3-DECISION.md` (operator-authored governance)
+  - `integration-spec.md` + `docs/internal/codex-migration.md`
+  - `docs/internal/bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2{,.1}.md`
     (closed semantic memory arc)
-  - `eval-set-handoff-package.md`
+  - `docs/internal/eval-set-handoff-package.md`
   - `semantic_quality_set.json`
   - `uv.lock` (uv-managed)
 - Default branch: `main`
@@ -73,7 +73,7 @@ passing. ruff + pyright clean. **Operator-declared steady
 maintenance** with scope pinned to cross-system state coordination
 + lexical recall + observability.
 
-For full detail see `README.md` + `ROADMAP.md` + `OPERATOR-CHECKLIST.md`
+For full detail see `README.md` + `ROADMAP.md` + `docs/internal/OPERATOR-CHECKLIST.md`
 on `origin/main`.
 
 ---
@@ -188,7 +188,7 @@ unlikely).
 | Special concern | **MCP spec stability.** Anthropic's MCP evolves; pin and monitor. |
 | Special concern | **SQLite WAL size monitoring** via `health` tool. |
 | Special concern | **Scope discipline**: "not a knowledge store." Resist requests to add knowledge-store features; refer to dedicated tools (engraph, etc.). |
-| Special concern | **`POST-SYNC-REVIEW.md`** workflow after Bridge Sync runs is operator-canonical. |
+| Special concern | **`docs/internal/POST-SYNC-REVIEW.md`** workflow after Bridge Sync runs is operator-canonical. |
 
 ---
 
@@ -196,7 +196,7 @@ unlikely).
 
 1. Verify branch tracking.
 2. No stash needed (working tree was clean).
-3. **Re-read `OPERATOR-CHECKLIST.md` + `POST-SYNC-REVIEW.md`** —
+3. **Re-read `docs/internal/OPERATOR-CHECKLIST.md` + `docs/internal/POST-SYNC-REVIEW.md`** —
    operator-authored governance.
 4. Verify all three MCP client integrations still functional
    (Claude.ai via Desktop, CC via skills, Codex via stdio).

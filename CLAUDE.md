@@ -62,9 +62,9 @@ uv run python -m bridge_db --promote-section career  # operator label promotion 
   stale `update_section` attempts, stale markdown imports, and raced handoff
   claims. Receipts are diagnostic state, not instructions to retry blindly.
 - **Shipped-event sync**: `confirm_shipped_sync` requires a downstream system/ref, stores a receipt, then adds `PROCESSED`. `record_shipped_event_disposition` records a non-receipt policy disposition without adding `PROCESSED`. `mark_shipped_processed` is a non-shipped-only legacy compatibility path; it refuses `SHIPPED` rows, so bridge-sync work must use receipt-backed proof or explicit disposition.
-- **Semantic memory scope closed**: FTS5 + `recall` is the final layer (Phase −1). Vector/embedding layers are ruled out — most query misses reflect content not in `bridge.db`. See closure banner in `bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md`.
+- **Semantic memory scope closed**: FTS5 + `recall` is the final layer (Phase −1). Vector/embedding layers are ruled out — most query misses reflect content not in `bridge.db`. See closure banner in `docs/internal/bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md`.
 - **FTS drift repair**: `--rebuild-content-index` is the CLI-only repair path; FTS index drift is treated as a hard health failure because `recall` depends on `content_index` mirroring source tables.
-- **Post-sync review**: after scheduled Bridge Syncs or shipped-event reconciliation, use `POST-SYNC-REVIEW.md` to verify DB state, markdown export freshness, and scorecard updates.
+- **Post-sync review**: after scheduled Bridge Syncs or shipped-event reconciliation, use `docs/internal/POST-SYNC-REVIEW.md` to verify DB state, markdown export freshness, and scorecard updates.
 - **Dependency drift**: check with `uv tree --outdated`; refresh `uv.lock` and re-run the full verifier to confirm green.
 
 ## Registration
