@@ -9,7 +9,7 @@ environment and render the proof block from the generated receipt:
 ```bash
 python3 -m venv /tmp/proof-pr-dogfood-venv
 /tmp/proof-pr-dogfood-venv/bin/python -m pip install \
-  git+https://github.com/saagpatel/proof-pr.git@v0.1.1
+  git+https://github.com/saagpatel/proof-pr.git@v0.2.7
 /tmp/proof-pr-dogfood-venv/bin/proof-pr init \
   --cwd . \
   --tier T1 \
@@ -20,11 +20,19 @@ python3 -m venv /tmp/proof-pr-dogfood-venv
   --cwd .
 /tmp/proof-pr-dogfood-venv/bin/proof-pr render \
   /tmp/proof-pr-dogfood.json
+/tmp/proof-pr-dogfood-venv/bin/proof-pr receipt-hygiene \
+  /tmp/proof-pr-dogfood.json \
+  --explain
 ```
 
 Use the rendered block in the PR body and keep the JSON receipt as local review
 evidence. The receipt is not supply-chain provenance; release/build tiers should
 link separate attestations or artifact digests when those become relevant.
+
+`receipt-hygiene --explain` is the author-facing nudge for incomplete receipts.
+It keeps hygiene read-only, but adds copyable commands and compact receipt patch
+examples for missing evidence such as public git metadata, secrets posture,
+permission posture, or rollback specificity.
 
 For bridge-db, keep the risk tier honest:
 
