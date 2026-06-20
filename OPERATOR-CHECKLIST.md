@@ -19,6 +19,8 @@ Expected result
 - Branch cleanup follows [docs/BRANCH-RETIREMENT.md](docs/BRANCH-RETIREMENT.md):
   delete only ancestor-merged, patch-equivalent, or explicitly abandoned refs;
   archive or preserve non-equivalent branches until a disposition is recorded.
+  Local `archive/*` refs may be deleted after that abandonment disposition is
+  recorded.
 
 Then run these commands from the repo root:
 
