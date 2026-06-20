@@ -1,0 +1,13 @@
+name: proof-pr
+
+on:
+  workflow_dispatch:
+
+jobs:
+  proof:
+    uses: saagpatel/proof-pr/.github/workflows/proof-pr-receipt.yml@v0.1.2
+    with:
+      receipt_path: docs/proof-pr-dogfood.receipt.json
+      proof_pr_ref: v0.1.2
+      artifact_name: bridge-db-proof-pr-dogfood
+      artifact_glob: docs/proof-pr-dogfood.md
