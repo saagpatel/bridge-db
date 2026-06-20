@@ -9,7 +9,7 @@ environment and render the proof block from the generated receipt:
 ```bash
 python3 -m venv /tmp/proof-pr-dogfood-venv
 /tmp/proof-pr-dogfood-venv/bin/python -m pip install \
-  git+https://github.com/saagpatel/proof-pr.git@v0.2.8
+  git+https://github.com/saagpatel/proof-pr.git@v0.2.9
 /tmp/proof-pr-dogfood-venv/bin/proof-pr init \
   --cwd . \
   --tier T1 \
@@ -34,6 +34,8 @@ link separate attestations or artifact digests when those become relevant.
 `receipt-hygiene --explain` is the author-facing nudge for incomplete receipts.
 Add `--check <id> --fix-only` when you want just one copyable command and compact
 receipt patch, instead of the full hygiene report. It keeps hygiene read-only.
+The reusable workflow writes the normal hygiene report plus a focused public git
+metadata fix block to the GitHub job summary when that finding exists.
 
 For bridge-db, keep the risk tier honest:
 
