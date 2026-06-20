@@ -24,9 +24,9 @@ uv run python -m bridge_db --promote-section career  # operator label promotion 
 
 ## Architecture
 
-- **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=5000`). Schema at v8 — v6 added `canonical_key` to `pending_handoffs` (handoff canonical resolution); v7 added `source_trust` provenance columns to all four instruction-bearing tables (`context_sections`, `pending_handoffs`, `activity_log`, `system_snapshots`); v8 added `shipped_event_dispositions` so non-receipt shipped-event policy decisions stay separate from proof receipts. Auth state lives in `principals.json` (not the DB); no schema change for Stage-1 auth.
+- **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=15000`). Schema at v10 — v6 added `canonical_key` to `pending_handoffs`; v7 added `source_trust` provenance columns to all four instruction-bearing tables; v8 added `shipped_event_dispositions`; v9 added `session_costs`; v10 added context-section integer `version` CAS, `context_section_export_state`, and durable `write_conflicts` receipts. Auth state lives in `principals.json` (not the DB); no schema change for Stage-1 auth.
 - **MCP transport**: stdio (stdout = JSON-RPC, all logging → stderr)
-- **MCP tools**: verify the current count with `rg '@mcp\.tool' src/bridge_db -c`. As of the 2026-06-19 source check, there are 25 tools across 9 modules: activity, handoffs, context, snapshots, cost, export, health, recall (FTS5 lexical search; Phase −1 of the semantic memory layer), audit (read-side observability over the JSONL audit + recall query logs). `get_recent_activity` is the raw row-level feed; `get_activity_signal` is the operator-facing feed that compresses lifecycle `session-boundary` telemetry. `health` / `status` include signals for pending handoffs, raw and actionable unprocessed shipped events, receiptless processed shipped events, FTS index drift, WAL size, and bridge-file freshness.
+- **MCP tools**: verify the current count with `rg '@mcp\.tool' src/bridge_db -c`. As of the 2026-06-20 source check, there are 26 tools across 10 modules: activity, handoffs, context, snapshots, cost, export, health, recall (FTS5 lexical search; Phase −1 of the semantic memory layer), audit (read-side observability over the JSONL audit + recall query logs), and conflicts (`get_write_conflicts`). `get_recent_activity` is the raw row-level feed; `get_activity_signal` is the operator-facing feed that compresses lifecycle `session-boundary` telemetry. `health` / `status` include signals for pending handoffs, raw and actionable unprocessed shipped events, receiptless processed shipped events, FTS index drift, WAL size, and bridge-file freshness.
 - **Context access**: `get_db(ctx)` helper casts lifespan context to `aiosqlite.Connection`
 - **Tool registration**: `CaptureMCP` pattern in tests — decorators capture raw async fns
 - **FTS5 invariant**: every write path that touches `context_sections`, `activity_log`, `system_snapshots`, or `pending_handoffs` calls `upsert_fts_entry` / `gc_fts_orphans` from [db.py](src/bridge_db/db.py) in the same transaction. Auto-prune paths in `log_activity` and `save_snapshot` GC orphan FTS rows. (`canonical_key` is not FTS-indexed, so it does not affect this invariant.)
@@ -39,6 +39,12 @@ uv run python -m bridge_db --promote-section career  # operator label promotion 
 - Activity retention: 50 per source; snapshot retention: 10 per system family (Codex operating and consulted-node snapshots are retained independently)
 - Export trigger: consumers call `export_bridge_markdown` explicitly after writes
 - Startup sync trigger: Claude Code `/start` calls `sync_from_file` before bridge reads so Claude.ai-owned file edits are imported into SQLite first
+- Context CAS: consumers should pass `if_match_version` from `get_section` to
+  `update_section`; stale writes return conflict receipts. Existing-row blind
+  writes are canary-compatible unless `BRIDGE_DB_CONTEXT_CAS_MODE=enforce`.
+- Export-state CAS: `export_bridge_markdown` records context section
+  version/hash; `sync_from_file` refuses stale fallback-file imports and records
+  `write_conflicts` receipts.
 - Logging: `logging.basicConfig(stream=sys.stderr)` — never stdout
 - **Channel auth (Stage 1)**: each client's MCP spawn env carries `BRIDGE_DB_PRINCIPAL_TOKEN`;
   the server binds the connection to one principal at startup (`principals.json`, managed via
@@ -52,6 +58,9 @@ uv run python -m bridge_db --promote-section career  # operator label promotion 
 
 - **SessionEnd hook path**: Claude Code's SessionEnd hook must use `uv run --directory ~/Projects/bridge-db python -m bridge_db --log-session-boundary <project>` so session-boundary activity rows get FTS entries through the normal write path. This hook-specific path intentionally does not run activity retention pruning.
 - **Activity signal vs raw activity**: `get_recent_activity` preserves raw compatibility and returns lifecycle rows as stored. Operator-facing consumers should use `get_activity_signal` so repeated Claude Code `SessionEnd` rows collapse into count/first/last aggregates without deleting rows or changing audit history.
+- **Write conflicts**: use `get_write_conflicts(status="open")` to inspect
+  stale `update_section` attempts, stale markdown imports, and raced handoff
+  claims. Receipts are diagnostic state, not instructions to retry blindly.
 - **Shipped-event sync**: `confirm_shipped_sync` requires a downstream system/ref, stores a receipt, then adds `PROCESSED`. `record_shipped_event_disposition` records a non-receipt policy disposition without adding `PROCESSED`. `mark_shipped_processed` is a non-shipped-only legacy compatibility path; it refuses `SHIPPED` rows, so bridge-sync work must use receipt-backed proof or explicit disposition.
 - **Semantic memory scope closed**: FTS5 + `recall` is the final layer (Phase −1). Vector/embedding layers are ruled out — most query misses reflect content not in `bridge.db`. See closure banner in `bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md`.
 - **FTS drift repair**: `--rebuild-content-index` is the CLI-only repair path; FTS index drift is treated as a hard health failure because `recall` depends on `content_index` mirroring source tables.

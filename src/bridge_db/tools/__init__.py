@@ -8,6 +8,7 @@ def register_all(mcp: FastMCP) -> None:
     from bridge_db.tools import (
         activity,
         audit,
+        conflicts,
         context,
         cost,
         export,
@@ -26,3 +27,4 @@ def register_all(mcp: FastMCP) -> None:
     health.register(mcp)
     recall.register(mcp)
     audit.register(mcp)
+    conflicts.register(mcp)

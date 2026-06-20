@@ -24,6 +24,7 @@ async def test_schema_creates_all_tables(db: aiosqlite.Connection) -> None:
     assert tables == {
         "activity_log",
         "content_index",
+        "context_section_export_state",
         "context_sections",
         "cost_records",
         "pending_handoffs",
@@ -31,6 +32,7 @@ async def test_schema_creates_all_tables(db: aiosqlite.Connection) -> None:
         "shipped_event_dispositions",
         "shipped_sync_receipts",
         "system_snapshots",
+        "write_conflicts",
     }
 
 
@@ -45,6 +47,8 @@ async def test_schema_creates_indexes(db: aiosqlite.Connection) -> None:
     assert "idx_shipped_sync_downstream" in indexes
     assert "idx_sc_project" in indexes
     assert "idx_sc_started" in indexes
+    assert "idx_write_conflicts_status_created" in indexes
+    assert "idx_write_conflicts_surface_target" in indexes
 
 
 async def test_pragma_wal_mode(db: aiosqlite.Connection) -> None:
@@ -756,8 +760,17 @@ async def test_migration_v7_to_v8_adds_shipped_event_dispositions(tmp_path: Path
             notes TEXT,
             FOREIGN KEY(activity_id) REFERENCES activity_log(id) ON DELETE CASCADE
         );
+        CREATE TABLE context_sections (
+            section_name TEXT PRIMARY KEY,
+            owner TEXT NOT NULL CHECK(owner IN ('claude_ai', 'cc', 'codex')),
+            content TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested'))
+        );
         INSERT INTO activity_log (source, timestamp, project_name, summary, tags)
             VALUES ('cc', '2026-06-13', 'fable-outputs', 'manual artifact', '["SHIPPED"]');
+        INSERT INTO context_sections (section_name, owner, content, source_trust)
+            VALUES ('career', 'claude_ai', 'legacy career', 'operator');
         PRAGMA user_version = 7;
     """)
     await db.commit()
@@ -802,5 +815,57 @@ async def test_migration_v7_to_v8_adds_shipped_event_dispositions(tmp_path: Path
                 VALUES (2, 'bogus', 'invalid', 'codex')
                 """
             )
+    finally:
+        await migrated.close()
+
+
+async def test_migration_v9_to_v10_adds_context_versions_and_conflict_tables(
+    tmp_path: Path,
+) -> None:
+    """A v9 DB gains integer context CAS plus export-state and conflict receipts."""
+    db = await aiosqlite.connect(str(tmp_path / "v9.db"))
+    db.row_factory = aiosqlite.Row
+    await db.executescript("""
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE context_sections (
+            section_name TEXT PRIMARY KEY,
+            owner TEXT NOT NULL CHECK(owner IN ('claude_ai', 'cc', 'codex')),
+            content TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested'))
+        );
+        INSERT INTO context_sections (section_name, owner, content, source_trust)
+            VALUES ('career', 'claude_ai', 'legacy content', 'operator');
+        PRAGMA user_version = 9;
+    """)
+    await db.commit()
+    await db.close()
+
+    migrated = await open_db(tmp_path / "v9.db")
+    try:
+        cursor = await migrated.execute("PRAGMA user_version")
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == SCHEMA_VERSION
+
+        cursor = await migrated.execute(
+            "SELECT content, source_trust, version FROM context_sections WHERE section_name = 'career'"
+        )
+        section = await cursor.fetchone()
+        assert section is not None
+        assert section["content"] == "legacy content"
+        assert section["source_trust"] == "operator"
+        assert section["version"] == 1
+
+        cursor = await migrated.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table'
+              AND name IN ('context_section_export_state', 'write_conflicts')
+            ORDER BY name
+            """
+        )
+        tables = [r["name"] for r in await cursor.fetchall()]
+        assert tables == ["context_section_export_state", "write_conflicts"]
     finally:
         await migrated.close()

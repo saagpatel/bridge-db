@@ -77,6 +77,11 @@ def _activity_signal_sort_key(entry: dict[str, Any]) -> tuple[str, str, int]:
     return (timestamp, created_at, int(activity_id or 0))
 
 
+def _summarize_trust(counts: dict[str, int]) -> str:
+    nonzero = [trust for trust, count in counts.items() if count > 0]
+    return nonzero[0] if len(nonzero) == 1 else "mixed"
+
+
 def _select_activity_signal_entries(
     entries: list[dict[str, Any]], limit: int
 ) -> list[dict[str, Any]]:
@@ -130,10 +135,16 @@ def _load_meta_shipped_event_policy(project_name: str) -> dict[str, Any] | None:
 async def _export_bridge_markdown_after_processing(db: Any) -> None:
     """Keep the fallback bridge file current after shipped-event state changes."""
     try:
-        from bridge_db.tools.export import build_markdown, write_bridge_file
+        from bridge_db.tools.export import (
+            build_markdown,
+            record_context_export_state,
+            write_bridge_file,
+        )
 
         content = await build_markdown(db)
         write_bridge_file(content)
+        await record_context_export_state(db)
+        await db.commit()
         logger.info("auto-export triggered after shipped-event processing")
     except Exception:
         logger.warning("auto-export after shipped-event processing failed", exc_info=True)
@@ -319,7 +330,8 @@ def register(mcp: FastMCP) -> None:
                 timestamp,
                 created_at,
                 id,
-                canonical_key
+                canonical_key,
+                source_trust
             FROM activity_log
             {lifecycle_where}
             """,
@@ -348,6 +360,7 @@ def register(mcp: FastMCP) -> None:
                     "created_at": row["created_at"],
                     "canonical_key": row["canonical_key"],
                     "tags": [_SESSION_BOUNDARY_TAG],
+                    "source_trust_summary": {row["source_trust"]: 1},
                 }
                 continue
 
@@ -362,6 +375,13 @@ def register(mcp: FastMCP) -> None:
             current["count"] += 1
             current["first_ts"] = min(current["first_ts"], row["timestamp"])
             current["last_ts"] = max(current["last_ts"], row["timestamp"])
+            summary = current["source_trust_summary"]
+            summary[row["source_trust"]] = summary.get(row["source_trust"], 0) + 1
+
+        for aggregate in aggregates.values():
+            trust = _summarize_trust(aggregate["source_trust_summary"])
+            aggregate["source_trust"] = trust
+            aggregate["instruction_boundary"] = instruction_boundary(trust)
 
         substantive_params = [*params, limit]
         substantive_cursor = await db.execute(
@@ -419,6 +439,7 @@ def register(mcp: FastMCP) -> None:
                 a.tags,
                 a.created_at,
                 a.canonical_key,
+                a.source_trust,
                 r.downstream_system,
                 r.downstream_ref,
                 r.synced_by,
@@ -499,6 +520,8 @@ def register(mcp: FastMCP) -> None:
                     "branch": r["branch"],
                     "tags": json.loads(r["tags"]),
                     "created_at": r["created_at"],
+                    "source_trust": r["source_trust"],
+                    "instruction_boundary": instruction_boundary(r["source_trust"]),
                     "sync_receipt": (
                         {
                             "downstream_system": r["downstream_system"],

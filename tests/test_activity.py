@@ -771,6 +771,49 @@ async def test_confirm_shipped_sync_records_receipt_and_marks_processed(
     assert bridge_path.exists()
 
 
+async def test_confirm_shipped_sync_auto_export_records_context_export_state(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", tmp_path / "bridge.md")
+    await db.execute(
+        "INSERT INTO context_sections (section_name, owner, content, source_trust, version) "
+        "VALUES ('career', 'claude_ai', 'career baseline', 'operator', 3)"
+    )
+    await db.commit()
+
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="codex",
+        project_name="bridge-db",
+        summary="shipped",
+        tags=["SHIPPED"],
+        ctx=ctx,
+    )
+    cursor = await db.execute("SELECT id FROM activity_log")
+    row = await cursor.fetchone()
+    assert row is not None
+
+    await fns["confirm_shipped_sync"](
+        caller="codex",
+        activity_id=row["id"],
+        downstream_system="policy",
+        downstream_ref="/tmp/policy.md",
+        ctx=ctx,
+    )
+
+    cursor = await db.execute(
+        """
+        SELECT exported_version, exported_content_sha256
+        FROM context_section_export_state
+        WHERE section_name = 'career'
+        """
+    )
+    export_state = await cursor.fetchone()
+    assert export_state is not None
+    assert export_state["exported_version"] == 3
+    assert export_state["exported_content_sha256"]
+
+
 async def test_confirm_shipped_sync_is_idempotent_and_can_refresh_receipt(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:

@@ -4,13 +4,14 @@ This roadmap captures the current scope-closed state of bridge-db. All originall
 
 ## Current Position
 
-- Core MCP server is stable, typed, and test-backed. Schema at v8 (adds FTS5 `content_index`, shipped-event sync receipts, project provenance, and shipped-event dispositions).
+- Core MCP server is stable, typed, and test-backed. Schema at v10 (adds FTS5 `content_index`, shipped-event sync receipts/dispositions, project provenance, session-cost attribution, context-section CAS, export-state CAS, and durable write-conflict receipts).
 - SQLite schema and migration path are in place; step-wise migrations proven through v1→current.
-- MCP tools across 9 modules: activity, handoffs, context, snapshots, cost, export, health, recall, audit. Verify the current decorator count with `rg '@mcp\.tool' src/bridge_db -c`.
+- MCP tools across 10 modules: activity, handoffs, context, snapshots, cost, export, health, recall, audit, conflicts. Verify the current decorator count with `rg '@mcp\.tool' src/bridge_db -c`.
 - Markdown export works as a compatibility layer for file-based clients.
 - Claude.ai direct MCP read and write paths have both been proven locally.
 - The file path remains compatibility infrastructure, not the primary coordination path.
 - A startup sync path imports Claude.ai-owned file edits into SQLite before Claude Code reads bridge state.
+- Context writes support `if_match_version`; stale writes, stale fallback-file imports, and raced handoff claims are recorded as `write_conflicts` receipts.
 - Audit hardening closed the correctness gaps around handoff clearing, future-schema detection, degraded health reporting, and latent v1→v2 migration gaps.
 - Phase −1 of the semantic memory arc (FTS5 + `recall`) shipped; subsequent phases closed (see below).
 - Phase 6 observability shipped: `recall_stats`, `audit_tail`, and WAL-size health metric (see below).

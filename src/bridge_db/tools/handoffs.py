@@ -9,7 +9,7 @@ from pydantic import Field
 
 from bridge_db.audit import log_audit
 from bridge_db.auth import clamp_source_trust, get_principal, require_caller
-from bridge_db.db import fts_text_for_handoff, get_db, upsert_fts_entry
+from bridge_db.db import fts_text_for_handoff, get_db, record_write_conflict, upsert_fts_entry
 from bridge_db.instruction_boundary import instruction_boundary
 from bridge_db.models import CallerID, SourceTrust
 from bridge_db.project_resolver import resolve as resolve_project
@@ -240,16 +240,37 @@ def register(mcp: FastMCP) -> None:
             # window). The status-guarded UPDATE — not the earlier SELECT — is the
             # real, single-winner claim.
             await db.rollback()
+            status_cursor = await db.execute(
+                "SELECT status FROM pending_handoffs WHERE id = ?",
+                (handoff_id,),
+            )
+            current_status = await status_cursor.fetchone()
+            receipt_id = await record_write_conflict(
+                db,
+                surface="handoff",
+                target_key=str(handoff_id),
+                operation="pick_up_handoff",
+                attempted_by=caller,
+                principal=get_principal(ctx),
+                reason="raced_claim",
+                current_source_trust=trust,
+                detail={
+                    "project_name": project,
+                    "current_status": current_status["status"] if current_status is not None else None,
+                },
+            )
+            await db.commit()
             log_audit(
                 "pick_up_handoff",
                 caller,
                 project,
                 ok=False,
-                detail=f"source_trust={trust} decision=raced",
+                detail=f"source_trust={trust} decision=raced receipt_id={receipt_id}",
             )
             raise ToolError(
                 f"Handoff {handoff_id} was picked up by another caller before this "
-                "pickup completed; re-check get_pending_handoffs and retry if still needed."
+                "pickup completed; re-check get_pending_handoffs and retry if still needed. "
+                f"Conflict receipt: {receipt_id}."
             )
         await db.commit()
         decision = "allowed confirm=true" if (trust != "operator" and confirm) else "allowed"

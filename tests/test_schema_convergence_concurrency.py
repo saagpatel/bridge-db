@@ -8,7 +8,7 @@ Test 1 — Schema convergence:
 
 Test 2 — Concurrent writer / WAL busy-timeout:
     Two connections to the same WAL DB.  Connection A holds an open write
-    transaction; connection B attempts a write.  With busy_timeout=5000 ms and
+    transaction; connection B attempts a write.  With busy_timeout=15000 ms and
     WAL mode, B should block then succeed after A commits — no corruption, no
     OperationalError("database is locked").
 """
@@ -189,7 +189,7 @@ async def test_concurrent_writers_wal_busy_then_succeed(tmp_path: Path) -> None:
     """Two concurrent writers on a WAL DB: the second blocks then succeeds.
 
     Protocol (deterministic, no sleeps):
-    1. Both connections open with WAL mode + busy_timeout=5000 ms.
+    1. Both connections open with WAL mode + busy_timeout=15000 ms.
     2. Connection A opens a write transaction (BEGIN IMMEDIATE) and inserts a
        row but does NOT commit.
     3. An asyncio.Event signals connection B that the write lock is held.
@@ -246,7 +246,7 @@ async def test_concurrent_writers_wal_busy_then_succeed(tmp_path: Path) -> None:
         await apply_pragmas(conn)
         try:
             await a_lock_held.wait()
-            # This write will hit the SQLite busy handler (busy_timeout=5000).
+            # This write will hit the SQLite busy handler (busy_timeout=15000).
             # In WAL mode a second simultaneous writer is permitted only after the
             # first commits; the C-level busy handler retries up to the timeout.
             await conn.execute("BEGIN IMMEDIATE")

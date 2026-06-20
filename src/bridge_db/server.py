@@ -68,6 +68,7 @@ mcp = FastMCP(
         "get_shipped_events/confirm_shipped_sync/record_shipped_event_disposition "
         "for shipped-event sync, mark_shipped_processed only for non-shipped "
         "operational rows, "
+        "get_write_conflicts for stale-write and raced-claim receipts, "
         "create_handoff/get_pending_handoffs for project handoffs, "
         "save_snapshot/get_latest_snapshot for system state, "
         "update_section/get_section/get_all_sections/sync_from_file for long-lived context "
