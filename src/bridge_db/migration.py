@@ -32,6 +32,19 @@ SECTION_MAP: dict[str, str] = {
     "Claude.ai Capabilities Summary": "capabilities",
 }
 
+BRIDGE_SECTION_HEADINGS = frozenset(
+    {
+        *SECTION_MAP.keys(),
+        "Pending Handoffs",
+        "Claude Code State Snapshot",
+        "Recent Claude Code Activity",
+        "Codex State Snapshot",
+        "Recent Codex Activity",
+        "Recent Notion OS Activity",
+        "Recent Personal Ops Activity",
+    }
+)
+
 # Snapshot sub-section label → JSON key mapping
 CC_SNAPSHOT_KEYS: dict[str, str] = {
     "Active Projects": "active_projects",
@@ -63,21 +76,30 @@ _SNAP_DATE_RE = re.compile(r"Last exported:\s*(\d{4}-\d{2}-\d{2})")
 # ── Parsing helpers ──────────────────────────────────────────────────────────
 
 
-def extract_sections(content: str) -> dict[str, str]:
-    """Split on level-2 (##) headings, return {heading_text: body_text}."""
+def extract_sections(
+    content: str, *, allowed_headings: frozenset[str] | None = None
+) -> dict[str, str]:
+    """Split on level-2 headings, return {heading_text: body_text}.
+
+    When ``allowed_headings`` is supplied, only those bridge-owned top-level
+    headings start a new section. This preserves nested ``##`` headings inside
+    section bodies such as the Claude.ai long-form context sections.
+    """
     sections: dict[str, str] = {}
     current_heading: str | None = None
     current_lines: list[str] = []
 
     for line in content.splitlines():
         if line.startswith("## "):
-            if current_heading is not None:
-                sections[current_heading] = "\n".join(current_lines).strip()
-            current_heading = line[3:].strip()
-            current_lines = []
-        else:
-            if current_heading is not None:
-                current_lines.append(line)
+            heading = line[3:].strip()
+            if allowed_headings is None or heading in allowed_headings:
+                if current_heading is not None:
+                    sections[current_heading] = "\n".join(current_lines).strip()
+                current_heading = heading
+                current_lines = []
+                continue
+        if current_heading is not None:
+            current_lines.append(line)
 
     if current_heading is not None:
         sections[current_heading] = "\n".join(current_lines).strip()

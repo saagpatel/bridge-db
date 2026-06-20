@@ -10,7 +10,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from bridge_db import config
 from bridge_db.auth import auth_mode, load_principals
 from bridge_db.db import SCHEMA_VERSION, collect_fts_index_metrics, get_db
-from bridge_db.migration import SECTION_MAP, extract_sections
+from bridge_db.migration import BRIDGE_SECTION_HEADINGS, SECTION_MAP, extract_sections
 
 logger = logging.getLogger("bridge_db.tools.health")
 
@@ -59,7 +59,7 @@ def _read_bridge_claude_ai_sections() -> dict[str, str] | None:
         content = path.read_text(encoding="utf-8")
     except OSError:
         return None
-    headings = extract_sections(content)
+    headings = extract_sections(content, allowed_headings=BRIDGE_SECTION_HEADINGS)
     sections: dict[str, str] = {}
     for heading, section_name in SECTION_MAP.items():
         body = headings.get(heading, "").strip()

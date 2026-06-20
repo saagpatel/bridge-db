@@ -453,6 +453,27 @@ async def test_claude_ai_section_drift_in_sync(
     assert drift["drifted_sections"] == []
 
 
+async def test_claude_ai_section_drift_preserves_nested_h2_headings(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = "# Career\n\n## Current Role\nSenior IT engineer.\n\n## Proof Points\n- bridge-db"
+    await _seed_claude_ai_section(db, "career", body)
+    bridge = tmp_path / "bridge.md"
+    bridge.write_text(
+        "## Career & Professional Target\n"
+        f"{body}\n\n"
+        "## Pending Handoffs\n<!-- none -->\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge)
+
+    result = await fns["health"](ctx=make_ctx(db))
+    drift = result["claude_ai_section_drift"]
+    assert drift["checked"] is True
+    assert drift["in_sync"] is True
+    assert drift["drifted_sections"] == []
+
+
 async def test_claude_ai_section_drift_detects_mismatch(
     db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
