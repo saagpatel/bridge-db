@@ -1,0 +1,189 @@
+{
+  "schema_version": "proof-pr.v1",
+  "receipt_id": "saagpatel-bridge-db-pr-61-c8b5106",
+  "generated_at": "2026-06-20T08:10:30Z",
+  "subject": {
+    "repo": "saagpatel/bridge-db",
+    "pr_number": 61,
+    "pr_url": "https://github.com/saagpatel/bridge-db/pull/61",
+    "base_ref": "main",
+    "base_sha": "4c75115fd8453d6636d62e64f08493d4dfae03de",
+    "head_ref": "docs/proof-pr-dogfood",
+    "head_sha": "c8b510652ead9d8506c33db63e4f6efb3534a4f1"
+  },
+  "producer": {
+    "tool": "proof-pr",
+    "version": "0.1.1",
+    "agent": "codex",
+    "mode": "local"
+  },
+  "risk": {
+    "tier": "T0",
+    "reasons": [
+      "documentation-only change",
+      "no runtime, schema, workflow, or data-write surface changed",
+      "dogfoods public proof-pr v0.1.1 install path"
+    ],
+    "changed_surfaces": [
+      "docs"
+    ]
+  },
+  "change": {
+    "summary": "Adds a bridge-db docs note for using proof-pr v0.1.1 as PR review evidence.",
+    "files_touched": [
+      "docs/proof-pr-dogfood.md"
+    ],
+    "diff_stats": {
+      "files": 1,
+      "additions": 37,
+      "deletions": 0
+    },
+    "scope_notes": "Docs-only addition. Does not alter bridge-db code, schema, MCP tools, workflows, or runtime configuration."
+  },
+  "evidence": [
+    {
+      "id": "proof-pr-github-install",
+      "kind": "smoke",
+      "command": [
+        "python3",
+        "-m",
+        "venv",
+        "<temp-venv>",
+        "then",
+        "pip",
+        "install",
+        "git+https://github.com/saagpatel/proof-pr.git@v0.1.1"
+      ],
+      "status": "passed",
+      "required": true,
+      "summary": "Installed proof-pr from the public GitHub v0.1.1 tag."
+    },
+    {
+      "id": "proof-pr-draft-smoke",
+      "kind": "smoke",
+      "command": [
+        "proof-pr",
+        "init",
+        "--cwd",
+        ".",
+        "--tier",
+        "T0",
+        "--summary",
+        "Document proof-pr dogfood path",
+        "--output",
+        "<temp-receipt>",
+        "then",
+        "proof-pr",
+        "collect",
+        "<temp-receipt>",
+        "--cwd",
+        ".",
+        "then",
+        "proof-pr",
+        "validate",
+        "<temp-receipt>",
+        "then",
+        "proof-pr",
+        "render",
+        "<temp-receipt>"
+      ],
+      "status": "passed",
+      "required": true,
+      "summary": "Generated, collected, validated, and rendered a draft receipt in bridge-db using proof-pr v0.1.1."
+    },
+    {
+      "id": "pytest",
+      "kind": "test",
+      "command": [
+        "uv",
+        "run",
+        "pytest"
+      ],
+      "status": "passed",
+      "required": true,
+      "summary": "302 tests passed."
+    },
+    {
+      "id": "pyright",
+      "kind": "typecheck",
+      "command": [
+        "uv",
+        "run",
+        "pyright"
+      ],
+      "status": "passed",
+      "required": true,
+      "summary": "0 errors, 0 warnings, 0 informations."
+    },
+    {
+      "id": "ruff",
+      "kind": "lint",
+      "command": [
+        "uv",
+        "run",
+        "ruff",
+        "check"
+      ],
+      "status": "passed",
+      "required": true,
+      "summary": "All checks passed."
+    },
+    {
+      "id": "secrets-scan",
+      "kind": "security",
+      "command": [
+        "gitleaks",
+        "detect",
+        "--source",
+        ".",
+        "--no-banner",
+        "--redact",
+        "--verbose"
+      ],
+      "status": "passed",
+      "required": true,
+      "summary": "No leaks found across scanned commits."
+    },
+    {
+      "id": "doc-private-reference-scan",
+      "kind": "security",
+      "command": [
+        "rg",
+        "-n",
+        "--hidden",
+        "--glob",
+        "!/.git/**",
+        "<private-reference-patterns>",
+        "docs/proof-pr-dogfood.md"
+      ],
+      "status": "passed",
+      "required": true,
+      "summary": "No private paths, personal email, token patterns, or explicit private markers found in the new doc."
+    }
+  ],
+  "security": {
+    "secrets_scan": {
+      "status": "passed",
+      "summary": "gitleaks found no leaks and targeted doc private-reference scan was clean."
+    },
+    "permission_diff": {
+      "status": "not_applicable",
+      "summary": "No workflow, permission, auth, or data-write surface changed."
+    },
+    "redaction": {
+      "status": "not_applicable",
+      "summary": "No screenshots or private visual artifacts attached."
+    }
+  },
+  "rollback": {
+    "status": "documented",
+    "path": "Revert PR #61 to remove docs/proof-pr-dogfood.md.",
+    "notes": "No runtime or external state change."
+  },
+  "artifacts": [],
+  "limitations": [],
+  "overall": {
+    "status": "passed",
+    "review_decision": "ready"
+  }
+}
