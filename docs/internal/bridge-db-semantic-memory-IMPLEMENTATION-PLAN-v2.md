@@ -1,3 +1,5 @@
+> **Internal — maintainer use only.** This file documents implementation history and operating procedures for the bridge-db maintainer. It is not required to use or integrate bridge-db.
+
 # bridge-db Semantic Memory Layer — Implementation Plan (v2)
 
 > **SUPERSEDED 2026-04-17 - frozen historical record.**
@@ -746,7 +748,7 @@ If agreement is below 80%, the ambiguous queries get rewritten before the full e
     "created": "2026-04-17",
     "bridge_db_snapshot": "sha256 of bridge.db at eval time",
     "total_queries": 20,
-    "rater_primary": "saagar",
+    "rater_primary": "operator",
     "rater_secondary": "claude-code-blind",
     "inter_rater_sample_size": 5,
     "inter_rater_agreement": 0.0

@@ -1,3 +1,5 @@
+> **Internal — maintainer use only.** This file documents implementation history and operating procedures for the bridge-db maintainer. It is not required to use or integrate bridge-db.
+
 # bridge-db Semantic Memory Eval Set — Complete Handoff Package
 
 > **Historical artifact — closed 2026-04-17.**

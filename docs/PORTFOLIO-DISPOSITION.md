@@ -160,7 +160,7 @@ trigger. Operational concerns:
    per the operator's checklist; most recent refresh: 2026-05-30
    (see CLAUDE.md maintenance log).
 6. **Markdown bridge file regeneration** — `export_bridge_markdown`
-   keeps `~/.claude/projects/-Users-d/memory/claude_ai_context.md`
+   keeps `~/.claude/projects/<encoded-home>/memory/claude_ai_context.md`
    in sync; used by file-based MCP clients.
 7. **Schema migration discipline** — bridge.db schema changes
    risk breaking older MCP clients in flight. Phase 6

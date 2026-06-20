@@ -77,7 +77,7 @@ requires-dist = [
 dev = [
     { name = "pyright", specifier = ">=1.1.390" },
     { name = "pytest", specifier = ">=9.1.0" },
-    { name = "pytest-asyncio", specifier = ">=1.4.0" },
+    { name = "pytest-asyncio", specifier = ">=0.24.0" },
     { name = "ruff", specifier = ">=0.15.17" },
 ]
 

@@ -22,15 +22,15 @@ The fixed bypass was Claude Code's SessionEnd hook:
 
 ## Audited Surfaces
 
-- `/Users/d/.claude/hooks`
-- `/Users/d/.claude/skills`
-- `/Users/d/.codex/automations`
-- `/Users/d/Projects`
+- `~/.claude/hooks`
+- `~/.claude/skills`
+- `~/.codex/automations`
+- `~/Projects`
 - `~/.local/share/personal-ops`
 
 ## Notable Non-Issues
 
-- `/Users/d/.claude/hooks/bridge-db-recall-warmup.sh` reads
+- `~/.claude/hooks/bridge-db-recall-warmup.sh` reads
   `activity_log` with `sqlite3` for SessionStart context. It does not write.
 - `~/Projects/Notion/src/notion/bridge-db-sync.ts` reads bridge-db state
   and confirms shipped sync through the bridge-db MCP client. It is not an ad
@@ -47,13 +47,13 @@ The fixed bypass was Claude Code's SessionEnd hook:
 
 ```bash
 rg -n "INSERT INTO activity_log|INSERT INTO content_index|DELETE FROM activity_log|UPDATE activity_log" \
-  /Users/d/.claude/hooks /Users/d/.claude/skills /Users/d/Projects /Users/d/.codex/automations \
+  ~/.claude/hooks ~/.claude/skills ~/Projects ~/.codex/automations \
   -S -g '*.sh' -g '*.py' -g '*.js' -g '*.mjs' -g '*.ts' -g '*.tsx' -g '*.md' \
   -g '!**/.venv/**' -g '!**/node_modules/**' -g '!**/.git/**' -g '!**/backups/**' \
   -g '!**/.codex/worktrees/**'
 
 rg -n "bridge.db|BRIDGE_DB_DEFAULT_PATH|sqlite3" \
-  /Users/d/.claude/hooks ~/Projects/Notion/src ~/.local/share/personal-ops \
+  ~/.claude/hooks ~/Projects/Notion/src ~/.local/share/personal-ops \
   -S -g '*.sh' -g '*.py' -g '*.js' -g '*.mjs' -g '*.ts' \
   -g '!**/.venv/**' -g '!**/node_modules/**' -g '!**/.git/**'
 ```

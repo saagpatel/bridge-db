@@ -1,3 +1,5 @@
+> **Internal — maintainer use only.** This file documents implementation history and operating procedures for the bridge-db maintainer. It is not required to use or integrate bridge-db.
+
 # Codex → bridge-db Migration Guide
 
 This document specifies how Codex skills and automations should be updated to use

@@ -56,7 +56,7 @@ async def test_create_handoff_inserts_pending(
     result = await fns["create_handoff"](
         caller="claude_ai",
         project_name="MyProject",
-        project_path="/Users/d/Projects/MyProject",
+        project_path="/home/user/Projects/MyProject",
         roadmap_file="ROADMAP.md",
         phase="Phase 2",
         ctx=ctx,
@@ -407,7 +407,7 @@ async def test_handoff_lifecycle_across_pending_pickup_and_clear(
     first = await fns["create_handoff"](
         caller="claude_ai",
         project_name="BridgeStatus",
-        project_path="/Users/d/Projects/bridge-db",
+        project_path="/home/user/Projects/bridge-db",
         phase="Phase 5",
         source_trust="operator",
         ctx=ctx,
@@ -415,7 +415,7 @@ async def test_handoff_lifecycle_across_pending_pickup_and_clear(
     second = await fns["create_handoff"](
         caller="claude_ai",
         project_name="BridgeExport",
-        project_path="/Users/d/Projects/bridge-db",
+        project_path="/home/user/Projects/bridge-db",
         phase="Phase 5",
         ctx=ctx,
     )

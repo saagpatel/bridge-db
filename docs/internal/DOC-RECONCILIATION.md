@@ -1,3 +1,5 @@
+> **Internal — maintainer use only.** This file documents implementation history and operating procedures for the bridge-db maintainer. It is not required to use or integrate bridge-db.
+
 # DOC-RECONCILIATION.md
 
 > Historical artifact only. This file is not a current source of truth.

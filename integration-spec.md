@@ -12,7 +12,7 @@ Claude.ai has two supported paths:
 
 - **Primary path:** direct bridge-db MCP tools through Claude Desktop.
 - **Fallback path:** the markdown file at
-  `~/.claude/projects/-Users-d/memory/claude_ai_context.md` via the Filesystem MCP
+  `~/.claude/projects/<encoded-home>/memory/claude_ai_context.md` via the Filesystem MCP
   server.
 
 The direct MCP path has been validated locally for read access and owned write

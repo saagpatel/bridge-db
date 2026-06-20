@@ -60,7 +60,7 @@ async def _seed_one_of_each(cap: CaptureMCP, db: Any) -> None:
     await cap.fns["create_handoff"](
         caller="claude_ai",
         project_name="bridge-db",
-        project_path="/Users/d/Projects/bridge-db",
+        project_path="/home/user/Projects/bridge-db",
         roadmap_file="ROADMAP.md",
         phase="Phase 1 hardening",
         ctx=ctx,

@@ -266,7 +266,7 @@ async def test_migration_v2_to_current_populates_content_index(tmp_path: Path) -
         INSERT INTO system_snapshots (system, snapshot_date, data)
             VALUES ('cc', '2026-04-17', '{"active_projects":"bridge-db"}');
         INSERT INTO pending_handoffs (project_name, project_path, phase)
-            VALUES ('bridge-db', '/Users/d/Projects/bridge-db', 'Phase -1');
+            VALUES ('bridge-db', '/home/user/Projects/bridge-db', 'Phase -1');
         PRAGMA user_version = 2;
     """)
     await db.commit()

@@ -11,11 +11,21 @@ DB_PATH: Path = Path(
     )
 )
 
-# Bridge markdown file (export target for DB state and fallback read path for file-based clients)
+# Bridge markdown file (export target for DB state and fallback read path for file-based clients).
+# The default path uses Claude Code's home-dir encoding convention: each `/` in the absolute home
+# path becomes `-` (e.g. /home/alice → -home-alice), producing a unique projects/ subdirectory.
+# Override via BRIDGE_FILE_PATH if your home dir encodes differently or you keep the file elsewhere.
+def _default_bridge_file_path() -> Path:
+    home = Path.home()
+    # Encode the home path the same way Claude Code does: strip leading slash, replace / with -
+    encoded_home = str(home).lstrip("/").replace("/", "-")
+    return home / ".claude" / "projects" / f"-{encoded_home}" / "memory" / "claude_ai_context.md"
+
+
 BRIDGE_FILE_PATH: Path = Path(
     os.environ.get(
         "BRIDGE_FILE_PATH",
-        str(Path.home() / ".claude" / "projects" / "-Users-d" / "memory" / "claude_ai_context.md"),
+        str(_default_bridge_file_path()),
     )
 )
 

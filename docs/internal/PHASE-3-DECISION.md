@@ -1,3 +1,5 @@
+> **Internal — maintainer use only.** This file documents implementation history and operating procedures for the bridge-db maintainer. It is not required to use or integrate bridge-db.
+
 # Phase 3 Decision: No Live Watcher For Now
 
 Decision date: 2026-04-15

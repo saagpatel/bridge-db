@@ -1,3 +1,5 @@
+> **Internal — maintainer use only.** This file documents implementation history and operating procedures for the bridge-db maintainer. It is not required to use or integrate bridge-db.
+
 # bridge-db Operator Checklist
 
 Use this checklist when verifying that bridge-db is ready for local use and that the documented Claude.ai registration path matches the current environment.
