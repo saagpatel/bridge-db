@@ -5,7 +5,7 @@ import logging
 import re
 from collections import Counter, defaultdict
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
@@ -248,7 +248,7 @@ def register(mcp: FastMCP) -> None:
                 """,  # noqa: S608 — scope_clause is from a closed literal
                 [match_expr, *scope_param, clamped_limit],
             )
-            rows = await cursor.fetchall()
+            rows = cast(list[Any], list(await cursor.fetchall()))
             if rows:
                 break
 

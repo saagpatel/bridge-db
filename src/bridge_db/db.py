@@ -586,6 +586,15 @@ def fts_text_for_activity(
     return "\n".join(parts)
 
 
+def _activity_tags_from_json(raw_tags: str | None) -> list[str]:
+    if not raw_tags:
+        return []
+    parsed = json.loads(raw_tags)
+    if not isinstance(parsed, list):
+        return []
+    return [str(tag) for tag in cast(list[Any], parsed)]
+
+
 async def reindex_activity_fts(db: aiosqlite.Connection, activity_id: int) -> None:
     """Refresh the content_index row for an activity after its tags or text change."""
     cursor = await db.execute(
@@ -595,7 +604,7 @@ async def reindex_activity_fts(db: aiosqlite.Connection, activity_id: int) -> No
     row = await cursor.fetchone()
     if row is None:
         return
-    tags = json.loads(row["tags"]) if row["tags"] else []
+    tags = _activity_tags_from_json(row["tags"])
     await upsert_fts_entry(
         db,
         "activity",
@@ -832,7 +841,7 @@ async def repopulate_content_index(db: aiosqlite.Connection) -> dict[str, int]:
         "SELECT id, project_name, summary, branch, tags FROM activity_log"
     )
     for row in await cursor.fetchall():
-        row_tags = json.loads(row["tags"]) if row["tags"] else []
+        row_tags = _activity_tags_from_json(row["tags"])
         await db.execute(
             "INSERT INTO content_index (source_type, source_id, text) VALUES (?, ?, ?)",
             (
