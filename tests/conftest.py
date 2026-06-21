@@ -106,7 +106,7 @@ def make_activity(
 
 def make_handoff(
     project_name: str = "TestProject",
-    project_path: str | None = "/Users/d/Projects/TestProject",
+    project_path: str | None = "/home/user/Projects/TestProject",
     roadmap_file: str | None = "ROADMAP.md",
     phase: str | None = "Phase 2",
 ) -> dict[str, Any]:

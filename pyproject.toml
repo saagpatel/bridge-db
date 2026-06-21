@@ -18,7 +18,7 @@ bridge-db = "bridge_db.__main__:main"
 dev = [
     "pyright>=1.1.390",
     "pytest>=9.1.0",
-    "pytest-asyncio>=1.4.0",
+    "pytest-asyncio>=0.24.0",
     "ruff>=0.15.17",
 ]
 
@@ -45,8 +45,7 @@ reportUnusedFunction = "none"
 
 [tool.ruff]
 target-version = "py312"
-extend = "../ruff.toml"
 
 [tool.ruff.lint]
+select = ["E", "F", "W", "B", "SIM"]
 ignore = ["E501"]
-extend-select = ["B", "SIM"]

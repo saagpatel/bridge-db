@@ -1,3 +1,5 @@
+> **Internal — maintainer use only.** This file documents implementation history and operating procedures for the bridge-db maintainer. It is not required to use or integrate bridge-db.
+
 # bridge-db Semantic Memory Layer — Implementation Plan (v2.1)
 
 > **⛔ CLOSED 2026-04-17 — Path B chosen. Phases 0/1/2 will not be built.**
@@ -5,7 +7,7 @@
 > A post-Phase-−1 dry-run against the live DB through the 20-query eval set
 > exposed that **12 of 20 queries miss not because FTS5 is too coarse, but
 > because the queried content isn't in `bridge.db` at all.** The missing content
-> lives in memory files (`~/.claude/projects/-Users-d/memory/*.md`), git-tracked
+> lives in memory files (`~/.claude/projects/<encoded-home>/memory/*.md`), git-tracked
 > plan docs, or Notion — scopes outside bridge-db's current mission. Vector
 > search can't find what isn't indexed, so Phases 0–1 as written would consume
 > ~2 weeks to produce near-identical hit rates to the FTS5 layer already shipped.

@@ -4,7 +4,7 @@
 
 ## Communication Contract
 
-- Inherit global Codex communication and reporting rules from `/Users/d/.codex/AGENTS.override.md` and `/Users/d/.codex/policies/communication/BigPictureReportingV1.md`.
+- Inherit global Codex communication and reporting rules from `~/.codex/AGENTS.override.md` and `~/.codex/policies/communication/BigPictureReportingV1.md`.
 - Repo-specific instructions below add project constraints only; do not restate global voice or status-reporting rules here.
 <!-- comm-contract:end -->
 
@@ -17,7 +17,7 @@ bridge-db is a SQLite-backed MCP server for cross-system state sharing between C
 - `README.md` for project overview and setup.
 - `CLAUDE.md` for current project state, command list, and scope boundaries.
 - `integration-spec.md` before changing ownership, caller, or cross-client behavior.
-- `bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md` before touching recall or semantic-memory-adjacent scope.
+- `docs/internal/bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md` before touching recall or semantic-memory-adjacent scope.
 
 ## Core Rules
 

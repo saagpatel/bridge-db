@@ -72,7 +72,7 @@ async def test_export_includes_pending_handoffs(
     await all_fns["create_handoff"](
         caller="claude_ai",
         project_name="MyProject",
-        project_path="/Users/d/Projects/MyProject",
+        project_path="/home/user/Projects/MyProject",
         phase="Phase 3",
         ctx=mctx,
     )
@@ -197,7 +197,7 @@ async def test_export_workflow_reflects_multi_tool_bridge_state(
         await all_fns["create_handoff"](
             caller="claude_ai",
             project_name="bridge-db",
-            project_path="/Users/d/Projects/bridge-db",
+            project_path="/home/user/Projects/bridge-db",
             roadmap_file="ROADMAP.md",
             phase="Phase 4 hardening",
             ctx=mctx,
@@ -354,7 +354,7 @@ Fallback capability context
         await all_fns["create_handoff"](
             caller="claude_ai",
             project_name="bridge-db",
-            project_path="/Users/d/Projects/bridge-db",
+            project_path="/home/user/Projects/bridge-db",
             phase="Phase 4 hardening",
             ctx=mctx,
         )
@@ -420,7 +420,7 @@ Prefers MCP when available
         await cap.fns["create_handoff"](
             caller="claude_ai",
             project_name="bridge-db",
-            project_path="/Users/d/Projects/bridge-db",
+            project_path="/home/user/Projects/bridge-db",
             phase="Phase 5 operator readiness",
             ctx=mctx,
         )

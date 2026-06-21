@@ -495,7 +495,7 @@ async def test_record_shipped_event_disposition_is_non_receipt(
         activity_id=activity_id,
         disposition_type="unsynced_by_policy",
         reason="experimental local artifact with no durable downstream target",
-        policy_ref="/Users/d/Documents/Codex/operating-system-audits/example.md",
+        policy_ref="/home/user/Documents/Codex/operating-system-audits/example.md",
         notes="leave pending without receipt",
         ctx=ctx,
     )
@@ -517,7 +517,7 @@ async def test_record_shipped_event_disposition_is_non_receipt(
     assert disposition is not None
     assert json.loads(disposition["tags"]) == ["SHIPPED"]
     assert disposition["disposition_type"] == "unsynced_by_policy"
-    assert disposition["policy_ref"] == "/Users/d/Documents/Codex/operating-system-audits/example.md"
+    assert disposition["policy_ref"] == "/home/user/Documents/Codex/operating-system-audits/example.md"
     assert disposition["reason"] == "experimental local artifact with no durable downstream target"
     assert disposition["decided_by"] == "codex"
     assert disposition["notes"] == "leave pending without receipt"

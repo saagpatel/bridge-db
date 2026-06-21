@@ -157,7 +157,7 @@ A dry-run of the 20-query eval set against the live DB showed that **most "misse
 - Lexical `recall` is sufficient over that scope.
 - If unified recall across memory / plans / Notion becomes a priority, it will be a *separate* project.
 
-Historical artifacts kept for reference: `bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md` (and its v2 predecessor), `eval-set-handoff-package.md`, `semantic_quality_set.json`. Read the closure banner at the top of v2.1 for full decision context.
+Historical artifacts kept for reference: `docs/internal/bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md` (and its v2 predecessor), `docs/internal/eval-set-handoff-package.md`, `semantic_quality_set.json`. Read the closure banner at the top of v2.1 for full decision context.
 
 ## Phase 6: Observability (shipped 2026-04-17)
 

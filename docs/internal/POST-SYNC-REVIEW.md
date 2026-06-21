@@ -1,3 +1,5 @@
+> **Internal — maintainer use only.** This file documents implementation history and operating procedures for the bridge-db maintainer. It is not required to use or integrate bridge-db.
+
 # Post-Sync Review Checklist
 
 Use this checklist after a scheduled Bridge Syncs run or any manual shipped-event
@@ -104,7 +106,7 @@ alone. Confirm runtime/output evidence first:
 Run the all-active output locator as supporting evidence:
 
 ```bash
-node /Users/d/.codex/scripts/ops/find_latest_automation_outputs.mjs --read-only --all-active
+node ~/.codex/scripts/ops/find_latest_automation_outputs.mjs --read-only --all-active
 ```
 
 Use the locator as evidence support, not as primary proof that an automation
