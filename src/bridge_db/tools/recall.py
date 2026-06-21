@@ -204,6 +204,12 @@ def register(mcp: FastMCP) -> None:
 
         Returns results ranked by bm25. Query syntax is sanitized — special
         FTS5 operators in the input are stripped.
+
+        Use this for "what do we know about X" content lookups. For time-scoped
+        or status questions — "what shipped recently", "what did Claude Code do
+        this week", "current sync status" — call get_recent_activity,
+        get_activity_signal, or get_shipped_events instead; those filter by
+        recency and lifecycle, which a content search cannot.
         """
         if scope not in _VALID_SCOPES:
             raise ToolError(f"Invalid scope '{scope}'. Allowed: {sorted(_VALID_SCOPES)}")
