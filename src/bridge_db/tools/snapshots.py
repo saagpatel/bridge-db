@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import date
+from datetime import UTC, datetime
 from typing import Annotated, Any, cast
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -21,6 +21,10 @@ from bridge_db.instruction_boundary import instruction_boundary
 from bridge_db.models import SNAPSHOT_SYSTEM_MAP, CallerID, SourceTrust, snapshot_ownership_error
 
 logger = logging.getLogger("bridge_db.tools.snapshots")
+
+
+def _utc_snapshot_date() -> str:
+    return datetime.now(UTC).date().isoformat()
 
 
 def _snapshot_family(system: str, data: dict[str, Any]) -> str:
@@ -79,7 +83,8 @@ def register(mcp: FastMCP) -> None:
             ),
         ],
         snapshot_date: Annotated[
-            str | None, Field(description="Date in YYYY-MM-DD format; defaults to today")
+            str | None,
+            Field(description="Date in YYYY-MM-DD format; defaults to the UTC calendar date"),
         ] = None,
         source_trust: Annotated[
             SourceTrust,
@@ -101,7 +106,7 @@ def register(mcp: FastMCP) -> None:
             raise ToolError(snapshot_ownership_error(caller))
 
         db = get_db(ctx)
-        snap_date = snapshot_date or str(date.today())
+        snap_date = snapshot_date or _utc_snapshot_date()
 
         snapshot_json = json.dumps(data)
         cursor = await db.execute(
