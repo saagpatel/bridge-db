@@ -58,6 +58,26 @@ async def test_save_snapshot_persists_and_echoes_source_trust(
     assert trust["codex"] == "agent"
 
 
+async def test_save_snapshot_default_date_uses_utc_calendar_day(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(snap_mod, "_utc_snapshot_date", lambda: "2026-06-21")
+    cap = CaptureMCP()
+    snap_mod.register(cap)
+
+    result = await cap.fns["save_snapshot"](
+        caller="codex", data={"v": "utc-default"}, ctx=make_ctx(db)
+    )
+
+    assert result["snapshot_date"] == "2026-06-21"
+    cursor = await db.execute(
+        "SELECT snapshot_date FROM system_snapshots WHERE system = 'codex'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["snapshot_date"] == "2026-06-21"
+
+
 async def test_save_snapshot_claude_ai_raises(
     db: aiosqlite.Connection, snap_fns: dict[str, Any]
 ) -> None:
