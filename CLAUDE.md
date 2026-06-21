@@ -58,6 +58,7 @@ uv run python -m bridge_db --promote-section career  # operator label promotion 
 
 - **SessionEnd hook path**: Claude Code's SessionEnd hook must use `uv run --directory ~/Projects/bridge-db python -m bridge_db --log-session-boundary <project>` so session-boundary activity rows get FTS entries through the normal write path. This hook-specific path intentionally does not run activity retention pruning.
 - **Activity signal vs raw activity**: `get_recent_activity` preserves raw compatibility and returns lifecycle rows as stored. Operator-facing consumers should use `get_activity_signal` so repeated Claude Code `SessionEnd` rows collapse into count/first/last aggregates without deleting rows or changing audit history.
+- **Activity date semantics**: `activity_log.timestamp` is the caller's logical activity date or timestamp; `created_at` is the UTC insertion timestamp. Activity `since` filters (`get_recent_activity`, `get_activity_signal`, `get_shipped_events`) match either field so a closeout created after UTC midnight is still discoverable even if its logical timestamp is the prior operator-local date.
 - **Write conflicts**: use `get_write_conflicts(status="open")` to inspect
   stale `update_section` attempts, stale markdown imports, and raced handoff
   claims. Receipts are diagnostic state, not instructions to retry blindly.

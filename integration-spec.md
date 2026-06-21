@@ -144,6 +144,12 @@ counts and first/last timestamps. This is a read-side signal policy only: it
 does not delete activity rows, alter audit history, or change shipped/handoff
 semantics.
 
+Activity entries carry both `timestamp` and `created_at`. `timestamp` is the
+caller-supplied logical activity date or timestamp; `created_at` is the UTC
+insertion timestamp. For `since` filters on activity reads, bridge-db matches
+either field, so `since="YYYY-MM-DD"` includes rows inserted on that UTC date
+even when the logical activity date is the previous operator-local day.
+
 `record_shipped_event_disposition` is for non-receipt decisions only. It does
 not add `PROCESSED` and does not write to `shipped_sync_receipts`.
 

@@ -113,10 +113,53 @@ async def test_get_recent_activity_filters_by_since(
     await fns["log_activity"](
         caller="cc", project_name="New", summary="s", timestamp="2026-04-01", ctx=ctx
     )
+    await db.execute(
+        """
+        UPDATE activity_log
+        SET created_at = timestamp || 'T00:00:00Z'
+        WHERE project_name IN ('Old', 'New')
+        """
+    )
+    await db.commit()
 
     recent = await fns["get_recent_activity"](since="2026-03-01", ctx=ctx)
     assert len(recent) == 1
     assert recent[0]["project_name"] == "New"
+
+
+async def test_get_recent_activity_since_includes_recently_created_prior_date(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="codex",
+        project_name="PreviousDay",
+        summary="old insert",
+        timestamp="2026-06-20",
+        ctx=ctx,
+    )
+    await fns["log_activity"](
+        caller="codex",
+        project_name="MidnightCloseout",
+        summary="closeout inserted after UTC midnight",
+        timestamp="2026-06-20",
+        ctx=ctx,
+    )
+    await db.execute(
+        "UPDATE activity_log SET created_at = ? WHERE project_name = ?",
+        ("2026-06-20T23:30:00Z", "PreviousDay"),
+    )
+    await db.execute(
+        "UPDATE activity_log SET created_at = ? WHERE project_name = ?",
+        ("2026-06-21T06:15:33Z", "MidnightCloseout"),
+    )
+    await db.commit()
+
+    recent = await fns["get_recent_activity"](source="codex", since="2026-06-21", ctx=ctx)
+
+    assert [entry["project_name"] for entry in recent] == ["MidnightCloseout"]
+    assert recent[0]["timestamp"] == "2026-06-20"
+    assert recent[0]["created_at"] == "2026-06-21T06:15:33Z"
 
 
 async def test_get_recent_activity_breaks_created_at_ties_by_id(
@@ -286,6 +329,13 @@ async def test_get_activity_signal_filters_source_and_since(
         project_name="bridge-db",
         summary="Read-only audit",
     )
+    await db.execute(
+        """
+        UPDATE activity_log
+        SET created_at = timestamp
+        WHERE project_name IN ('operant', 'bridge-db')
+        """
+    )
     await db.commit()
 
     cc_signal = await fns["get_activity_signal"](
@@ -303,6 +353,32 @@ async def test_get_activity_signal_filters_source_and_since(
 
     with pytest.raises(ToolError, match="Invalid source"):
         await fns["get_activity_signal"](source="bogus", ctx=ctx)
+
+
+async def test_get_activity_signal_since_includes_recently_created_prior_date(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await insert_activity_row(
+        db,
+        source="codex",
+        timestamp="2026-06-20",
+        project_name="MidnightCloseout",
+        summary="closeout inserted after UTC midnight",
+    )
+    await db.execute(
+        "UPDATE activity_log SET created_at = ? WHERE project_name = ?",
+        ("2026-06-21T06:15:33Z", "MidnightCloseout"),
+    )
+    await db.commit()
+
+    signal = await fns["get_activity_signal"](source="codex", since="2026-06-21", ctx=ctx)
+
+    assert len(signal) == 1
+    assert signal[0]["kind"] == "activity"
+    assert signal[0]["project_name"] == "MidnightCloseout"
+    assert signal[0]["timestamp"] == "2026-06-20"
+    assert signal[0]["created_at"] == "2026-06-21T06:15:33Z"
 
 
 async def test_get_activity_signal_does_not_mutate_fts_or_audit(
@@ -340,6 +416,32 @@ async def test_get_shipped_events(db: aiosqlite.Connection, fns: dict[str, Any])
     assert shipped[0]["project_name"] == "A"
     assert "SHIPPED" in shipped[0]["tags"]
     assert shipped[0]["sync_receipt"] is None
+
+
+async def test_get_shipped_events_since_includes_recently_created_prior_date(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="codex",
+        project_name="MidnightShip",
+        summary="shipped closeout inserted after UTC midnight",
+        tags=["SHIPPED"],
+        timestamp="2026-06-20",
+        ctx=ctx,
+    )
+    await db.execute(
+        "UPDATE activity_log SET created_at = ? WHERE project_name = ?",
+        ("2026-06-21T06:15:33Z", "MidnightShip"),
+    )
+    await db.commit()
+
+    shipped = await fns["get_shipped_events"](since="2026-06-21", ctx=ctx)
+
+    assert len(shipped) == 1
+    assert shipped[0]["project_name"] == "MidnightShip"
+    assert shipped[0]["timestamp"] == "2026-06-20"
+    assert shipped[0]["created_at"] == "2026-06-21T06:15:33Z"
 
 
 async def test_get_shipped_events_unprocessed_only(
