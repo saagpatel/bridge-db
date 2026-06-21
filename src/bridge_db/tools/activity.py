@@ -71,6 +71,22 @@ def _activity_time_bucket(timestamp: str) -> str:
     return timestamp[:10]
 
 
+def _created_at_since_threshold(since: str) -> str:
+    if len(since) == 10 and since[4] == "-" and since[7] == "-":
+        return f"{since}T00:00:00Z"
+    return since
+
+
+def _activity_since_condition(
+    since: str, *, table_alias: str | None = None
+) -> tuple[str, list[str]]:
+    prefix = f"{table_alias}." if table_alias else ""
+    return (
+        f"({prefix}timestamp >= ? OR {prefix}created_at >= ?)",
+        [since, _created_at_since_threshold(since)],
+    )
+
+
 def _activity_signal_sort_key(entry: dict[str, Any]) -> tuple[str, str, int]:
     timestamp = entry["last_ts"] if entry["kind"] == "lifecycle_aggregate" else entry["timestamp"]
     created_at = entry["created_at"]
@@ -177,7 +193,7 @@ def register(mcp: FastMCP) -> None:
             ),
         ] = None,
         timestamp: Annotated[
-            str | None, Field(description="Date in YYYY-MM-DD format; defaults to today")
+            str | None, Field(description="Logical activity date or timestamp")
         ] = None,
         source_trust: Annotated[
             SourceTrust,
@@ -273,8 +289,9 @@ def register(mcp: FastMCP) -> None:
             conditions.append("source = ?")
             params.append(source)
         if since is not None:
-            conditions.append("timestamp >= ?")
-            params.append(since)
+            condition, since_params = _activity_since_condition(since)
+            conditions.append(condition)
+            params.extend(since_params)
 
         where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
         params.append(limit)
@@ -321,8 +338,9 @@ def register(mcp: FastMCP) -> None:
             conditions.append("source = ?")
             params.append(source)
         if since is not None:
-            conditions.append("timestamp >= ?")
-            params.append(since)
+            condition, since_params = _activity_since_condition(since)
+            conditions.append(condition)
+            params.extend(since_params)
 
         lifecycle_where = (
             "WHERE " + " AND ".join([*conditions, _LIFECYCLE_ACTIVITY_SQL])
@@ -436,8 +454,9 @@ def register(mcp: FastMCP) -> None:
         params: list[Any] = []
 
         if since:
-            conditions.append("timestamp >= ?")
-            params.append(since)
+            condition, since_params = _activity_since_condition(since, table_alias="a")
+            conditions.append(condition)
+            params.extend(since_params)
         if unprocessed_only:
             conditions.append(
                 "NOT EXISTS (SELECT 1 FROM json_each(tags) WHERE value = 'PROCESSED')"

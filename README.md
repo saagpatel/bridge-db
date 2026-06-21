@@ -163,6 +163,19 @@ visible while compressing repeated lifecycle rows into aggregates keyed by
 source, project, summary family, and hour/day time bucket. Raw rows and audit
 events remain available for debugging and forensic review.
 
+Activity rows preserve two time concepts:
+
+- `timestamp` is the caller-supplied logical activity date or timestamp. When
+  omitted by `log_activity`, it defaults to the operator-local calendar date.
+- `created_at` is the UTC insertion timestamp assigned by SQLite.
+
+For activity discovery APIs with `since` (`get_recent_activity`,
+`get_activity_signal`, and `get_shipped_events`), a row is visible when either
+`timestamp >= since` or `created_at >= since` (with date-only values interpreted
+as UTC midnight for `created_at`). This keeps closeouts created just after UTC
+midnight discoverable even when their logical activity date is the prior local
+day.
+
 For Notion reconciliation, treat each shipped event's `notion_sync` object as the
 machine-readable gate:
 

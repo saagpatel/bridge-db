@@ -176,6 +176,11 @@ Activity retention and shipped-sync receipts answer different questions:
 - `activity_log` keeps the latest 50 rows per source for ordinary activity
   writes. This is a convenience retention policy for recent context, not a
   proof ledger.
+- `activity_log.timestamp` is the caller's logical activity date or timestamp,
+  while `activity_log.created_at` is the UTC insertion timestamp. Activity
+  `since` filters match either field so closeouts inserted just after UTC
+  midnight remain discoverable even if the logical timestamp is the prior local
+  day.
 - `system_snapshots` keeps the latest 10 rows per system family; Codex
   operating snapshots and consulted-node snapshots are retained independently.
 - `shipped_sync_receipts` is the downstream proof ledger for shipped events that
