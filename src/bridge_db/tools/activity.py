@@ -15,6 +15,7 @@ from bridge_db.auth import clamp_source_trust, require_caller
 from bridge_db.db import (
     get_db,
     insert_activity_row,
+    reindex_activity_fts,
 )
 from bridge_db.instruction_boundary import instruction_boundary
 from bridge_db.models import ACTIVITY_SOURCES, CallerID, SourceTrust, invalid_source_error
@@ -166,7 +167,14 @@ def register(mcp: FastMCP) -> None:
         summary: Annotated[str, Field(description="One-line description of what was done")],
         branch: Annotated[str | None, Field(description="Git branch name, if applicable")] = None,
         tags: Annotated[
-            list[str] | None, Field(description="Optional tags, e.g. ['SHIPPED']")
+            list[str] | None,
+            Field(
+                description=(
+                    "Optional tags (indexed for recall). Vocabulary: SHIPPED, HYGIENE, "
+                    "RESEARCH, MAINTENANCE; DECISION for an architectural rationale/ADR; "
+                    "PROJECT_IDEA for a newly-explored concept."
+                )
+            ),
         ] = None,
         timestamp: Annotated[
             str | None, Field(description="Date in YYYY-MM-DD format; defaults to today")
@@ -180,7 +188,16 @@ def register(mcp: FastMCP) -> None:
         ] = "agent",
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
-        """Log a session activity entry. Auto-prunes to the most recent 50 entries per source."""
+        """Log a session activity entry. Auto-prunes to the most recent 50 entries per source.
+
+        Tag conventions (tags are indexed in content_index, so they are recall-able):
+        - SHIPPED / HYGIENE / RESEARCH / MAINTENANCE: standard activity classes.
+        - DECISION: attach to an entry whose summary records an architectural choice
+          and its rationale (an ADR-lite), so the "why" stays retrievable later
+          instead of living only in a chat that was never logged.
+        - PROJECT_IDEA: attach when a new project concept is first explored, so the
+          idea is captured at the source rather than surfacing later as a recall miss.
+        """
         require_caller(ctx, caller, tool="log_activity")
         source_trust, source_trust_clamped = clamp_source_trust(
             source_trust, caller=caller, tool="log_activity"
@@ -579,9 +596,8 @@ def register(mcp: FastMCP) -> None:
         blocked_shipped_ids: list[int] = []
         tags_by_activity_id: dict[int, list[str]] = {}
 
-        # Tags are not indexed in content_index (see fts_text_for_activity), so
-        # updating tags does not require re-indexing. If fts_text_for_activity
-        # ever starts including tags, add an upsert_fts_entry call here.
+        # Tags ARE indexed in content_index (see fts_text_for_activity), so each
+        # tag mutation below re-indexes its row via reindex_activity_fts.
         for activity_id in activity_ids:
             cursor = await db.execute("SELECT tags FROM activity_log WHERE id = ?", (activity_id,))
             row = await cursor.fetchone()
@@ -624,6 +640,7 @@ def register(mcp: FastMCP) -> None:
                     "UPDATE activity_log SET tags = ? WHERE id = ?",
                     (json.dumps(current_tags), activity_id),
                 )
+                await reindex_activity_fts(db, activity_id)
                 updated += 1
                 updated_ids.append(activity_id)
 
@@ -793,6 +810,7 @@ def register(mcp: FastMCP) -> None:
                 "UPDATE activity_log SET tags = ? WHERE id = ?",
                 (json.dumps(current_tags), activity_id),
             )
+            await reindex_activity_fts(db, activity_id)
             processed_added = True
 
         await db.execute(

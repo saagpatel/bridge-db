@@ -141,6 +141,7 @@ async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, A
                             baseline_activity["project_name"],
                             baseline_activity["summary"],
                             None,
+                            baseline_activity.get("tags", []),
                         ),
                     )
 
