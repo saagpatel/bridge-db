@@ -194,22 +194,37 @@ async def test_repopulate_is_idempotent(capture: CaptureMCP, db: Any) -> None:
     assert total == 4
 
 
-def test_sanitize_fts5_query_empty_and_stripping() -> None:
-    """Sanitizer normalizes whitespace, strips FTS5 special chars, handles empty."""
-    sanitize = recall_tool._sanitize_fts5_query  # pyright: ignore[reportPrivateUsage]
-    assert sanitize("") == ""
-    assert sanitize("   ") == ""
+def test_tokens_for_match_strips_operators_and_empty() -> None:
+    """Tokenizer normalizes whitespace, strips FTS5 special chars, handles empty."""
+    toks = recall_tool._tokens_for_match  # pyright: ignore[reportPrivateUsage]
+    assert toks("") == []
+    assert toks("   ") == []
     # FTS5 operators stripped
-    assert sanitize("foo()") == "foo"
-    # Hyphens split into tokens and joined by OR (preserves recall on "bridge-db")
-    assert sanitize("bridge-db") == "bridge OR db"
+    assert toks("foo()") == ["foo"]
+    # Hyphens split into separate tokens (preserves recall on "bridge-db")
+    assert toks("bridge-db") == ["bridge", "db"]
 
 
-def test_sanitize_fts5_query_or_joins_multi_token() -> None:
-    """Single-token passes through; multi-token joined with OR so bm25 ranks partial matches."""
-    sanitize = recall_tool._sanitize_fts5_query  # pyright: ignore[reportPrivateUsage]
-    assert sanitize("handoff") == "handoff"
-    assert sanitize("foo bar baz") == "foo OR bar OR baz"
+def test_tokens_for_match_drops_stopwords_with_fallback() -> None:
+    """Stop words are dropped; an all-stopword query falls back to its raw tokens."""
+    toks = recall_tool._tokens_for_match  # pyright: ignore[reportPrivateUsage]
+    # Content words survive; stop words (why/did/we/over) are removed.
+    assert toks("why did we pick sqlite-vec over chromadb") == [
+        "pick",
+        "sqlite",
+        "vec",
+        "chromadb",
+    ]
+    # An all-stopword query keeps its tokens rather than returning nothing to search.
+    assert toks("why did we") == ["why", "did", "we"]
+
+
+def test_match_candidates_and_first_then_or() -> None:
+    """Single token -> one expr; multi-token -> AND form first, OR fallback second."""
+    cands = recall_tool._match_candidates  # pyright: ignore[reportPrivateUsage]
+    assert cands([]) == []
+    assert cands(["handoff"]) == ['"handoff"']
+    assert cands(["foo", "bar", "baz"]) == ['"foo" "bar" "baz"', '"foo" OR "bar" OR "baz"']
 
 
 def _write_recall_log(path: Any, events: list[dict[str, Any]]) -> None:
@@ -380,3 +395,77 @@ async def test_recall_or_semantics_returns_partial_matches(
     assert len(source_ids) >= 2, (
         f"expected OR semantics to return both partial-match rows, got {len(source_ids)}"
     )
+
+
+async def test_recall_and_first_precision_narrows_results(
+    capture: CaptureMCP, db: Any, tmp_path: Any, monkeypatch: Any
+) -> None:
+    """AND-first: when query terms co-occur in a row, that precise row is returned
+    and broader single-term rows are excluded. OR is only the fallback when AND
+    finds nothing (pinned by test_recall_or_semantics_returns_partial_matches)."""
+    monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", tmp_path / "recall.jsonl")
+    ctx = make_ctx(db)
+    await capture.fns["log_activity"](
+        caller="cc",
+        project_name="precise-row",
+        summary="alpha beta together in one row",
+        tags=None,
+        timestamp="2026-04-17",
+        ctx=ctx,
+    )
+    await capture.fns["log_activity"](
+        caller="cc",
+        project_name="broad-row",
+        summary="alpha only no second term here",
+        tags=None,
+        timestamp="2026-04-17",
+        ctx=ctx,
+    )
+
+    results = await capture.fns["recall"](
+        query="alpha beta", limit=10, scope="activity", ctx=make_ctx(db)
+    )
+
+    previews = " ".join(r["preview"] for r in results)
+    assert "precise-row" in previews
+    assert "broad-row" not in previews, "AND-first should exclude the single-term row"
+
+
+async def test_recall_finds_activity_by_tag(
+    capture: CaptureMCP, db: Any, tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Activity tags are indexed, so a distinctive tag value is recall-able even
+    when it appears nowhere in the project name, summary, or branch."""
+    monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", tmp_path / "recall.jsonl")
+    ctx = make_ctx(db)
+    await capture.fns["log_activity"](
+        caller="cc",
+        project_name="taggy-project",
+        summary="some unrelated summary text",
+        tags=["zzdecisionzz"],
+        timestamp="2026-04-17",
+        ctx=ctx,
+    )
+
+    results = await capture.fns["recall"](
+        query="zzdecisionzz", limit=10, scope="activity", ctx=make_ctx(db)
+    )
+
+    assert len(results) >= 1
+    assert any("taggy-project" in r["preview"] for r in results)
+
+
+async def test_recall_reserved_word_query_does_not_crash(
+    capture: CaptureMCP, db: Any, tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A bare FTS5 operator keyword (OR/AND/NOT/NEAR) is treated as a quoted
+    literal term, so the query returns a list cleanly instead of raising an
+    sqlite3.OperationalError from an unquoted operator in the MATCH expression."""
+    monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", tmp_path / "recall.jsonl")
+    await _seed_one_of_each(capture, db)
+
+    for keyword in ["OR", "AND", "NOT", "NEAR", "or not this"]:
+        results = await capture.fns["recall"](
+            query=keyword, limit=10, scope="all", ctx=make_ctx(db)
+        )
+        assert isinstance(results, list)

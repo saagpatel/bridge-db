@@ -26,21 +26,49 @@ _VALID_SCOPES: frozenset[str] = frozenset({"all", "section", "activity", "snapsh
 RECALL_LOG_PATH = config.AUDIT_LOG_PATH.parent / "recall_query_log.jsonl"
 
 
-def _sanitize_fts5_query(q: str) -> str:
-    """Normalize free-form input into a bm25-friendly FTS5 MATCH expression.
+# Common English stop words: they match broadly and dilute bm25 ranking on
+# intent-shaped queries without adding discriminating signal. Kept deliberately
+# small; over-filtering hurts recall more than it helps precision.
+_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "a", "an", "and", "are", "as", "at", "be", "by", "did", "do", "for",
+        "from", "had", "has", "have", "how", "in", "is", "it", "of", "on", "or",
+        "over", "the", "to", "was", "we", "what", "why", "with",
+    }
+)
 
-    FTS5 treats " ( ) * : - ^ as operators. We strip them, then join multi-token
-    queries with OR so bm25 can rank rows by how many terms they hit — rather
-    than requiring every term to appear in the same row (the default AND).
-    Single-token queries pass through unchanged. Empty input returns "".
+
+def _tokens_for_match(q: str) -> list[str]:
+    """Clean free-form input into FTS5-safe tokens, dropping stop words.
+
+    FTS5 treats " ( ) * : - ^ as operators, so they are stripped to spaces. Stop
+    words are then removed so bm25 ranks on discriminating terms. If every token
+    is a stop word, the unfiltered tokens are kept (searching something beats
+    searching nothing).
     """
     cleaned = re.sub(r"[^\w\s]", " ", q, flags=re.UNICODE)
     tokens = cleaned.split()
     if not tokens:
-        return ""
-    if len(tokens) == 1:
-        return tokens[0]
-    return " OR ".join(tokens)
+        return []
+    content = [t for t in tokens if t.lower() not in _STOPWORDS]
+    return content or tokens
+
+
+def _match_candidates(tokens: list[str]) -> list[str]:
+    """FTS5 MATCH expressions to try in order: AND first (precise), OR fallback.
+
+    Each token is wrapped in double quotes so FTS5 treats it as a literal phrase,
+    never as a bare operator: an unquoted query token like "OR"/"NOT"/"NEAR" would
+    otherwise crash the MATCH or silently invert it. One token yields a single
+    expression; multiple tokens yield the implicit-AND form first (every term in
+    one row, high precision) and the OR form second (any term, high recall).
+    """
+    if not tokens:
+        return []
+    quoted = [f'"{t}"' for t in tokens]
+    if len(quoted) == 1:
+        return [quoted[0]]
+    return [" ".join(quoted), " OR ".join(quoted)]
 
 
 def _log_recall(query: str, scope: str, limit: int, n_results: int, caller: str | None) -> None:
@@ -176,41 +204,53 @@ def register(mcp: FastMCP) -> None:
 
         Returns results ranked by bm25. Query syntax is sanitized — special
         FTS5 operators in the input are stripped.
+
+        Use this for "what do we know about X" content lookups. For time-scoped
+        or status questions — "what shipped recently", "what did Claude Code do
+        this week", "current sync status" — call get_recent_activity,
+        get_activity_signal, or get_shipped_events instead; those filter by
+        recency and lifecycle, which a content search cannot.
         """
         if scope not in _VALID_SCOPES:
             raise ToolError(f"Invalid scope '{scope}'. Allowed: {sorted(_VALID_SCOPES)}")
 
         clamped_limit = max(1, min(limit, 50))
-        sanitized = _sanitize_fts5_query(query)
+        tokens = _tokens_for_match(query)
 
-        if not sanitized:
+        if not tokens:
             _log_recall(query, scope, clamped_limit, 0, None)
             return []
 
         db = get_db(ctx)
 
-        params: list[Any] = [sanitized]
         scope_clause = ""
+        scope_param: list[Any] = []
         if scope != "all":
             scope_clause = " AND source_type = ?"
-            params.append(scope)
-        params.append(clamped_limit)
+            scope_param.append(scope)
 
-        cursor = await db.execute(
-            f"""
-            SELECT
-                source_type,
-                source_id,
-                snippet(content_index, 2, '[', ']', '…', 12) AS snippet,
-                bm25(content_index) AS bm25_score
-            FROM content_index
-            WHERE content_index MATCH ?{scope_clause}
-            ORDER BY bm25_score
-            LIMIT ?
-            """,  # noqa: S608 — scope_clause is from a closed literal
-            params,
-        )
-        rows = await cursor.fetchall()
+        # AND-first, OR-fallback: try the precise (implicit-AND) match, and widen
+        # to OR only when AND returns nothing. Keeps partial-match recall while
+        # gaining precision whenever every term co-occurs in a row.
+        rows: list[Any] = []
+        for match_expr in _match_candidates(tokens):
+            cursor = await db.execute(
+                f"""
+                SELECT
+                    source_type,
+                    source_id,
+                    snippet(content_index, 2, '[', ']', '…', 12) AS snippet,
+                    bm25(content_index) AS bm25_score
+                FROM content_index
+                WHERE content_index MATCH ?{scope_clause}
+                ORDER BY bm25_score
+                LIMIT ?
+                """,  # noqa: S608 — scope_clause is from a closed literal
+                [match_expr, *scope_param, clamped_limit],
+            )
+            rows = await cursor.fetchall()
+            if rows:
+                break
 
         results: list[dict[str, Any]] = []
         for r in rows:

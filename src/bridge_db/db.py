@@ -569,12 +569,39 @@ def fts_text_for_section(section_name: str, content: str) -> str:
     return f"{section_name}\n{content}"
 
 
-def fts_text_for_activity(project_name: str, summary: str, branch: str | None) -> str:
-    """Indexable text for an activity_log row. Tags excluded (structural, not prose)."""
+def fts_text_for_activity(
+    project_name: str, summary: str, branch: str | None, tags: list[str] | None = None
+) -> str:
+    """Indexable text for an activity_log row.
+
+    Tags are included so lifecycle markers (SHIPPED, RESEARCH, DECISION, ...) are
+    recall-able. Any path that mutates a row's tags MUST re-index via
+    reindex_activity_fts to keep content_index in sync.
+    """
     parts = [project_name, summary]
     if branch:
         parts.append(branch)
+    if tags:
+        parts.extend(tags)
     return "\n".join(parts)
+
+
+async def reindex_activity_fts(db: aiosqlite.Connection, activity_id: int) -> None:
+    """Refresh the content_index row for an activity after its tags or text change."""
+    cursor = await db.execute(
+        "SELECT project_name, summary, branch, tags FROM activity_log WHERE id = ?",
+        (activity_id,),
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        return
+    tags = json.loads(row["tags"]) if row["tags"] else []
+    await upsert_fts_entry(
+        db,
+        "activity",
+        str(activity_id),
+        fts_text_for_activity(row["project_name"], row["summary"], row["branch"], tags),
+    )
 
 
 def fts_text_for_snapshot(data: str) -> str:
@@ -683,7 +710,7 @@ async def insert_activity_row(
         db,
         "activity",
         str(activity_id),
-        fts_text_for_activity(project_name, summary, branch),
+        fts_text_for_activity(project_name, summary, branch, tags),
     )
 
     if retention_limit is not None:
@@ -801,14 +828,19 @@ async def repopulate_content_index(db: aiosqlite.Connection) -> dict[str, int]:
         )
         counts["section"] += 1
 
-    cursor = await db.execute("SELECT id, project_name, summary, branch FROM activity_log")
+    cursor = await db.execute(
+        "SELECT id, project_name, summary, branch, tags FROM activity_log"
+    )
     for row in await cursor.fetchall():
+        row_tags = json.loads(row["tags"]) if row["tags"] else []
         await db.execute(
             "INSERT INTO content_index (source_type, source_id, text) VALUES (?, ?, ?)",
             (
                 "activity",
                 str(row["id"]),
-                fts_text_for_activity(row["project_name"], row["summary"], row["branch"]),
+                fts_text_for_activity(
+                    row["project_name"], row["summary"], row["branch"], row_tags
+                ),
             ),
         )
         counts["activity"] += 1
