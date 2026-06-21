@@ -771,6 +771,12 @@ async def test_migration_v7_to_v8_adds_shipped_event_dispositions(tmp_path: Path
             VALUES ('cc', '2026-06-13', 'fable-outputs', 'manual artifact', '["SHIPPED"]');
         INSERT INTO context_sections (section_name, owner, content, source_trust)
             VALUES ('career', 'claude_ai', 'legacy career', 'operator');
+        CREATE VIRTUAL TABLE IF NOT EXISTS content_index USING fts5(
+            source_type UNINDEXED,
+            source_id UNINDEXED,
+            text,
+            tokenize = 'porter unicode61 remove_diacritics 2'
+        );
         PRAGMA user_version = 7;
     """)
     await db.commit()
@@ -836,6 +842,24 @@ async def test_migration_v9_to_v10_adds_context_versions_and_conflict_tables(
         );
         INSERT INTO context_sections (section_name, owner, content, source_trust)
             VALUES ('career', 'claude_ai', 'legacy content', 'operator');
+        CREATE TABLE activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL CHECK(source IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+            timestamp TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            branch TEXT,
+            tags TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            canonical_key TEXT,
+            source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested'))
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS content_index USING fts5(
+            source_type UNINDEXED,
+            source_id UNINDEXED,
+            text,
+            tokenize = 'porter unicode61 remove_diacritics 2'
+        );
         PRAGMA user_version = 9;
     """)
     await db.commit()
@@ -867,5 +891,53 @@ async def test_migration_v9_to_v10_adds_context_versions_and_conflict_tables(
         )
         tables = [r["name"] for r in await cursor.fetchall()]
         assert tables == ["context_section_export_state", "write_conflicts"]
+    finally:
+        await migrated.close()
+
+
+async def test_migration_v10_to_v11_reindexes_activity_tags(tmp_path: Path) -> None:
+    """A v10 DB rebuilds content_index so activity tags become recall-able.
+
+    The B3 change made fts_text_for_activity append tags, but it shipped without a
+    version bump, so DBs already at v10 keep content_index rows built before tags
+    were indexed: recall("SHIPPED") misses every historical row. The v11 migration
+    runs reindex_all_activity_fts to rebuild the activity rows. This pins that fix.
+    """
+    db_path = tmp_path / "v10.db"
+
+    # Fresh DB, seed a tagged activity row, then simulate the pre-v11 state: a
+    # content_index entry built WITHOUT the tag, and user_version knocked to 10.
+    db = await open_db(db_path)
+    await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary, tags) "
+        "VALUES ('cc', '2026-06-01', 'bridge-db', 'recall precision landed', ?)",
+        ('["SHIPPED"]',),
+    )
+    cursor = await db.execute("SELECT id FROM activity_log LIMIT 1")
+    row = await cursor.fetchone()
+    assert row is not None
+    act_id = str(row["id"])
+    await db.execute("DELETE FROM content_index WHERE source_type = 'activity'")
+    await db.execute(
+        "INSERT INTO content_index (source_type, source_id, text) VALUES ('activity', ?, ?)",
+        (act_id, "bridge-db\nrecall precision landed"),
+    )
+    await db.execute("PRAGMA user_version = 10")
+    await db.commit()
+    await db.close()
+
+    # Reopen: the v10 to v11 migration rebuilds content_index with tags included.
+    migrated = await open_db(db_path)
+    try:
+        cursor = await migrated.execute("PRAGMA user_version")
+        version_row = await cursor.fetchone()
+        assert version_row is not None
+        assert version_row[0] == SCHEMA_VERSION
+
+        cursor = await migrated.execute(
+            "SELECT source_id FROM content_index WHERE content_index MATCH 'SHIPPED'"
+        )
+        hits = [r["source_id"] for r in await cursor.fetchall()]
+        assert act_id in hits, "v11 migration must reindex activity tags for recall"
     finally:
         await migrated.close()
