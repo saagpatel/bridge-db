@@ -12,7 +12,7 @@ import aiosqlite
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # A migration post-hook runs after its DDL, before the version bump+commit
 # (e.g. FTS repopulation). Its return value is ignored.
@@ -397,6 +397,14 @@ CREATE INDEX IF NOT EXISTS idx_write_conflicts_surface_target
 """
 
 
+# Migration v10 → v11: data-only, no schema change. The B3 change made
+# fts_text_for_activity append tags, but it shipped without a version bump, so
+# DBs already at v10 keep content_index rows built before tags were indexed and
+# tag/lifecycle searches (recall("SHIPPED"), DECISION, ...) miss historical rows.
+# The post-hook re-indexes activity rows so their tags become searchable.
+_MIGRATION_V10_TO_V11 = "-- v10 → v11: data-only; content_index rebuild runs in the post-hook.\n"
+
+
 async def apply_pragmas(db: aiosqlite.Connection) -> None:
     """Apply all required PRAGMAs. Safe to call on every connection open."""
     await db.execute("PRAGMA journal_mode=WAL")
@@ -462,6 +470,7 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         (8, _MIGRATION_V7_TO_V8, None),
         (9, _MIGRATION_V8_TO_V9, None),
         (10, _MIGRATION_V9_TO_V10, None),
+        (11, _MIGRATION_V10_TO_V11, reindex_all_activity_fts),
     ]
     for target, ddl, post_hook in migrations:
         if current_version >= target:
@@ -817,6 +826,27 @@ async def collect_fts_index_metrics(db: aiosqlite.Connection) -> dict[str, Any]:
         "orphaned": total_orphaned,
         "sources": sources,
     }
+
+
+async def reindex_all_activity_fts(db: aiosqlite.Connection) -> None:
+    """Rebuild content_index activity rows so their tags are searchable (v11 hook).
+
+    The B3 change made fts_text_for_activity append tags; section/snapshot/handoff
+    text is unchanged, so only activity rows need re-indexing, not the whole index.
+    A DB already at v10 keeps tag-less activity rows until this runs.
+    """
+    await db.execute("DELETE FROM content_index WHERE source_type = 'activity'")
+    cursor = await db.execute("SELECT id, project_name, summary, branch, tags FROM activity_log")
+    for row in await cursor.fetchall():
+        row_tags = _activity_tags_from_json(row["tags"])
+        await db.execute(
+            "INSERT INTO content_index (source_type, source_id, text) VALUES (?, ?, ?)",
+            (
+                "activity",
+                str(row["id"]),
+                fts_text_for_activity(row["project_name"], row["summary"], row["branch"], row_tags),
+            ),
+        )
 
 
 async def repopulate_content_index(db: aiosqlite.Connection) -> dict[str, int]:
