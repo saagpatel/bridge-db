@@ -19,7 +19,7 @@ from bridge_db.db import (
     upsert_fts_entry,
 )
 from bridge_db.instruction_boundary import instruction_boundary
-from bridge_db.models import SECTION_OWNERS, CallerID, SourceTrust, ownership_error
+from bridge_db.models import SECTION_OWNERS, CallerID, SourceTrust
 
 logger = logging.getLogger("bridge_db.tools.context")
 
@@ -49,7 +49,10 @@ def parse_owned_sections(markdown: str) -> dict[str, str]:
         if current_section is not None:
             parsed[current_section].append(line)
 
-    return {section_name: "\n".join(lines).strip("\n") for section_name, lines in parsed.items()}
+    return {
+        section_name: "\n".join(lines).strip("\n")
+        for section_name, lines in parsed.items()
+    }
 
 
 def _normalized_section_content(content: str) -> str:
@@ -99,7 +102,9 @@ async def _upsert_section(
         )
         if cursor.rowcount == 0:
             return {"written": False, "reason": "stale_cas"}
-        await upsert_fts_entry(db, "section", section_name, fts_text_for_section(section_name, content))
+        await upsert_fts_entry(
+            db, "section", section_name, fts_text_for_section(section_name, content)
+        )
         return {"written": True, "legacy_blind_write": False}
 
     cursor = await db.execute(
@@ -131,7 +136,9 @@ async def _upsert_section(
             """,
             (content, source_trust, section_name),
         )
-    await upsert_fts_entry(db, "section", section_name, fts_text_for_section(section_name, content))
+    await upsert_fts_entry(
+        db, "section", section_name, fts_text_for_section(section_name, content)
+    )
     return {"written": True, "legacy_blind_write": legacy_blind_write}
 
 
@@ -177,7 +184,9 @@ async def _record_section_conflict(
         attempted_source_trust=attempted_source_trust,
         current_source_trust=current["source_trust"] if current is not None else None,
         attempted_content_sha256=content_sha256(attempted_content),
-        current_content_sha256=content_sha256(current["content"]) if current is not None else None,
+        current_content_sha256=content_sha256(current["content"])
+        if current is not None
+        else None,
         reason=reason,
         detail=detail,
     )
@@ -210,9 +219,9 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
         content = parsed_sections[section_name]
         current = await _section_row(db, section_name)
 
-        if current is not None and _normalized_section_content(str(current["content"])) == (
-            _normalized_section_content(content)
-        ):
+        if current is not None and _normalized_section_content(
+            str(current["content"])
+        ) == (_normalized_section_content(content)):
             unchanged.append(section_name)
             continue
 
@@ -229,7 +238,9 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
             if exported is None:
                 legacy_imports.append(section_name)
             else:
-                current_hash = content_sha256(_normalized_section_content(str(current["content"])))
+                current_hash = content_sha256(
+                    _normalized_section_content(str(current["content"]))
+                )
                 if (
                     int(current["version"]) != int(exported["exported_version"])
                     or current_hash != exported["exported_content_sha256"]
@@ -245,14 +256,20 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
                         principal=None,
                         stale_version=int(exported["exported_version"]),
                         surface="markdown_sync",
-                        detail={"exported_content_sha256": exported["exported_content_sha256"]},
+                        detail={
+                            "exported_content_sha256": exported[
+                                "exported_content_sha256"
+                            ]
+                        },
                     )
                     conflicts.append(
                         {
                             "section_name": section_name,
                             "receipt_id": receipt_id,
                             "reason": "stale_export_base",
-                            "current_version": refreshed["version"] if refreshed is not None else None,
+                            "current_version": refreshed["version"]
+                            if refreshed is not None
+                            else None,
                             "current_updated_at": refreshed["updated_at"]
                             if refreshed is not None
                             else None,
@@ -289,7 +306,9 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
                         "section_name": section_name,
                         "receipt_id": receipt_id,
                         "reason": result["reason"],
-                        "current_version": refreshed["version"] if refreshed is not None else None,
+                        "current_version": refreshed["version"]
+                        if refreshed is not None
+                        else None,
                     }
                 )
                 continue
@@ -319,7 +338,9 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
                         "section_name": section_name,
                         "receipt_id": receipt_id,
                         "reason": result["reason"],
-                        "current_version": refreshed["version"] if refreshed is not None else None,
+                        "current_version": refreshed["version"]
+                        if refreshed is not None
+                        else None,
                     }
                 )
                 continue
@@ -358,14 +379,18 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
 def register(mcp: FastMCP) -> None:
     @mcp.tool()
     async def update_section(
-        caller: Annotated[CallerID, Field(description="The system updating this section")],
+        caller: Annotated[
+            CallerID, Field(description="The system updating this section")
+        ],
         section_name: Annotated[
             str,
             Field(
                 description="Section key, e.g. 'career', 'speaking', 'research', 'capabilities', 'portfolio'"
             ),
         ],
-        content: Annotated[str, Field(description="Full markdown content for this section")],
+        content: Annotated[
+            str, Field(description="Full markdown content for this section")
+        ],
         source_trust: Annotated[
             SourceTrust | None,
             Field(
@@ -397,7 +422,9 @@ def register(mcp: FastMCP) -> None:
         ] = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
-        """Upsert a context section. Caller must be the section owner (see SECTION_OWNERS)."""
+        """Upsert a context section. Open to every caller; SECTION_OWNERS records the
+        section's steward (returned as `owner` for display). Clobbering is guarded by
+        the optimistic-concurrency check (if_match_version) + write-conflict receipts."""
         require_caller(ctx, caller, tool="update_section")
         # source_trust may be None here; None passes through the clamp and
         # preserves the stored label via COALESCE in _upsert_section.
@@ -409,11 +436,9 @@ def register(mcp: FastMCP) -> None:
             raise ToolError(
                 f"Unknown section '{section_name}'. Known sections: {sorted(SECTION_OWNERS.keys())}"
             )
-        if caller != owner:
-            logger.warning(
-                "ownership violation: caller=%s section=%s owner=%s", caller, section_name, owner
-            )
-            raise ToolError(ownership_error(caller, section_name, owner))
+        # Context sections are open to every caller — no per-caller ownership gate.
+        # `owner` stays the registered steward (for display); the optimistic-
+        # concurrency guard + write-conflict receipts below prevent clobbering.
 
         db = get_db(ctx)
         result = await _upsert_section(
@@ -459,9 +484,13 @@ def register(mcp: FastMCP) -> None:
                 "receipt_id": receipt_id,
                 "section_name": section_name,
                 "owner": owner,
-                "current_updated_at": current["updated_at"] if current is not None else None,
+                "current_updated_at": current["updated_at"]
+                if current is not None
+                else None,
                 "current_version": current["version"] if current is not None else None,
-                "current_source_trust": current["source_trust"] if current is not None else None,
+                "current_source_trust": current["source_trust"]
+                if current is not None
+                else None,
                 "current_content_sha256": content_sha256(current["content"])
                 if current is not None
                 else None,
@@ -497,7 +526,9 @@ def register(mcp: FastMCP) -> None:
             "owner": owner,
             "updated_at": row["updated_at"] if row is not None else None,
             "version": row["version"] if row is not None else None,
-            "content_sha256": content_sha256(row["content"]) if row is not None else None,
+            "content_sha256": content_sha256(row["content"])
+            if row is not None
+            else None,
             "source_trust": stored_trust,
             "source_trust_clamped": source_trust_clamped,
             "legacy_blind_write": legacy_blind_write,
@@ -505,7 +536,9 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     async def get_section(
-        section_name: Annotated[str, Field(description="Section key, e.g. 'career', 'speaking'")],
+        section_name: Annotated[
+            str, Field(description="Section key, e.g. 'career', 'speaking'")
+        ],
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Return a single context section's content and metadata."""
@@ -565,4 +598,6 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """Sync Claude.ai-owned context sections from the bridge markdown file into SQLite."""
         db = get_db(ctx)
-        return await sync_owned_sections_from_file(db=db, bridge_path=config.BRIDGE_FILE_PATH)
+        return await sync_owned_sections_from_file(
+            db=db, bridge_path=config.BRIDGE_FILE_PATH
+        )

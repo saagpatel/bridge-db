@@ -39,8 +39,12 @@ NOTIFICATION_SOURCE_ALIASES: dict[CallerID, str] = {
     "personal_ops": "personal-ops",
 }
 
-# Which section names belong to which owner
-# Keys are the section_name values stored in context_sections
+# Known context sections and their registered steward.
+# Context-section writes are OPEN to every caller (no per-caller gate); this map
+# is the section-name registry (unknown names are rejected) and supplies the
+# `owner` shown on reads. Keys are the section_name values stored in
+# context_sections. To restrict a section again, reintroduce a caller gate in
+# tools/context.update_section.
 SECTION_OWNERS: dict[str, CallerID] = {
     "career": "claude_ai",
     "speaking": "claude_ai",
@@ -69,13 +73,6 @@ COST_SYSTEM_MAP: dict[str, SystemID] = {
 }
 
 READABLE_SYSTEMS: frozenset[SystemID] = frozenset(COST_SYSTEM_MAP.values())
-
-
-def ownership_error(caller: str, section: str, owner: str) -> str:
-    return (
-        f"Ownership violation: caller '{caller}' cannot write to section '{section}' "
-        f"owned by '{owner}'"
-    )
 
 
 def snapshot_ownership_error(caller: str) -> str:

@@ -25,18 +25,38 @@ async def test_update_section_owner_can_write(
 ) -> None:
     ctx = make_ctx(db)
     result = await fns["update_section"](
-        caller="claude_ai", section_name="career", content="# Career\nSoftware engineer", ctx=ctx
+        caller="claude_ai",
+        section_name="career",
+        content="# Career\nSoftware engineer",
+        ctx=ctx,
     )
     assert result["ok"] is True
     assert result["owner"] == "claude_ai"
 
 
-async def test_update_section_wrong_caller_raises(
+async def test_update_section_any_caller_can_write(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
+    # Context sections are open to every caller. The registered steward is kept
+    # as `owner` for display, but cc/codex may write any section directly.
     ctx = make_ctx(db)
-    with pytest.raises(ToolError, match="Ownership violation"):
-        await fns["update_section"](caller="cc", section_name="career", content="...", ctx=ctx)
+    result = await fns["update_section"](
+        caller="cc", section_name="career", content="# Career\nupdated by cc", ctx=ctx
+    )
+    assert result["ok"] is True
+    assert result["owner"] == "claude_ai"  # steward label preserved, not the writer
+
+
+async def test_update_section_unknown_section_rejected(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    # Opening write access to all callers must NOT let a typo create a junk
+    # section: the known-section registry guard still rejects unknown names.
+    ctx = make_ctx(db)
+    with pytest.raises(ToolError, match="Unknown section"):
+        await fns["update_section"](
+            caller="cc", section_name="not_a_real_section", content="...", ctx=ctx
+        )
 
 
 async def test_update_section_defaults_source_trust_agent(
@@ -138,15 +158,25 @@ async def test_update_section_unknown_section_raises(
 ) -> None:
     ctx = make_ctx(db)
     with pytest.raises(ToolError, match="Unknown section"):
-        await fns["update_section"](caller="cc", section_name="nonexistent", content="...", ctx=ctx)
+        await fns["update_section"](
+            caller="cc", section_name="nonexistent", content="...", ctx=ctx
+        )
 
 
-async def test_update_section_is_upsert(db: aiosqlite.Connection, fns: dict[str, Any]) -> None:
+async def test_update_section_is_upsert(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
     ctx = make_ctx(db)
-    await fns["update_section"](caller="claude_ai", section_name="career", content="v1", ctx=ctx)
-    await fns["update_section"](caller="claude_ai", section_name="career", content="v2", ctx=ctx)
+    await fns["update_section"](
+        caller="claude_ai", section_name="career", content="v1", ctx=ctx
+    )
+    await fns["update_section"](
+        caller="claude_ai", section_name="career", content="v2", ctx=ctx
+    )
 
-    cursor = await db.execute("SELECT COUNT(*) FROM context_sections WHERE section_name='career'")
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM context_sections WHERE section_name='career'"
+    )
     row = await cursor.fetchone()
     assert row is not None
     assert row[0] == 1  # only one row, not two
@@ -157,7 +187,9 @@ async def test_update_section_is_upsert(db: aiosqlite.Connection, fns: dict[str,
     assert section["instruction_boundary"]["kind"] == "stored_data_not_instructions"
 
 
-async def test_get_section_not_found_raises(db: aiosqlite.Connection, fns: dict[str, Any]) -> None:
+async def test_get_section_not_found_raises(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
     ctx = make_ctx(db)
     with pytest.raises(ToolError, match="not found"):
         await fns["get_section"](section_name="career", ctx=ctx)
@@ -165,8 +197,12 @@ async def test_get_section_not_found_raises(db: aiosqlite.Connection, fns: dict[
 
 async def test_get_all_sections(db: aiosqlite.Connection, fns: dict[str, Any]) -> None:
     ctx = make_ctx(db)
-    await fns["update_section"](caller="claude_ai", section_name="career", content="c1", ctx=ctx)
-    await fns["update_section"](caller="claude_ai", section_name="speaking", content="c2", ctx=ctx)
+    await fns["update_section"](
+        caller="claude_ai", section_name="career", content="c1", ctx=ctx
+    )
+    await fns["update_section"](
+        caller="claude_ai", section_name="speaking", content="c2", ctx=ctx
+    )
 
     all_sections = await fns["get_all_sections"](ctx=ctx)
     assert "career" in all_sections
@@ -196,20 +232,29 @@ async def test_portfolio_section_cc_can_write(
 ) -> None:
     ctx = make_ctx(db)
     result = await fns["update_section"](
-        caller="cc", section_name="portfolio", content="## Portfolio Digest\n3 stale", ctx=ctx
+        caller="cc",
+        section_name="portfolio",
+        content="## Portfolio Digest\n3 stale",
+        ctx=ctx,
     )
     assert result["ok"] is True
     assert result["owner"] == "cc"
 
 
-async def test_portfolio_section_ownership_violation(
+async def test_portfolio_section_open_to_other_callers(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
+    # portfolio is cc-stewarded, but context-section writes are open to every
+    # caller now; the steward label is preserved as `owner`.
     ctx = make_ctx(db)
-    with pytest.raises(ToolError, match="owned by"):
-        await fns["update_section"](
-            caller="claude_ai", section_name="portfolio", content="...", ctx=ctx
-        )
+    result = await fns["update_section"](
+        caller="claude_ai",
+        section_name="portfolio",
+        content="# Portfolio\nby claude_ai",
+        ctx=ctx,
+    )
+    assert result["ok"] is True
+    assert result["owner"] == "cc"
 
 
 def test_parse_owned_sections_extracts_only_claude_ai_sections() -> None:
@@ -282,7 +327,12 @@ Capability notes
 
     assert result["ok"] is True
     assert result["count"] == 4
-    assert result["sections_synced"] == ["career", "speaking", "research", "capabilities"]
+    assert result["sections_synced"] == [
+        "career",
+        "speaking",
+        "research",
+        "capabilities",
+    ]
 
     cursor = await db.execute(
         "SELECT section_name, owner, content FROM context_sections ORDER BY section_name"
@@ -296,7 +346,9 @@ Capability notes
     ]
 
 
-async def test_sync_from_file_is_idempotent(db: aiosqlite.Connection, tmp_path: Path) -> None:
+async def test_sync_from_file_is_idempotent(
+    db: aiosqlite.Connection, tmp_path: Path
+) -> None:
     bridge_file = tmp_path / "claude_ai_context.md"
     bridge_file.write_text(
         """## Career & Professional Target
@@ -345,7 +397,9 @@ async def test_sync_from_file_conflicts_when_db_changed_since_export(
             caller="claude_ai",
             section_name="career",
             content="db v2",
-            if_match_version=(await fns["get_section"](section_name="career", ctx=ctx))["version"],
+            if_match_version=(await fns["get_section"](section_name="career", ctx=ctx))[
+                "version"
+            ],
             ctx=ctx,
         )
         bridge_file.write_text(
@@ -446,7 +500,9 @@ codex data
 def _write_bridge_file(tmp_path: Path, career_body: str) -> Path:
     """Minimal bridge markdown containing one owned section."""
     path = tmp_path / "bridge.md"
-    path.write_text(f"## Career & Professional Target\n\n{career_body}\n", encoding="utf-8")
+    path.write_text(
+        f"## Career & Professional Target\n\n{career_body}\n", encoding="utf-8"
+    )
     return path
 
 
@@ -544,7 +600,9 @@ async def test_sync_off_mode_keeps_legacy_label_preservation(
     )
     row = await cursor.fetchone()
     assert row is not None
-    assert row["source_trust"] == "operator"  # documented legacy laundering, off-mode only
+    assert (
+        row["source_trust"] == "operator"
+    )  # documented legacy laundering, off-mode only
 
 
 async def test_sync_unchanged_despite_trailing_newline_variance(
