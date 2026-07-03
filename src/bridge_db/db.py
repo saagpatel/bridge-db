@@ -12,7 +12,7 @@ import aiosqlite
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # A migration post-hook runs after its DDL, before the version bump+commit
 # (e.g. FTS repopulation). Its return value is ignored.
@@ -164,6 +164,18 @@ CREATE TABLE IF NOT EXISTS session_costs (
 );
 CREATE INDEX IF NOT EXISTS idx_sc_project ON session_costs(project_name);
 CREATE INDEX IF NOT EXISTS idx_sc_started ON session_costs(started_at DESC);
+
+CREATE TABLE IF NOT EXISTS session_classification (
+    session_id     TEXT PRIMARY KEY REFERENCES session_costs(session_id),
+    role           TEXT,
+    task_class     TEXT,
+    routing_basis  TEXT,
+    dominant_model TEXT,
+    confidence     REAL,
+    method         TEXT NOT NULL,
+    classified_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_scl_routing ON session_classification(routing_basis);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS content_index USING fts5(
     source_type UNINDEXED,
@@ -405,6 +417,23 @@ CREATE INDEX IF NOT EXISTS idx_write_conflicts_surface_target
 _MIGRATION_V10_TO_V11 = "-- v10 → v11: data-only; content_index rebuild runs in the post-hook.\n"
 
 
+# Migration v11 → v12: add heuristic session classification sidecar for
+# cost-attribution consumers. session_costs remains the actuals table.
+_MIGRATION_V11_TO_V12 = """
+CREATE TABLE IF NOT EXISTS session_classification (
+    session_id     TEXT PRIMARY KEY REFERENCES session_costs(session_id),
+    role           TEXT,
+    task_class     TEXT,
+    routing_basis  TEXT,
+    dominant_model TEXT,
+    confidence     REAL,
+    method         TEXT NOT NULL,
+    classified_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_scl_routing ON session_classification(routing_basis);
+"""
+
+
 async def apply_pragmas(db: aiosqlite.Connection) -> None:
     """Apply all required PRAGMAs. Safe to call on every connection open."""
     await db.execute("PRAGMA journal_mode=WAL")
@@ -471,6 +500,7 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         (9, _MIGRATION_V8_TO_V9, None),
         (10, _MIGRATION_V9_TO_V10, None),
         (11, _MIGRATION_V10_TO_V11, reindex_all_activity_fts),
+        (12, _MIGRATION_V11_TO_V12, None),
     ]
     for target, ddl, post_hook in migrations:
         if current_version >= target:

@@ -28,6 +28,7 @@ async def test_schema_creates_all_tables(db: aiosqlite.Connection) -> None:
         "context_sections",
         "cost_records",
         "pending_handoffs",
+        "session_classification",
         "session_costs",
         "shipped_event_dispositions",
         "shipped_sync_receipts",
@@ -47,6 +48,7 @@ async def test_schema_creates_indexes(db: aiosqlite.Connection) -> None:
     assert "idx_shipped_sync_downstream" in indexes
     assert "idx_sc_project" in indexes
     assert "idx_sc_started" in indexes
+    assert "idx_scl_routing" in indexes
     assert "idx_write_conflicts_status_created" in indexes
     assert "idx_write_conflicts_surface_target" in indexes
 
@@ -941,3 +943,91 @@ async def test_migration_v10_to_v11_reindexes_activity_tags(tmp_path: Path) -> N
         assert act_id in hits, "v11 migration must reindex activity tags for recall"
     finally:
         await migrated.close()
+
+
+async def test_migration_v11_to_v12_adds_session_classification(tmp_path: Path) -> None:
+    """A v11 DB gains the heuristic session_classification sidecar at v12."""
+    db_path = tmp_path / "v11.db"
+
+    db = await open_db(db_path)
+    await db.execute(
+        """
+        INSERT INTO session_costs (session_id, project_name, started_at, cost_usd)
+        VALUES ('sess-v11', 'cost-tracker', '2026-07-01T00:00:00Z', 4.25)
+        """
+    )
+    await db.execute("PRAGMA user_version = 11")
+    await db.commit()
+    await db.close()
+
+    migrated = await open_db(db_path)
+    try:
+        cursor = await migrated.execute("PRAGMA user_version")
+        version_row = await cursor.fetchone()
+        assert version_row is not None
+        assert version_row[0] == SCHEMA_VERSION
+
+        cursor = await migrated.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='session_classification'"
+        )
+        table_row = await cursor.fetchone()
+        assert table_row is not None
+
+        cursor = await migrated.execute("PRAGMA table_info(session_classification)")
+        columns = {row["name"] for row in await cursor.fetchall()}
+        assert {
+            "session_id",
+            "role",
+            "task_class",
+            "routing_basis",
+            "dominant_model",
+            "confidence",
+            "method",
+            "classified_at",
+        } <= columns
+
+        await migrated.execute(
+            """
+            INSERT INTO session_classification (
+                session_id, role, task_class, routing_basis, dominant_model, confidence, method
+            )
+            VALUES ('sess-v11', 'solo', 'implementation', 'over-powered', 'opus', 0.75, 'derived-v1')
+            """
+        )
+        await migrated.commit()
+        cursor = await migrated.execute(
+            "SELECT routing_basis FROM session_classification WHERE session_id = 'sess-v11'"
+        )
+        class_row = await cursor.fetchone()
+        assert class_row is not None
+        assert class_row["routing_basis"] == "over-powered"
+    finally:
+        await migrated.close()
+
+
+async def test_migration_v11_to_v12_is_idempotent(tmp_path: Path) -> None:
+    """Re-opening a migrated v12 DB does not raise; version stays current."""
+    db_path = tmp_path / "v11_idem.db"
+
+    db = await open_db(db_path)
+    await db.execute("PRAGMA user_version = 11")
+    await db.commit()
+    await db.close()
+
+    first = await open_db(db_path)
+    await first.close()
+
+    second = await open_db(db_path)
+    try:
+        cursor = await second.execute("PRAGMA user_version")
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == SCHEMA_VERSION
+
+        cursor = await second.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_scl_routing'"
+        )
+        index_row = await cursor.fetchone()
+        assert index_row is not None
+    finally:
+        await second.close()
