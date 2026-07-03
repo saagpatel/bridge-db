@@ -279,6 +279,40 @@ async def run_rebuild_content_index() -> bool:
     return bool(metrics["ok"])
 
 
+async def run_reconcile_canonical_keys() -> bool:
+    """Reconcile stored canonical_key values to GHRA repo_full_name values."""
+    from bridge_db import config
+    from bridge_db.canonical_reconcile import reconcile_canonical_keys
+    from bridge_db.db import open_db
+
+    db = await open_db(config.DB_PATH)
+    try:
+        result = await reconcile_canonical_keys(db)
+    finally:
+        await db.close()
+
+    print("bridge-db canonical_key reconcile")
+    print(f"  Registry: {'present' if result.registry_present else 'missing'}")
+    print(
+        "  Rows:"
+        f" checked={result.rows_checked},"
+        f" updated={result.rows_updated},"
+        f" disagreements_resolved={result.disagreements_resolved},"
+        f" unresolvable_rows={result.unresolvable_rows},"
+        f" unresolvable_nulled={result.unresolvable_nulled}"
+    )
+    for table, counts in result.table_counts.items():
+        print(
+            f"  {table}:"
+            f" checked={counts['rows_checked']},"
+            f" updated={counts['rows_updated']},"
+            f" disagreements_resolved={counts['disagreements_resolved']},"
+            f" unresolvable_nulled={counts['unresolvable_nulled']}"
+        )
+    print(f"  Overall: {'reconciled' if result.registry_present else 'blocked'}")
+    return result.registry_present
+
+
 async def run_checkpoint() -> bool:
     """Force a WAL checkpoint to bound -wal growth (register #3 / FMEA 1.3)."""
     from bridge_db import config
@@ -499,6 +533,11 @@ def main() -> None:
         help="Rebuild the FTS content_index from source tables and verify it",
     )
     parser.add_argument(
+        "--reconcile-canonical-keys",
+        action="store_true",
+        help="Backfill activity/handoff canonical_key values from the GHRA registry",
+    )
+    parser.add_argument(
         "--checkpoint",
         action="store_true",
         help="Force a WAL checkpoint (TRUNCATE) to bound -wal growth",
@@ -541,6 +580,9 @@ def main() -> None:
         sys.exit(0 if ok else 1)
     if args.rebuild_content_index:
         ok = asyncio.run(run_rebuild_content_index())
+        sys.exit(0 if ok else 1)
+    if args.reconcile_canonical_keys:
+        ok = asyncio.run(run_reconcile_canonical_keys())
         sys.exit(0 if ok else 1)
     if args.checkpoint:
         ok = asyncio.run(run_checkpoint())

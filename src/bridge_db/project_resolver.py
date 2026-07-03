@@ -9,6 +9,8 @@ flagged via the existing audit log rather than silently recorded.
 
 This is a consumer-side resolution helper, not a new coordination surface:
 bridge-db stores the resolved key alongside the activity it already stores.
+GithubRepoAuditor owns the keyspace; bridge-db stores GHRA's repo_full_name
+natural key when one exists, and leaves repo-less/unmatched rows as ``NULL``.
 """
 
 from __future__ import annotations
@@ -42,9 +44,15 @@ class Resolution:
 
 @dataclass(frozen=True)
 class _Index:
-    norm_to_key: dict[str, str]
-    override_norm_to_key: dict[str, str]
-    notion_targets_by_key: dict[str, tuple[str, str | None]]
+    norm_to_entry: dict[str, _ResolvedEntry]
+    override_norm_to_entry: dict[str, _ResolvedEntry]
+
+
+@dataclass(frozen=True)
+class _ResolvedEntry:
+    canonical_key: str | None
+    notion_page_id: str | None = None
+    notion_title: str | None = None
 
 
 def _normalize(value: str | None) -> str:
@@ -64,9 +72,17 @@ def _strip_alias_prefix(alias: str) -> str:
     return alias.split(":", 1)[1] if ":" in alias else alias
 
 
+def _entry_canonical_key(entry: Mapping[str, object]) -> str | None:
+    repo = entry.get("repo_full_name")
+    if isinstance(repo, str) and repo.strip():
+        return repo.strip()
+    return None
+
+
 def _compile_index(registry: Mapping[str, object]) -> _Index:
-    norm_to_key: dict[str, str] = {}
-    notion_targets_by_key: dict[str, tuple[str, str | None]] = {}
+    norm_to_entry: dict[str, _ResolvedEntry] = {}
+    entries_by_legacy_key: dict[str, _ResolvedEntry] = {}
+    entries_by_repo_full_name: dict[str, _ResolvedEntry] = {}
     raw_entries = registry.get("entries", [])
     entries: list[object] = []
     if isinstance(raw_entries, list):
@@ -78,13 +94,15 @@ def _compile_index(registry: Mapping[str, object]) -> _Index:
         raw_key = entry.get("canonical_key")
         if not isinstance(raw_key, str) or not raw_key:
             continue
-        key = raw_key
         raw_display = entry.get("display_name")
         display = raw_display if isinstance(raw_display, str) else None
         forms = {_normalize(raw_display if isinstance(raw_display, str) else None)}
         repo = entry.get("repo_full_name")
         if repo:
             forms.add(_normalize(_repo_base(repo if isinstance(repo, str) else None)))
+            if isinstance(repo, str):
+                forms.add(_normalize(repo))
+        forms.add(_normalize(raw_key))
         raw_bridge_names = entry.get("bridge_project_names", [])
         bridge_names: list[object] = []
         if isinstance(raw_bridge_names, list):
@@ -92,8 +110,6 @@ def _compile_index(registry: Mapping[str, object]) -> _Index:
         for raw_bridge_name in bridge_names:
             if isinstance(raw_bridge_name, str):
                 forms.add(_normalize(raw_bridge_name))
-        if "/" in key:
-            forms.add(_normalize(key))
         raw_aliases = entry.get("aliases", [])
         aliases: list[object] = []
         if isinstance(raw_aliases, list):
@@ -101,28 +117,34 @@ def _compile_index(registry: Mapping[str, object]) -> _Index:
         for raw_alias in aliases:
             if isinstance(raw_alias, str):
                 forms.add(_normalize(_strip_alias_prefix(raw_alias)))
+        page_id = entry.get("notion_local_page_id")
+        title = entry.get("notion_local_title")
+        resolved = _ResolvedEntry(
+            canonical_key=_entry_canonical_key(entry),
+            notion_page_id=page_id.strip() if isinstance(page_id, str) and page_id.strip() else None,
+            notion_title=title if isinstance(title, str) and title else display,
+        )
+        entries_by_legacy_key[raw_key] = resolved
+        if resolved.canonical_key is not None:
+            entries_by_repo_full_name[resolved.canonical_key] = resolved
         for form in forms:
             if form:
-                norm_to_key.setdefault(form, key)
-        page_id = entry.get("notion_local_page_id")
-        if isinstance(page_id, str) and page_id.strip():
-            title = entry.get("notion_local_title")
-            notion_targets_by_key[key] = (
-                page_id.strip(),
-                title if isinstance(title, str) and title else display,
-            )
-    override_norm_to_key: dict[str, str] = {}
+                norm_to_entry.setdefault(form, resolved)
+    override_norm_to_entry: dict[str, _ResolvedEntry] = {}
     raw_overrides = registry.get("resolution_overrides", {})
     overrides: dict[object, object] = (
         cast(dict[object, object], raw_overrides) if isinstance(raw_overrides, dict) else {}
     )
     for raw, key in overrides.items():
         if isinstance(raw, str) and isinstance(key, str):
-            override_norm_to_key[_normalize(raw)] = key
+            target = entries_by_legacy_key.get(key) or entries_by_repo_full_name.get(key)
+            if target is None and "/" in key:
+                target = _ResolvedEntry(canonical_key=key)
+            if target is not None:
+                override_norm_to_entry[_normalize(raw)] = target
     return _Index(
-        norm_to_key=norm_to_key,
-        override_norm_to_key=override_norm_to_key,
-        notion_targets_by_key=notion_targets_by_key,
+        norm_to_entry=norm_to_entry,
+        override_norm_to_entry=override_norm_to_entry,
     )
 
 
@@ -155,17 +177,13 @@ def resolve(project_name: str, registry_path: Path | None = None) -> Resolution:
     norm = _normalize(project_name)
     if not norm:
         return Resolution(canonical_key=None, registry_present=True, matched=False)
-    key = index.override_norm_to_key.get(norm) or index.norm_to_key.get(norm)
-    notion_page_id = None
-    notion_title = None
-    if key is not None:
-        notion_target = index.notion_targets_by_key.get(key)
-        if notion_target is not None:
-            notion_page_id, notion_title = notion_target
+    entry = index.override_norm_to_entry.get(norm) or index.norm_to_entry.get(norm)
+    if entry is None:
+        return Resolution(canonical_key=None, registry_present=True, matched=False)
     return Resolution(
-        canonical_key=key,
+        canonical_key=entry.canonical_key,
         registry_present=True,
-        matched=key is not None,
-        notion_page_id=notion_page_id,
-        notion_title=notion_title,
+        matched=True,
+        notion_page_id=entry.notion_page_id,
+        notion_title=entry.notion_title,
     )

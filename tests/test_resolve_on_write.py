@@ -48,10 +48,10 @@ async def test_log_activity_sets_canonical_key_from_registry(
     result = await fns["log_activity"](
         caller="cc", project_name="MCP Audit", summary="did work", ctx=make_ctx(db)
     )
-    assert result["canonical_key"] == "MCPAudit"
+    assert result["canonical_key"] == "saagpatel/MCPAudit"
     rows = await fns["get_recent_activity"](ctx=make_ctx(db))
     assert rows[0]["project_name"] == "MCP Audit"
-    assert rows[0]["canonical_key"] == "MCPAudit"
+    assert rows[0]["canonical_key"] == "saagpatel/MCPAudit"
 
 
 async def test_log_activity_pass_through_when_registry_absent(
