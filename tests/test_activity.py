@@ -513,16 +513,16 @@ async def test_get_shipped_events_includes_notion_sync_contract(
     shipped = await fns["get_shipped_events"](ctx=ctx)
     by_name = {entry["project_name"]: entry for entry in shipped}
 
-    assert by_name["ready-project"]["canonical_key"] == "ReadyProject"
+    assert by_name["ready-project"]["canonical_key"] == "saagpatel/ready-project"
     assert by_name["ready-project"]["notion_sync"] == {
         "state": "ready",
         "reason": "canonical project has explicit notion_local_page_id",
-        "canonical_key": "ReadyProject",
+        "canonical_key": "saagpatel/ready-project",
         "notion_page_id": "page-ready",
         "notion_title": "Ready Project",
     }
     assert by_name["mapped-without-page"]["notion_sync"]["state"] == "no_notion_target"
-    assert by_name["mapped-without-page"]["notion_sync"]["canonical_key"] == ("MappedWithoutPage")
+    assert by_name["mapped-without-page"]["notion_sync"]["canonical_key"] is None
     assert by_name["missing-project"]["notion_sync"]["state"] == "unmatched"
 
 

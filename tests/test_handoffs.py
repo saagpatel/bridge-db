@@ -469,17 +469,17 @@ async def test_create_handoff_resolves_canonical_key(
     monkeypatch.setattr(config, "PROJECT_REGISTRY_PATH", _registry(tmp_path))
     ctx = make_ctx(db)
     result = await fns["create_handoff"](caller="claude_ai", project_name="IncidentMgmt", ctx=ctx)
-    assert result["canonical_key"] == "incidentmgmt"
+    assert result["canonical_key"] == "saagpatel/IncidentManagement"
 
     cursor = await db.execute(
         "SELECT canonical_key FROM pending_handoffs WHERE project_name = 'IncidentMgmt'"
     )
     row = await cursor.fetchone()
     assert row is not None
-    assert row["canonical_key"] == "incidentmgmt"
+    assert row["canonical_key"] == "saagpatel/IncidentManagement"
 
     pending = await fns["get_pending_handoffs"](ctx=ctx)
-    assert pending[0]["canonical_key"] == "incidentmgmt"
+    assert pending[0]["canonical_key"] == "saagpatel/IncidentManagement"
 
 
 async def test_create_handoff_canonical_key_none_when_registry_absent(
@@ -517,7 +517,7 @@ async def test_clear_handoff_matches_canonical_alias(
     assert result["cleared"] is True
     assert result["cleared_count"] == 1
     assert result["handoff_id"] == created["handoff_id"]
-    assert result["canonical_key"] == "incidentmgmt"
+    assert result["canonical_key"] == "saagpatel/IncidentManagement"
 
     cursor = await db.execute(
         "SELECT status FROM pending_handoffs WHERE id = ?", (created["handoff_id"],)

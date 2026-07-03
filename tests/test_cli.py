@@ -20,6 +20,7 @@ from bridge_db.__main__ import (
     run_log_session_boundary,
     run_promote_section,
     run_rebuild_content_index,
+    run_reconcile_canonical_keys,
     run_revoke_principal,
     run_status,
 )
@@ -247,6 +248,62 @@ async def test_rebuild_content_index_repairs_and_is_idempotent(
     assert await run_rebuild_content_index() is True
     idempotent = capsys.readouterr().out
     assert "expected=1, indexed=1, missing=0, orphaned=0" in idempotent
+
+
+@pytest.mark.asyncio
+async def test_reconcile_canonical_keys_cli_reports_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    registry_path = tmp_path / "project-registry.json"
+    audit_log_path = tmp_path / "audit.jsonl"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "canonical_key": "operant-public",
+                        "display_name": "operant-public",
+                        "repo_full_name": "saagpatel/operant",
+                        "bridge_project_names": ["OPERANT"],
+                        "aliases": [],
+                    }
+                ],
+                "resolution_overrides": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    monkeypatch.setattr(cfg, "PROJECT_REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(cfg, "AUDIT_LOG_PATH", audit_log_path)
+
+    db = await open_db(db_path)
+    try:
+        await db.execute(
+            "INSERT INTO activity_log (source, timestamp, project_name, summary, canonical_key) "
+            "VALUES ('cc', '2026-07-03', 'OPERANT', 'old slug', 'operant-public')"
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    ok = await run_reconcile_canonical_keys()
+    captured = capsys.readouterr().out
+
+    assert ok is True
+    assert "bridge-db canonical_key reconcile" in captured
+    assert "updated=1" in captured
+    assert "disagreements_resolved=1" in captured
+
+    db = await open_db(db_path)
+    try:
+        row = await (await db.execute("SELECT canonical_key FROM activity_log")).fetchone()
+        assert row is not None
+        assert row["canonical_key"] == "saagpatel/operant"
+    finally:
+        await db.close()
 
 
 @pytest.mark.asyncio
