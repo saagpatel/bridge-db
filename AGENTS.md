@@ -27,6 +27,18 @@ bridge-db is a SQLite-backed MCP server for cross-system state sharing between C
 - Preserve FTS5 consistency for every write path that touches indexed tables.
 - Prefer maintenance-only changes unless a new coordination surface is explicitly requested.
 
+## Review guidelines
+
+Focus Codex review on schema and migration integrity, caller ownership,
+canonical-key compatibility, stale-read or stale-write behavior, FTS5
+consistency, MCP JSON-RPC stdout safety, audit/query-log side effects, and
+cross-client recovery paths. Treat nullable keys, orphanable sidecars, silent
+upgrade failures, and misleading health/status output as merge-relevant.
+
+For docs-only PRs, comment only when docs describe a bridge contract, migration,
+tool result, recovery path, or current state that the code or schema does not
+support.
+
 ## Codex App Usage
 
 - Use Codex App Projects for repo-specific implementation, review, and verification in this checkout.
