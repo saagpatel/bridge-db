@@ -506,11 +506,12 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         if current_version >= target:
             continue
         logger.info("Migrating schema v%d → v%d", current_version, target)
+        current_version = target
+        await db.execute(f"PRAGMA user_version = {current_version}")
+        await db.commit()
         await db.executescript(ddl)
         if post_hook is not None:
             await post_hook(db)
-        current_version = target
-        await db.execute(f"PRAGMA user_version = {current_version}")
         await db.commit()
         logger.info("Schema migrated to v%d", target)
 
