@@ -626,7 +626,7 @@ def register(mcp: FastMCP) -> None:
                 continue
             current_tags: list[str] = json.loads(row["tags"])
             tags_by_activity_id[activity_id] = current_tags
-            if "SHIPPED" in current_tags:
+            if "SHIPPED" in current_tags and "PROCESSED" in current_tags:
                 blocked_shipped_ids.append(activity_id)
 
         if blocked_shipped_ids:
