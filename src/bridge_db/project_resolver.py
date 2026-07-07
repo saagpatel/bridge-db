@@ -76,6 +76,12 @@ def _entry_canonical_key(entry: Mapping[str, object]) -> str | None:
     repo = entry.get("repo_full_name")
     if isinstance(repo, str) and repo.strip():
         return repo.strip()
+    # Repo-less projects carry a stable ``supp:<slug>`` key minted by the
+    # auditor (GHRA owns the keyspace) per the signed IDENTITY-DECISION-RECORD.
+    # Older registries without the field resolve to None, unchanged.
+    supp = entry.get("supp_key")
+    if isinstance(supp, str) and supp.startswith("supp:"):
+        return supp
     return None
 
 

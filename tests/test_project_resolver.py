@@ -16,11 +16,13 @@ def _entry(
     bridge_project_names: list[str] | None = None,
     notion_local_page_id: str | None = None,
     notion_local_title: str | None = None,
+    supp_key: str | None = None,
 ) -> dict[str, object]:
     return {
         "canonical_key": key,
         "display_name": display,
         "repo_full_name": repo,
+        "supp_key": supp_key,
         "aliases": aliases or [],
         "bridge_project_names": bridge_project_names or [],
         "notion_local_page_id": notion_local_page_id,
@@ -100,13 +102,49 @@ def test_override_can_resolve_direct_ghra_alias_map_value(tmp_path: Path) -> Non
     assert resolve("OPERANT", registry_path=reg).canonical_key == "saagpatel/operant"
 
 
-def test_repo_less_entry_matches_but_leaves_canonical_key_null(tmp_path: Path) -> None:
+def test_repo_less_entry_with_supp_key_resolves_to_supp_key(tmp_path: Path) -> None:
+    reg = _write_registry(
+        tmp_path / "r.json",
+        [_entry("supp:personal-ops", "personal-ops", repo=None, supp_key="supp:personal-ops")],
+    )
+    result = resolve("personal-ops", registry_path=reg)
+    assert result.registry_present is True
+    assert result.matched is True
+    assert result.canonical_key == "supp:personal-ops"
+
+
+def test_repo_less_entry_without_supp_key_stays_null(tmp_path: Path) -> None:
+    # Pre-supp_key registry format: a repo-less entry still resolves to
+    # matched=True / canonical_key=None so logging is unchanged on old output.
     reg = _write_registry(
         tmp_path / "r.json",
         [_entry("supp:personal-ops", "personal-ops", repo=None)],
     )
     result = resolve("personal-ops", registry_path=reg)
     assert result.registry_present is True
+    assert result.matched is True
+    assert result.canonical_key is None
+
+
+def test_repo_backed_entry_prefers_repo_full_name_over_supp_key(tmp_path: Path) -> None:
+    # Even if a registry entry carries both fields, repo_full_name wins.
+    reg = _write_registry(
+        tmp_path / "r.json",
+        [_entry("saagpatel/Recall", "Recall", repo="saagpatel/Recall", supp_key="supp:Recall")],
+    )
+    result = resolve("Recall", registry_path=reg)
+    assert result.matched is True
+    assert result.canonical_key == "saagpatel/Recall"
+
+
+def test_supp_key_without_supp_prefix_is_rejected(tmp_path: Path) -> None:
+    # A malformed supp_key that does not carry the supp: prefix is not adopted
+    # as a canonical key (bridge-db defends the keyspace contract on its side).
+    reg = _write_registry(
+        tmp_path / "r.json",
+        [_entry("junk-key", "junk", repo=None, supp_key="not-prefixed")],
+    )
+    result = resolve("junk", registry_path=reg)
     assert result.matched is True
     assert result.canonical_key is None
 
