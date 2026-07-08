@@ -325,7 +325,9 @@ async def _handoff_freshness(db: Any, now: datetime) -> dict[str, Any]:
 
 
 def _shipped_event_freshness(health: dict[str, Any]) -> dict[str, Any]:
+    unprocessed = int(health["unprocessed_shipped_count"])
     actionable_unprocessed = int(health["actionable_unprocessed_shipped_count"])
+    dispositioned_unprocessed = max(unprocessed - actionable_unprocessed, 0)
     processed_without_receipt = int(health["processed_shipped_without_receipt_count"])
     if processed_without_receipt > 0:
         next_action = "inspect_receiptless_processed"
@@ -334,7 +336,9 @@ def _shipped_event_freshness(health: dict[str, Any]) -> dict[str, Any]:
     else:
         next_action = "none"
     return {
+        "unprocessed": unprocessed,
         "actionable_unprocessed": actionable_unprocessed,
+        "dispositioned_unprocessed": dispositioned_unprocessed,
         "processed_without_receipt": processed_without_receipt,
         "next_action": next_action,
     }
@@ -529,6 +533,11 @@ async def collect_status_summary(db: Any, *, now: datetime | None = None) -> dic
             "pending_handoffs": pending_handoffs,
             "unprocessed_shipped": health["unprocessed_shipped_count"],
             "actionable_unprocessed_shipped": health["actionable_unprocessed_shipped_count"],
+            "dispositioned_unprocessed_shipped": max(
+                health["unprocessed_shipped_count"]
+                - health["actionable_unprocessed_shipped_count"],
+                0,
+            ),
             "processed_shipped_without_receipt": health["processed_shipped_without_receipt_count"],
             "fts_missing": health["fts_index"]["missing"],
             "fts_orphaned": health["fts_index"]["orphaned"],
