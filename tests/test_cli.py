@@ -95,6 +95,20 @@ def test_mark_audit_posture_classifies_legacy_and_blocked_rows() -> None:
                 }
             ]
         )
+        == "historical shipped bypass evidence only; no receiptless shipped rows"
+    )
+    assert (
+        mark_audit_posture(
+            [
+                {
+                    "detail": (
+                        "activity_ids=[1] updated_ids=[1] missing_ids=[] "
+                        "updated=1/1 shipped_bypass_ids=[1]"
+                    )
+                }
+            ],
+            processed_shipped_without_receipt=1,
+        )
         == "legacy shipped bypass observed"
     )
     assert (
