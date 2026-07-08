@@ -25,6 +25,7 @@ uv run pytest    # verify the install
 - Schema v10: context sections carry monotonic `version` tokens; stale writes and raced handoff claims produce durable `write_conflicts` receipts.
 - Schema v12: adds the `session_classification` sidecar for heuristic cost-routing attribution while keeping `session_costs` as pure actuals. Schema v11 backfills activity `tags` into `content_index` so lifecycle tags (SHIPPED, DECISION, ...) are recall-able on existing DBs.
 - FTS5 `content_index` mirrors all content tables; `health` and `status` verify source-row / FTS-row alignment.
+- `status` includes a native freshness block for owner-specific snapshot, activity, handoff, and shipped-event attention. Freshness attention is advisory: top-level `ok` / `overall` remain tied to DB, schema, fallback-file, and FTS health.
 - 26 MCP tools across 10 modules (activity, handoffs, context, snapshots, cost, export, health, recall, audit, conflicts).
 
 ## Architecture
@@ -149,6 +150,43 @@ args = ["run", "--directory", "/path/to/bridge-db", "python", "-m", "bridge_db"]
 - Canonical-key reconcile: `uv run python -m bridge_db --reconcile-canonical-keys` rewrites stored `activity_log` and `pending_handoffs` `canonical_key` values through GithubRepoAuditor's registry, storing GHRA `repo_full_name` for repo-backed projects and leaving unresolvable rows `NULL`.
 - Session boundary logging: Claude Code's SessionEnd hook should call `uv run --directory /path/to/bridge-db python -m bridge_db --log-session-boundary <project>` rather than writing SQLite directly; this path adds the FTS row and does not run activity retention pruning
 - Migration: `uv run python -m bridge_db.migration` (idempotent — safe to re-run)
+
+The MCP `status` result enriches the compact summary with `freshness`:
+
+- `thresholds_hours`: `snapshot_stale_after=48.0`, `activity_quiet_after=72.0`,
+  `pending_handoff_stale_after=168.0`, and
+  `active_handoff_stale_after=72.0`.
+- `snapshots`: per-owner `cc` and `codex` entries with `state`, `owner`,
+  `latest_snapshot_date`, `latest_created_at`, `age_hours`, and `next_action`.
+  Snapshot refresh actions stay owner-specific: `cc_refresh_snapshot` belongs
+  to `cc`; `codex_refresh_snapshot` belongs to `codex`.
+- `activity_sources`: `cc`, `codex`, `claude_ai`, `notion_os`, and
+  `personal_ops` entries with `state`, `latest`, and `age_hours`.
+- `handoffs`: pending/active counts, stale counts, oldest ages, and unknown-age
+  counts for pending and active handoffs.
+- `shipped_events`: actionable unprocessed count, processed-without-receipt
+  count, and the shipped-event `next_action`.
+- `overall`: `fresh`, `attention`, `stale`, or `unknown`.
+- `next_actions`: up to five deterministic `{action, owner, reason}` entries.
+
+Freshness states use a narrow vocabulary: `fresh` means recent enough for that
+surface; `quiet` means an activity source has no recent rows and is not a
+health failure; `stale` means a snapshot or handoff needs refresh/review;
+`missing` means the expected owner row is absent; and `unknown` means a missing
+or unparsable timestamp prevents age calculation.
+
+The CLI status command prints freshness as compact hints:
+
+```text
+  Freshness: <overall>
+  Next actions: <action> (<owner>), ...
+```
+
+These lines do not change the command's success semantics. `uv run python -m
+bridge_db --status` still exits from bridge health, so freshness `attention` by
+itself does not fail the command. bridge-db remains MCP-first and
+SQLite-native; the markdown export is a fallback/mirror, and freshness adds no
+service, table, migration, tool, or CLI flag.
 
 `activity_log` retention and shipped-sync receipts are separate surfaces:
 activity rows are recent context, while `shipped_sync_receipts` is the proof

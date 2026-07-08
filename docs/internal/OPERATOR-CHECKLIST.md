@@ -42,6 +42,18 @@ Expected result
 - Doctor reports the DB file, schema, bridge file, and audit log as healthy.
 - Status prints a compact operator-facing summary of bridge health, counts, and latest signals.
 - Status prints an `Attention:` line when bridge health is degraded or queue/receipt/FTS signals need follow-up.
+- Status prints `Freshness: <overall>` from the native `status.freshness`
+  block, plus `Next actions: <action> (<owner>), ...` when owner-specific
+  follow-up exists. Freshness attention alone is not bridge-health degradation
+  and does not fail `--status`.
+- The `status.freshness` block includes thresholds, `cc`/`codex` snapshot
+  freshness, activity-source freshness for `cc`, `codex`, `claude_ai`,
+  `notion_os`, and `personal_ops`, handoff staleness counts, shipped-event
+  next action, overall freshness, and up to five deterministic next actions.
+- Treat `quiet` activity sources as low-traffic signals, not failures. Treat
+  `stale` snapshots/handoffs as refresh or review work, and keep snapshot
+  refresh ownership exact: `cc_refresh_snapshot` belongs to `cc`;
+  `codex_refresh_snapshot` belongs to `codex`.
 - Dogfood prints the read-only post-sync observability summary: status signals, FTS index state, WAL state, recall usage, and shipped-sync audit details.
 - The `health` MCP tool should report `ok=True` only when the DB, schema, fallback bridge file, and FTS recall index are all healthy.
 - If `fts_missing` or `fts_orphaned` is nonzero, run `uv run python -m bridge_db --rebuild-content-index`, then rerun `--status` and `--dogfood`.
@@ -70,9 +82,12 @@ below remain from the earlier integration verification.
 - `uv run pyright` passes locally.
 - `uv run ruff check` passes locally.
 - `uv run python -m bridge_db --doctor` passes locally.
-- `uv run python -m bridge_db --status` reports healthy bridge state.
-- `uv run python -m bridge_db --dogfood` reports a clean shipped-event queue
-  and clean FTS index (`fts_missing=0`, `fts_orphaned=0`).
+- `uv run python -m bridge_db --status` reports bridge health separately from
+  freshness attention. Use fresh output for `Freshness:` and `Next actions:`;
+  do not treat freshness `attention` as degraded DB/schema/file/FTS health.
+- `uv run python -m bridge_db --dogfood` reports shipped-event, handoff, FTS,
+  WAL, recall, and audit details. Use fresh output before claiming the shipped
+  queue is clean.
 - Claude Code SessionEnd logging uses `uv run --directory ~/Projects/bridge-db python -m bridge_db --log-session-boundary <project>` rather than direct SQLite writes.
 - `claude mcp list` reports `bridge-db` connected through this repo.
 - Codex config includes the `mcp_servers.bridge-db` registration for this repo.
@@ -84,9 +99,9 @@ below remain from the earlier integration verification.
 - Startup sync plus export has been verified end to end.
 - Latest local repo verification should be stated from fresh verifier output:
   `uv run pytest`, `uv run pyright`, and `uv run ruff check`.
-- Live status currently reports no pending handoffs and no actionable unprocessed
-  shipped events; raw unprocessed rows may remain when each has a non-receipt
-  policy disposition.
+- Live shipped-event state is runtime data. Check fresh `--status`,
+  `--dogfood`, or `get_shipped_events` output before claiming pending handoffs,
+  actionable unprocessed shipped events, or disposition coverage are clean.
 - Dependency drift was refreshed through PR #27 after Dependabot PRs #25 and #26 were superseded.
 - Bridge Sync burn-in review is complete and the one-time heartbeat is retired.
 - `POST-SYNC-REVIEW.md` is the checklist to use after future scheduled Bridge
@@ -147,6 +162,9 @@ Manual equivalent:
 2. If shipped-event drift is suspected, run
    `mcp__bridge_db__audit_tail(tool="confirm_shipped_sync", limit=10)` and
    `uv run python -m bridge_db --status`.
+   Read `status.freshness.shipped_events.next_action`; actionable unprocessed
+   shipped rows should route to `confirm_shipped_sync` with downstream proof or
+   `record_shipped_event_disposition` with an explicit policy reason.
 3. If a compatibility `mark_shipped_processed` row appears, inspect its
    `detail` field for the requested `activity_ids`, `updated_ids`, and
    `missing_ids`, then confirm `status` still reports
@@ -155,7 +173,11 @@ Manual equivalent:
    bridge-owned state: sections, activity, snapshots, and handoffs.
 5. Confirm `uv run python -m bridge_db --status` reports `fts_missing=0` and
    `fts_orphaned=0` before trusting recall results after unusual writes.
-6. After a Claude Code session ends, confirm the newest `CC session ended` row is
+6. Read the compact freshness lines from `--status`. `Freshness: fresh` means
+   the freshness surfaces have no current advisory action; `attention`,
+   `stale`, or `unknown` should be handled through the listed owner-specific
+   next actions, not by assuming bridge health is degraded.
+7. After a Claude Code session ends, confirm the newest `CC session ended` row is
    indexed:
 
    ```bash
