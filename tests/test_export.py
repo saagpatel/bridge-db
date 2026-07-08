@@ -16,6 +16,10 @@ from bridge_db.tools import snapshots as snap_mod
 from bridge_db.tools.export import build_markdown as _build_markdown
 
 
+def _always_claude_home_bridge_path(_path: Path) -> bool:
+    return True
+
+
 @pytest.fixture
 def all_fns(db: aiosqlite.Connection) -> dict[str, Any]:
     cap = CaptureMCP()
@@ -467,6 +471,103 @@ def test_write_bridge_file_writes_content_and_leaves_no_temp(
     assert target.read_text(encoding="utf-8") == "hello bridge\n"
     # the atomic temp file must not linger in the watched directory
     assert [p.name for p in tmp_path.iterdir()] == ["claude_ai_context.md"]
+
+
+def test_write_bridge_file_rejects_empty_core_export_to_claude_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "claude_ai_context.md"
+    monkeypatch.setattr(exp_mod.config, "BRIDGE_FILE_PATH", target)
+    monkeypatch.setattr(exp_mod, "_is_claude_home_bridge_path", _always_claude_home_bridge_path)
+    content = "\n".join(
+        [
+            "## Career & Professional Target",
+            "_Not yet populated._",
+            "## Speaking Engagements",
+            "_Not yet populated._",
+            "## Active Research Themes",
+            "_Not yet populated._",
+            "## Claude.ai Capabilities Summary",
+            "_Not yet populated._",
+        ]
+    )
+
+    with pytest.raises(exp_mod.BridgeExportSafetyError, match="all placeholders"):
+        exp_mod.write_bridge_file(content)
+
+    assert not target.exists()
+
+
+def test_write_bridge_file_allows_empty_core_export_to_non_fallback_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "claude_ai_context.md"
+    monkeypatch.setattr(exp_mod.config, "BRIDGE_FILE_PATH", target)
+    content = "\n".join(
+        [
+            "## Career & Professional Target",
+            "_Not yet populated._",
+            "## Speaking Engagements",
+            "_Not yet populated._",
+            "## Active Research Themes",
+            "_Not yet populated._",
+            "## Claude.ai Capabilities Summary",
+            "_Not yet populated._",
+        ]
+    )
+
+    exp_mod.write_bridge_file(content)
+
+    assert target.read_text(encoding="utf-8") == content
+
+
+def test_write_bridge_file_allows_intentional_empty_fallback_bootstrap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "claude_ai_context.md"
+    monkeypatch.setattr(exp_mod.config, "BRIDGE_FILE_PATH", target)
+    monkeypatch.setattr(exp_mod, "_is_claude_home_bridge_path", _always_claude_home_bridge_path)
+    monkeypatch.setenv("BRIDGE_DB_ALLOW_EMPTY_BRIDGE_EXPORT", "1")
+    content = "\n".join(
+        [
+            "## Career & Professional Target",
+            "_Not yet populated._",
+            "## Speaking Engagements",
+            "_Not yet populated._",
+            "## Active Research Themes",
+            "_Not yet populated._",
+            "## Claude.ai Capabilities Summary",
+            "_Not yet populated._",
+        ]
+    )
+
+    exp_mod.write_bridge_file(content)
+
+    assert target.read_text(encoding="utf-8") == content
+
+
+def test_write_bridge_file_allows_populated_core_export_to_claude_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "claude_ai_context.md"
+    monkeypatch.setattr(exp_mod.config, "BRIDGE_FILE_PATH", target)
+    monkeypatch.setattr(exp_mod, "_is_claude_home_bridge_path", _always_claude_home_bridge_path)
+    content = "\n".join(
+        [
+            "## Career & Professional Target",
+            "real career context",
+            "## Speaking Engagements",
+            "_Not yet populated._",
+            "## Active Research Themes",
+            "_Not yet populated._",
+            "## Claude.ai Capabilities Summary",
+            "_Not yet populated._",
+        ]
+    )
+
+    exp_mod.write_bridge_file(content)
+
+    assert target.read_text(encoding="utf-8") == content
 
 
 def test_write_bridge_file_atomic_on_replace_failure(

@@ -16,6 +16,61 @@ from bridge_db.db import content_sha256, get_db
 logger = logging.getLogger("bridge_db.tools.export")
 
 _SECTION_ORDER = ["career", "speaking", "research", "capabilities"]
+_EMPTY_SECTION_PLACEHOLDER = "_Not yet populated._"
+_ALLOW_EMPTY_EXPORT_ENV = "BRIDGE_DB_ALLOW_EMPTY_BRIDGE_EXPORT"
+_HEADING_MAP = {
+    "career": "## Career & Professional Target",
+    "speaking": "## Speaking Engagements",
+    "research": "## Active Research Themes",
+    "capabilities": "## Claude.ai Capabilities Summary",
+}
+
+
+class BridgeExportSafetyError(RuntimeError):
+    """Raised when an export would overwrite the real fallback with empty context."""
+
+
+def _section_body(markdown: str, heading: str) -> str:
+    marker = f"{heading}\n"
+    start = markdown.find(marker)
+    if start == -1:
+        return ""
+    body_start = start + len(marker)
+    next_heading = markdown.find("\n## ", body_start)
+    if next_heading == -1:
+        return markdown[body_start:].strip()
+    return markdown[body_start:next_heading].strip()
+
+
+def _core_context_is_placeholder_only(content: str) -> bool:
+    return all(
+        _section_body(content, _HEADING_MAP[section_key]) == _EMPTY_SECTION_PLACEHOLDER
+        for section_key in _SECTION_ORDER
+    )
+
+
+def _is_claude_home_bridge_path(path: Path) -> bool:
+    try:
+        path.expanduser().resolve(strict=False).relative_to(
+            (Path.home() / ".claude" / "projects").resolve(strict=False)
+        )
+    except ValueError:
+        return False
+    return path.name == "claude_ai_context.md"
+
+
+def _validate_bridge_file_export(content: str, path: Path) -> None:
+    if not _is_claude_home_bridge_path(path):
+        return
+    if os.environ.get(_ALLOW_EMPTY_EXPORT_ENV) == "1":
+        return
+    if not _core_context_is_placeholder_only(content):
+        return
+    raise BridgeExportSafetyError(
+        "Refusing to overwrite the Claude.ai fallback bridge file with an export "
+        f"whose core context sections are all placeholders. Set {_ALLOW_EMPTY_EXPORT_ENV}=1 "
+        "only for an intentional empty bootstrap."
+    )
 
 
 def write_bridge_file(content: str) -> None:
@@ -32,6 +87,7 @@ def write_bridge_file(content: str) -> None:
     unaffected).
     """
     path = config.BRIDGE_FILE_PATH
+    _validate_bridge_file_export(content, path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
@@ -214,14 +270,8 @@ async def build_markdown(db: Any) -> str:
     ]
 
     for section_key in _SECTION_ORDER:
-        heading_map = {
-            "career": "## Career & Professional Target",
-            "speaking": "## Speaking Engagements",
-            "research": "## Active Research Themes",
-            "capabilities": "## Claude.ai Capabilities Summary",
-        }
-        parts.append(heading_map[section_key])
-        parts.append(sections.get(section_key, "_Not yet populated._"))
+        parts.append(_HEADING_MAP[section_key])
+        parts.append(sections.get(section_key, _EMPTY_SECTION_PLACEHOLDER))
         parts.append("")
 
     parts.append(handoffs_md)

@@ -98,6 +98,10 @@ them. New section inserts without CAS remain allowed.
 Claude.ai-owned context section. Later `sync_from_file` imports a changed
 fallback-file section only if the DB still matches that exported base. If the DB
 has advanced, the import is rejected and recorded in `write_conflicts`.
+Exports to the real Claude.ai fallback path are also guarded against empty
+fixture-like output: bridge-db refuses to overwrite that file when all four core
+Claude.ai-owned sections would render as `_Not yet populated._`. Set
+`BRIDGE_DB_ALLOW_EMPTY_BRIDGE_EXPORT=1` only for an intentional empty bootstrap.
 
 Use `get_write_conflicts(status="open")` to inspect stale section writes,
 stale markdown imports, and raced handoff claims.
