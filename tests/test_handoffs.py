@@ -1,5 +1,6 @@
 """Tests for handoff queue tools."""
 
+from datetime import UTC, datetime
 import json
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 from bridge_db import config
 from bridge_db.tools import handoffs as mod
+from bridge_db.tools.health import collect_status_summary
 
 
 @pytest.fixture
@@ -39,6 +41,12 @@ def _registry(tmp_path: Path) -> Path:
         )
     )
     return reg
+
+
+async def _all_handoff_rows(db: aiosqlite.Connection) -> list[tuple[Any, ...]]:
+    cursor = await db.execute("SELECT * FROM pending_handoffs ORDER BY id")
+    rows = await cursor.fetchall()
+    return [tuple(row) for row in rows]
 
 
 async def test_create_handoff_requires_claude_ai(
@@ -300,6 +308,33 @@ async def test_pick_up_codex_ingested_refused(
     assert row["picked_up_at"] is None
 
 
+@pytest.mark.parametrize("source_trust", ["agent", "ingested"])
+async def test_codex_cannot_pick_up_non_operator_handoffs_even_with_confirm(
+    db: aiosqlite.Connection, fns: dict[str, Any], source_trust: str
+) -> None:
+    ctx = make_ctx(db)
+    created = await fns["create_handoff"](
+        caller="claude_ai",
+        project_name=f"NonOperator-{source_trust}",
+        source_trust=source_trust,
+        ctx=ctx,
+    )
+
+    with pytest.raises(ToolError, match="Codex cannot pick up"):
+        await fns["pick_up_handoff"](
+            caller="codex", handoff_id=created["handoff_id"], confirm=True, ctx=ctx
+        )
+
+    cursor = await db.execute(
+        "SELECT status, picked_up_at FROM pending_handoffs WHERE id = ?",
+        (created["handoff_id"],),
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["picked_up_at"] is None
+
+
 async def test_pick_up_codex_operator_activates_one_call(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
@@ -458,6 +493,46 @@ async def test_handoff_lifecycle_across_pending_pickup_and_clear(
     second_row = await cursor.fetchone()
     assert second_row is not None
     assert second_row["status"] == "pending"
+
+
+async def test_status_freshness_classifies_stale_handoffs_without_mutating_rows(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    pending = await fns["create_handoff"](
+        caller="claude_ai", project_name="StalePending", ctx=ctx
+    )
+    active = await fns["create_handoff"](
+        caller="claude_ai",
+        project_name="StaleActive",
+        source_trust="operator",
+        ctx=ctx,
+    )
+    await fns["pick_up_handoff"](caller="codex", handoff_id=active["handoff_id"], ctx=ctx)
+    await db.execute(
+        "UPDATE pending_handoffs SET dispatched_at = ? WHERE id = ?",
+        ("2026-01-01T00:00:00Z", pending["handoff_id"]),
+    )
+    await db.execute(
+        "UPDATE pending_handoffs SET picked_up_at = ? WHERE id = ?",
+        ("2026-01-02T00:00:00Z", active["handoff_id"]),
+    )
+    await db.commit()
+    before = await _all_handoff_rows(db)
+
+    summary = await collect_status_summary(db, now=datetime(2026, 7, 8, tzinfo=UTC))
+
+    handoffs = summary["freshness"]["handoffs"]
+    assert handoffs["pending_count"] == 1
+    assert handoffs["stale_pending_count"] == 1
+    assert handoffs["active_count"] == 1
+    assert handoffs["stale_active_count"] == 1
+    assert summary["freshness"]["overall"] == "stale"
+    assert any(
+        action["action"] == "review_stale_handoff"
+        for action in summary["freshness"]["next_actions"]
+    )
+    assert await _all_handoff_rows(db) == before
 
 
 async def test_create_handoff_resolves_canonical_key(

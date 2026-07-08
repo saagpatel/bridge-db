@@ -14,6 +14,7 @@ import pytest
 from conftest import CaptureMCP, make_ctx
 
 from bridge_db.tools import activity as a_mod
+from bridge_db.tools import handoffs as h_mod
 from bridge_db.tools import snapshots as s_mod
 
 
@@ -28,6 +29,13 @@ def a_fns(db: aiosqlite.Connection) -> dict[str, Any]:
 def s_fns(db: aiosqlite.Connection) -> dict[str, Any]:
     cap = CaptureMCP()
     s_mod.register(cap)
+    return cap.fns
+
+
+@pytest.fixture
+def h_fns(db: aiosqlite.Connection) -> dict[str, Any]:
+    cap = CaptureMCP()
+    h_mod.register(cap)
     return cap.fns
 
 
@@ -106,6 +114,23 @@ async def test_get_shipped_events_carries_instruction_boundary(
     shipped = await a_fns["get_shipped_events"](ctx=ctx)
     assert shipped[0]["source_trust"] == "ingested"
     _assert_boundary(shipped[0]["instruction_boundary"], "ingested")
+
+
+async def test_get_pending_handoffs_carries_instruction_boundary(
+    db: aiosqlite.Connection, h_fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await h_fns["create_handoff"](
+        caller="claude_ai",
+        project_name="BoundaryHandoff",
+        source_trust="ingested",
+        ctx=ctx,
+    )
+
+    pending = await h_fns["get_pending_handoffs"](ctx=ctx)
+
+    assert pending[0]["source_trust"] == "ingested"
+    _assert_boundary(pending[0]["instruction_boundary"], "ingested")
 
 
 async def test_get_latest_snapshot_carries_instruction_boundary(

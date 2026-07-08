@@ -781,6 +781,30 @@ async def test_mark_shipped_processed_rejects_shipped_rows(
     assert "PROCESSED" not in json.loads(row2["tags"])
 
 
+async def test_mark_shipped_processed_refuses_mixed_batch_with_shipped_id(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="personal_ops", project_name="Ops", summary="done", tags=["TASK_DONE"], ctx=ctx
+    )
+    await fns["log_activity"](
+        caller="cc", project_name="Ship", summary="shipped", tags=["SHIPPED"], ctx=ctx
+    )
+    cursor = await db.execute("SELECT id, tags FROM activity_log ORDER BY id")
+    rows: list[aiosqlite.Row] = await cursor.fetchall()  # type: ignore[assignment]
+    ops_id, shipped_id = rows[0]["id"], rows[1]["id"]
+    before_tags = {row["id"]: json.loads(row["tags"]) for row in rows}
+
+    with pytest.raises(ToolError, match="refuses SHIPPED activity ids"):
+        await fns["mark_shipped_processed"](activity_ids=[ops_id, shipped_id], ctx=ctx)
+
+    cursor = await db.execute("SELECT id, tags FROM activity_log ORDER BY id")
+    after_rows = await cursor.fetchall()
+    after_tags = {row["id"]: json.loads(row["tags"]) for row in after_rows}
+    assert after_tags == before_tags
+
+
 async def test_confirm_shipped_sync_requires_downstream_proof(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
