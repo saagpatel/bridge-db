@@ -27,6 +27,35 @@ _ACTIVITY_SOURCES = ("cc", "codex", "claude_ai", "notion_os", "personal_ops")
 _SNAPSHOT_SYSTEMS = ("cc", "codex")
 _TRUST_LEVELS = ("operator", "agent", "ingested")
 _TRUST_TABLES = ("context_sections", "activity_log", "system_snapshots", "pending_handoffs")
+SNAPSHOT_STALE_AFTER_HOURS = 48.0
+ACTIVITY_QUIET_AFTER_HOURS = 72.0
+PENDING_HANDOFF_STALE_AFTER_HOURS = 168.0
+ACTIVE_HANDOFF_STALE_AFTER_HOURS = 72.0
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _parse_utc_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _age_hours(value: str | None, now: datetime) -> float | None:
+    parsed = _parse_utc_timestamp(value)
+    if parsed is None:
+        return None
+    fixed_now = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+    age = (fixed_now.astimezone(UTC) - parsed).total_seconds() / 3600
+    return round(max(age, 0.0), 1)
 
 
 async def _source_trust_breakdown(db: Any) -> dict[str, dict[str, int]]:
@@ -186,9 +215,254 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     }
 
 
-async def collect_status_summary(db: Any) -> dict[str, Any]:
+def _snapshot_next_action(owner: str, state: str) -> str:
+    if state in {"stale", "missing", "unknown"}:
+        return f"{owner}_refresh_snapshot"
+    return "none"
+
+
+async def _snapshot_freshness(db: Any, now: datetime) -> dict[str, dict[str, Any]]:
+    snapshots: dict[str, dict[str, Any]] = {}
+    for system in _SNAPSHOT_SYSTEMS:
+        cursor = await db.execute(
+            "SELECT snapshot_date, created_at FROM system_snapshots "
+            "WHERE system = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+            (system,),
+        )
+        row = await cursor.fetchone()
+        latest_snapshot_date = row["snapshot_date"] if row else "none"
+        latest_created_at = row["created_at"] if row else "none"
+        age = _age_hours(row["created_at"], now) if row else None
+        if row is None:
+            state = "missing"
+        elif age is None:
+            state = "unknown"
+        elif age > SNAPSHOT_STALE_AFTER_HOURS:
+            state = "stale"
+        else:
+            state = "fresh"
+        snapshots[system] = {
+            "state": state,
+            "owner": system,
+            "latest_snapshot_date": latest_snapshot_date,
+            "latest_created_at": latest_created_at,
+            "age_hours": age,
+            "next_action": _snapshot_next_action(system, state),
+        }
+    return snapshots
+
+
+async def _activity_source_freshness(db: Any, now: datetime) -> dict[str, dict[str, Any]]:
+    activity_sources: dict[str, dict[str, Any]] = {}
+    for source in _ACTIVITY_SOURCES:
+        cursor = await db.execute(
+            "SELECT created_at FROM activity_log "
+            "WHERE source = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+            (source,),
+        )
+        row = await cursor.fetchone()
+        latest = row["created_at"] if row else "none"
+        age = _age_hours(row["created_at"], now) if row else None
+        if row is None:
+            state = "missing"
+        elif age is None:
+            state = "unknown"
+        elif age > ACTIVITY_QUIET_AFTER_HOURS:
+            state = "quiet"
+        else:
+            state = "fresh"
+        activity_sources[source] = {
+            "state": state,
+            "latest": latest,
+            "age_hours": age,
+        }
+    return activity_sources
+
+
+async def _handoff_freshness(db: Any, now: datetime) -> dict[str, Any]:
+    cursor = await db.execute(
+        "SELECT status, dispatched_at, picked_up_at FROM pending_handoffs "
+        "WHERE status IN ('pending', 'active')"
+    )
+    pending_ages: list[float] = []
+    active_ages: list[float] = []
+    pending_count = 0
+    active_count = 0
+    stale_pending_count = 0
+    stale_active_count = 0
+    unknown_pending_count = 0
+    unknown_active_count = 0
+    for row in await cursor.fetchall():
+        status = row["status"]
+        if status == "pending":
+            pending_count += 1
+            age = _age_hours(row["dispatched_at"], now)
+            if age is None:
+                unknown_pending_count += 1
+            else:
+                pending_ages.append(age)
+                if age > PENDING_HANDOFF_STALE_AFTER_HOURS:
+                    stale_pending_count += 1
+        elif status == "active":
+            active_count += 1
+            age = _age_hours(row["picked_up_at"], now)
+            if age is None:
+                unknown_active_count += 1
+            else:
+                active_ages.append(age)
+                if age > ACTIVE_HANDOFF_STALE_AFTER_HOURS:
+                    stale_active_count += 1
+    return {
+        "pending_count": pending_count,
+        "stale_pending_count": stale_pending_count,
+        "active_count": active_count,
+        "stale_active_count": stale_active_count,
+        "oldest_pending_age_hours": max(pending_ages) if pending_ages else None,
+        "oldest_active_age_hours": max(active_ages) if active_ages else None,
+        "unknown_pending_count": unknown_pending_count,
+        "unknown_active_count": unknown_active_count,
+    }
+
+
+def _shipped_event_freshness(health: dict[str, Any]) -> dict[str, Any]:
+    actionable_unprocessed = int(health["actionable_unprocessed_shipped_count"])
+    processed_without_receipt = int(health["processed_shipped_without_receipt_count"])
+    if processed_without_receipt > 0:
+        next_action = "inspect_receiptless_processed"
+    elif actionable_unprocessed > 0:
+        next_action = "confirm_shipped_sync_or_record_disposition"
+    else:
+        next_action = "none"
+    return {
+        "actionable_unprocessed": actionable_unprocessed,
+        "processed_without_receipt": processed_without_receipt,
+        "next_action": next_action,
+    }
+
+
+def _freshness_next_actions(
+    health: dict[str, Any],
+    snapshots: dict[str, dict[str, Any]],
+    handoffs: dict[str, Any],
+    shipped_events: dict[str, Any],
+) -> list[dict[str, str]]:
+    actions: list[dict[str, str]] = []
+    if not health["ok"]:
+        fts_index = health["fts_index"]
+        if fts_index["missing"] or fts_index["orphaned"]:
+            actions.append(
+                {
+                    "action": "repair_fts_index",
+                    "owner": "operator",
+                    "reason": "FTS index drift is degrading bridge health.",
+                }
+            )
+        else:
+            actions.append(
+                {
+                    "action": "inspect_bridge_health",
+                    "owner": "operator",
+                    "reason": "Bridge health is degraded.",
+                }
+            )
+    if shipped_events["processed_without_receipt"] > 0:
+        actions.append(
+            {
+                "action": "inspect_receiptless_processed",
+                "owner": "operator",
+                "reason": "Processed SHIPPED rows lack receipt proof.",
+            }
+        )
+    if shipped_events["actionable_unprocessed"] > 0:
+        actions.append(
+            {
+                "action": "confirm_shipped_sync_or_record_disposition",
+                "owner": "operator",
+                "reason": "Actionable SHIPPED rows need receipt-backed sync or disposition.",
+            }
+        )
+    for owner in _SNAPSHOT_SYSTEMS:
+        snapshot = snapshots[owner]
+        if snapshot["state"] in {"stale", "missing", "unknown"}:
+            actions.append(
+                {
+                    "action": snapshot["next_action"],
+                    "owner": owner,
+                    "reason": f"{owner} snapshot freshness is {snapshot['state']}.",
+                }
+            )
+    if (
+        handoffs["stale_pending_count"]
+        or handoffs["stale_active_count"]
+        or handoffs["unknown_pending_count"]
+        or handoffs["unknown_active_count"]
+    ):
+        actions.append(
+            {
+                "action": "review_stale_handoff",
+                "owner": "operator",
+                "reason": "Pending or active handoffs exceeded freshness thresholds or have unknown age.",
+            }
+        )
+    return actions[:5]
+
+
+def _freshness_overall(
+    health: dict[str, Any],
+    snapshots: dict[str, dict[str, Any]],
+    activity_sources: dict[str, dict[str, Any]],
+    handoffs: dict[str, Any],
+    shipped_events: dict[str, Any],
+) -> str:
+    if any(snapshot["state"] == "stale" for snapshot in snapshots.values()):
+        return "stale"
+    if handoffs["stale_pending_count"] or handoffs["stale_active_count"]:
+        return "stale"
+    if not health["ok"]:
+        return "attention"
+    if shipped_events["next_action"] != "none":
+        return "attention"
+    if any(snapshot["state"] == "unknown" for snapshot in snapshots.values()):
+        return "unknown"
+    if any(source["state"] == "unknown" for source in activity_sources.values()):
+        return "unknown"
+    if handoffs["unknown_pending_count"] or handoffs["unknown_active_count"]:
+        return "unknown"
+    if any(snapshot["state"] == "missing" for snapshot in snapshots.values()):
+        return "attention"
+    return "fresh"
+
+
+async def _collect_freshness_block(
+    db: Any, health: dict[str, Any], now: datetime
+) -> dict[str, Any]:
+    snapshots = await _snapshot_freshness(db, now)
+    activity_sources = await _activity_source_freshness(db, now)
+    handoffs = await _handoff_freshness(db, now)
+    shipped_events = _shipped_event_freshness(health)
+    next_actions = _freshness_next_actions(health, snapshots, handoffs, shipped_events)
+    return {
+        "thresholds_hours": {
+            "snapshot_stale_after": SNAPSHOT_STALE_AFTER_HOURS,
+            "activity_quiet_after": ACTIVITY_QUIET_AFTER_HOURS,
+            "pending_handoff_stale_after": PENDING_HANDOFF_STALE_AFTER_HOURS,
+            "active_handoff_stale_after": ACTIVE_HANDOFF_STALE_AFTER_HOURS,
+        },
+        "snapshots": snapshots,
+        "activity_sources": activity_sources,
+        "handoffs": handoffs,
+        "shipped_events": shipped_events,
+        "overall": _freshness_overall(
+            health, snapshots, activity_sources, handoffs, shipped_events
+        ),
+        "next_actions": next_actions,
+    }
+
+
+async def collect_status_summary(db: Any, *, now: datetime | None = None) -> dict[str, Any]:
     """Collect a compact operator-facing status summary."""
     health = await collect_health_metrics(db)
+    fixed_now = now or _utc_now()
 
     cursor = await db.execute("SELECT COUNT(*) FROM pending_handoffs WHERE status = 'pending'")
     pending_handoffs_row = await cursor.fetchone()
@@ -266,6 +540,7 @@ async def collect_status_summary(db: Any) -> dict[str, Any]:
         "latest_snapshots": latest_snapshots,
         "latest_activity": latest_activity,
         "latest_activity_json": json.dumps(latest_activity, sort_keys=True),
+        "freshness": await _collect_freshness_block(db, health, fixed_now),
     }
 
 

@@ -1,6 +1,7 @@
 """Tests for the health MCP tool."""
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from bridge_db import config
 from bridge_db.db import (
     SCHEMA_VERSION,
     fts_text_for_activity,
+    fts_text_for_handoff,
     fts_text_for_section,
     fts_text_for_snapshot,
     upsert_fts_entry,
@@ -306,6 +308,287 @@ async def test_status_returns_compact_operator_summary(
     assert result["fts_index"]["ok"] is True
     assert result["latest_snapshots"]["cc"] == "2026-04-17"
     assert result["latest_activity"]["cc"] == "2026-04-17 (bridge-db)"
+
+
+FIXED_NOW = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
+
+
+async def _make_status_health_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "test.db").touch()
+    bridge = tmp_path / "bridge.md"
+    bridge.write_text("# test", encoding="utf-8")
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge)
+
+
+async def _seed_snapshot(
+    db: aiosqlite.Connection,
+    system: str,
+    snapshot_date: str,
+    created_at: str,
+    data: str = "{}",
+) -> None:
+    cursor = await db.execute(
+        "INSERT INTO system_snapshots (system, snapshot_date, data, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        (system, snapshot_date, data, created_at),
+    )
+    snapshot_id = cursor.lastrowid
+    assert snapshot_id is not None
+    await upsert_fts_entry(db, "snapshot", str(snapshot_id), fts_text_for_snapshot(data))
+
+
+async def _seed_activity(
+    db: aiosqlite.Connection,
+    source: str,
+    created_at: str,
+    tags: list[str] | None = None,
+) -> int:
+    cursor = await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary, tags, created_at) "
+        "VALUES (?, '2026-07-07', ?, 'status check', ?, ?)",
+        (source, f"{source}-project", json.dumps(tags or []), created_at),
+    )
+    activity_id = cursor.lastrowid
+    assert activity_id is not None
+    await upsert_fts_entry(
+        db,
+        "activity",
+        str(activity_id),
+        fts_text_for_activity(f"{source}-project", "status check", None, tags or []),
+    )
+    return int(activity_id)
+
+
+async def _seed_handoff(
+    db: aiosqlite.Connection,
+    status: str,
+    dispatched_at: str,
+    picked_up_at: str | None = None,
+) -> None:
+    cursor = await db.execute(
+        "INSERT INTO pending_handoffs (project_name, status, dispatched_at, picked_up_at) "
+        "VALUES ('bridge-db', ?, ?, ?)",
+        (status, dispatched_at, picked_up_at),
+    )
+    handoff_id = cursor.lastrowid
+    assert handoff_id is not None
+    await upsert_fts_entry(
+        db,
+        "handoff",
+        str(handoff_id),
+        fts_text_for_handoff("bridge-db", None, None, None),
+    )
+
+
+async def test_status_freshness_reports_fresh_snapshots(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _make_status_health_ready(tmp_path, monkeypatch)
+    await _seed_snapshot(db, "cc", "2026-07-07", "2026-07-07T11:00:00Z")
+    await _seed_snapshot(db, "codex", "2026-07-07", "2026-07-07T10:00:00Z")
+    await db.commit()
+
+    result = await mod.collect_status_summary(db, now=FIXED_NOW)
+
+    assert result["freshness"]["thresholds_hours"] == {
+        "snapshot_stale_after": 48.0,
+        "activity_quiet_after": 72.0,
+        "pending_handoff_stale_after": 168.0,
+        "active_handoff_stale_after": 72.0,
+    }
+    assert result["freshness"]["snapshots"]["cc"] == {
+        "state": "fresh",
+        "owner": "cc",
+        "latest_snapshot_date": "2026-07-07",
+        "latest_created_at": "2026-07-07T11:00:00Z",
+        "age_hours": 1.0,
+        "next_action": "none",
+    }
+    assert result["freshness"]["snapshots"]["codex"]["state"] == "fresh"
+
+
+async def test_status_freshness_reports_stale_snapshots_without_degrading_health(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _make_status_health_ready(tmp_path, monkeypatch)
+    await _seed_snapshot(db, "cc", "2026-07-04", "2026-07-04T11:00:00Z")
+    await _seed_snapshot(db, "codex", "2026-07-07", "2026-07-07T11:00:00Z")
+    await db.commit()
+
+    result = await mod.collect_status_summary(db, now=FIXED_NOW)
+
+    assert result["ok"] is True
+    assert result["overall"] == "healthy"
+    assert result["freshness"]["overall"] == "stale"
+    assert result["freshness"]["snapshots"]["cc"]["state"] == "stale"
+    assert result["freshness"]["snapshots"]["cc"]["age_hours"] == 73.0
+    assert result["freshness"]["next_actions"] == [
+        {
+            "action": "cc_refresh_snapshot",
+            "owner": "cc",
+            "reason": "cc snapshot freshness is stale.",
+        }
+    ]
+
+
+async def test_status_freshness_reports_missing_snapshots(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _make_status_health_ready(tmp_path, monkeypatch)
+
+    result = await mod.collect_status_summary(db, now=FIXED_NOW)
+
+    assert result["ok"] is True
+    assert result["overall"] == "healthy"
+    assert result["freshness"]["snapshots"]["cc"]["state"] == "missing"
+    assert result["freshness"]["snapshots"]["cc"]["latest_snapshot_date"] == "none"
+    assert result["freshness"]["snapshots"]["cc"]["latest_created_at"] == "none"
+    assert result["freshness"]["snapshots"]["cc"]["age_hours"] is None
+    assert result["freshness"]["snapshots"]["cc"]["next_action"] == "cc_refresh_snapshot"
+    assert result["freshness"]["snapshots"]["codex"]["next_action"] == "codex_refresh_snapshot"
+
+
+async def test_status_freshness_reports_quiet_and_missing_activity_sources(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _make_status_health_ready(tmp_path, monkeypatch)
+    await _seed_activity(db, "cc", "2026-07-03T07:00:00Z")
+    await db.commit()
+
+    result = await mod.collect_status_summary(db, now=FIXED_NOW)
+    activity = result["freshness"]["activity_sources"]
+
+    assert activity["cc"]["state"] == "quiet"
+    assert activity["cc"]["latest"] == "2026-07-03T07:00:00Z"
+    assert activity["cc"]["age_hours"] == 101.0
+    assert activity["codex"]["state"] == "missing"
+    assert activity["claude_ai"]["state"] == "missing"
+    assert activity["notion_os"]["state"] == "missing"
+    assert activity["personal_ops"]["state"] == "missing"
+
+
+async def test_status_freshness_reports_stale_pending_and_active_handoffs(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _make_status_health_ready(tmp_path, monkeypatch)
+    await _seed_handoff(db, "pending", "2026-06-29T11:00:00Z")
+    await _seed_handoff(
+        db,
+        "active",
+        "2026-07-06T12:00:00Z",
+        picked_up_at="2026-07-04T11:00:00Z",
+    )
+    await db.commit()
+
+    result = await mod.collect_status_summary(db, now=FIXED_NOW)
+
+    assert result["freshness"]["handoffs"] == {
+        "pending_count": 1,
+        "stale_pending_count": 1,
+        "active_count": 1,
+        "stale_active_count": 1,
+        "oldest_pending_age_hours": 193.0,
+        "oldest_active_age_hours": 73.0,
+        "unknown_pending_count": 0,
+        "unknown_active_count": 0,
+    }
+    assert {
+        "action": "review_stale_handoff",
+        "owner": "operator",
+        "reason": "Pending or active handoffs exceeded freshness thresholds or have unknown age.",
+    } in result["freshness"]["next_actions"]
+
+
+async def test_status_freshness_shipped_event_next_actions(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _make_status_health_ready(tmp_path, monkeypatch)
+    await _seed_activity(db, "cc", "2026-07-07T11:00:00Z", tags=["SHIPPED"])
+    await _seed_activity(db, "codex", "2026-07-07T11:00:00Z", tags=["SHIPPED", "PROCESSED"])
+    await db.commit()
+
+    result = await mod.collect_status_summary(db, now=FIXED_NOW)
+
+    assert result["freshness"]["shipped_events"] == {
+        "actionable_unprocessed": 1,
+        "processed_without_receipt": 1,
+        "next_action": "inspect_receiptless_processed",
+    }
+    assert result["freshness"]["next_actions"][:2] == [
+        {
+            "action": "inspect_receiptless_processed",
+            "owner": "operator",
+            "reason": "Processed SHIPPED rows lack receipt proof.",
+        },
+        {
+            "action": "confirm_shipped_sync_or_record_disposition",
+            "owner": "operator",
+            "reason": "Actionable SHIPPED rows need receipt-backed sync or disposition.",
+        },
+    ]
+
+
+async def test_status_freshness_actionable_unprocessed_next_action_without_receiptless(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _make_status_health_ready(tmp_path, monkeypatch)
+    await _seed_activity(db, "cc", "2026-07-07T11:00:00Z", tags=["SHIPPED"])
+    await db.commit()
+
+    result = await mod.collect_status_summary(db, now=FIXED_NOW)
+
+    assert result["freshness"]["shipped_events"]["next_action"] == (
+        "confirm_shipped_sync_or_record_disposition"
+    )
+
+
+async def test_status_freshness_malformed_timestamps_are_unknown_without_crashing(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _make_status_health_ready(tmp_path, monkeypatch)
+    await _seed_snapshot(db, "cc", "2026-07-07", "not-a-timestamp")
+    await _seed_activity(db, "cc", "also-not-a-timestamp")
+    await _seed_handoff(db, "pending", "bad-dispatch-time")
+    await db.commit()
+
+    result = await mod.collect_status_summary(db, now=FIXED_NOW)
+
+    assert result["freshness"]["snapshots"]["cc"]["state"] == "unknown"
+    assert result["freshness"]["snapshots"]["cc"]["age_hours"] is None
+    assert result["freshness"]["snapshots"]["cc"]["next_action"] == "cc_refresh_snapshot"
+    assert result["freshness"]["activity_sources"]["cc"]["state"] == "unknown"
+    assert result["freshness"]["activity_sources"]["cc"]["age_hours"] is None
+    assert result["freshness"]["handoffs"]["unknown_pending_count"] == 1
+    assert {
+        "action": "review_stale_handoff",
+        "owner": "operator",
+        "reason": "Pending or active handoffs exceeded freshness thresholds or have unknown age.",
+    } in result["freshness"]["next_actions"]
+
+
+async def test_status_freshness_preserves_existing_keys_and_top_level_health(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _make_status_health_ready(tmp_path, monkeypatch)
+    await _seed_snapshot(db, "cc", "2026-07-04", "2026-07-04T11:00:00Z")
+    await db.commit()
+
+    result = await mod.collect_status_summary(db, now=FIXED_NOW)
+
+    for key in (
+        "latest_snapshots",
+        "latest_activity",
+        "signals",
+        "row_counts",
+        "pending_handoffs_by_trust",
+        "ok",
+        "overall",
+        "freshness",
+    ):
+        assert key in result
+    assert result["ok"] is True
+    assert result["overall"] == "healthy"
+    assert result["freshness"]["overall"] == "stale"
 
 
 async def test_status_breaks_latest_ties_by_id(
