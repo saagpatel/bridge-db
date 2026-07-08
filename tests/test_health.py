@@ -302,6 +302,7 @@ async def test_status_returns_compact_operator_summary(
     assert result["signals"]["pending_handoffs"] == 0
     assert result["signals"]["unprocessed_shipped"] == 1
     assert result["signals"]["actionable_unprocessed_shipped"] == 1
+    assert result["signals"]["dispositioned_unprocessed_shipped"] == 0
     assert result["signals"]["processed_shipped_without_receipt"] == 0
     assert result["signals"]["fts_missing"] == 0
     assert result["signals"]["fts_orphaned"] == 0
@@ -510,7 +511,9 @@ async def test_status_freshness_shipped_event_next_actions(
     result = await mod.collect_status_summary(db, now=FIXED_NOW)
 
     assert result["freshness"]["shipped_events"] == {
+        "unprocessed": 1,
         "actionable_unprocessed": 1,
+        "dispositioned_unprocessed": 0,
         "processed_without_receipt": 1,
         "next_action": "inspect_receiptless_processed",
     }
@@ -539,6 +542,40 @@ async def test_status_freshness_actionable_unprocessed_next_action_without_recei
 
     assert result["freshness"]["shipped_events"]["next_action"] == (
         "confirm_shipped_sync_or_record_disposition"
+    )
+
+
+async def test_status_freshness_counts_dispositioned_unprocessed_shipped(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _make_status_health_ready(tmp_path, monkeypatch)
+    activity_id = await _seed_activity(db, "cc", "2026-07-07T11:00:00Z", tags=["SHIPPED"])
+    await db.execute(
+        """
+        INSERT INTO shipped_event_dispositions (
+            activity_id, disposition_type, reason, decided_by
+        )
+        VALUES (?, 'declined_mapping', 'no canonical downstream row', 'codex')
+        """,
+        (activity_id,),
+    )
+    await db.commit()
+
+    result = await mod.collect_status_summary(db, now=FIXED_NOW)
+
+    assert result["signals"]["unprocessed_shipped"] == 1
+    assert result["signals"]["actionable_unprocessed_shipped"] == 0
+    assert result["signals"]["dispositioned_unprocessed_shipped"] == 1
+    assert result["freshness"]["shipped_events"] == {
+        "unprocessed": 1,
+        "actionable_unprocessed": 0,
+        "dispositioned_unprocessed": 1,
+        "processed_without_receipt": 0,
+        "next_action": "none",
+    }
+    assert not any(
+        action["action"] == "confirm_shipped_sync_or_record_disposition"
+        for action in result["freshness"]["next_actions"]
     )
 
 

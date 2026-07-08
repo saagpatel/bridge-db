@@ -127,6 +127,8 @@ async def run_status(*, now: datetime | None = None) -> bool:
         f" pending_handoffs={summary['signals']['pending_handoffs']},"
         f" unprocessed_shipped={summary['signals']['unprocessed_shipped']},"
         f" actionable_unprocessed_shipped={summary['signals']['actionable_unprocessed_shipped']},"
+        " dispositioned_unprocessed_shipped="
+        f"{summary['signals']['dispositioned_unprocessed_shipped']},"
         " processed_shipped_without_receipt="
         f"{summary['signals']['processed_shipped_without_receipt']},"
         f" fts_missing={summary['signals']['fts_missing']},"
@@ -270,6 +272,8 @@ async def run_dogfood() -> bool:
         f" pending_handoffs={summary['signals']['pending_handoffs']},"
         f" unprocessed_shipped={summary['signals']['unprocessed_shipped']},"
         f" actionable_unprocessed_shipped={summary['signals']['actionable_unprocessed_shipped']},"
+        " dispositioned_unprocessed_shipped="
+        f"{summary['signals']['dispositioned_unprocessed_shipped']},"
         " processed_shipped_without_receipt="
         f"{summary['signals']['processed_shipped_without_receipt']}"
     )

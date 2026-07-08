@@ -178,11 +178,61 @@ async def test_run_status_reports_healthy_summary(
     assert "pending_handoffs=0" in captured
     assert "unprocessed_shipped=1" in captured
     assert "actionable_unprocessed_shipped=1" in captured
+    assert "dispositioned_unprocessed_shipped=0" in captured
     assert "Attention: actionable_unprocessed_shipped=1" in captured
     assert "Pending handoff trust: operator=0, agent=0, ingested=0" in captured
     assert "dogfood will fail until cleared" in captured
     assert "cc=2026-04-17" in captured
     assert '"cc": "2026-04-17 (bridge-db)"' in captured
+
+
+@pytest.mark.asyncio
+async def test_run_status_clarifies_dispositioned_unprocessed_shipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    bridge_path = tmp_path / "claude_ai_context.md"
+    bridge_path.write_text("# bridge\n", encoding="utf-8")
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    monkeypatch.setattr(cfg, "BRIDGE_FILE_PATH", bridge_path)
+
+    db = await open_db(db_path)
+    try:
+        cursor = await db.execute(
+            "INSERT INTO activity_log (source, timestamp, project_name, summary, tags) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("cc", "2026-04-17", "bridge-db", "non-actionable ship", '["SHIPPED"]'),
+        )
+        activity_id = cursor.lastrowid
+        assert activity_id is not None
+        await upsert_fts_entry(
+            db,
+            "activity",
+            str(activity_id),
+            fts_text_for_activity("bridge-db", "non-actionable ship", None, ["SHIPPED"]),
+        )
+        await db.execute(
+            """
+            INSERT INTO shipped_event_dispositions (
+                activity_id, disposition_type, reason, decided_by
+            )
+            VALUES (?, 'declined_mapping', 'no canonical downstream row', 'codex')
+            """,
+            (activity_id,),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    ok = await run_status()
+    captured = capsys.readouterr().out
+
+    assert ok is True
+    assert "unprocessed_shipped=1" in captured
+    assert "actionable_unprocessed_shipped=0" in captured
+    assert "dispositioned_unprocessed_shipped=1" in captured
+    assert "Attention:" not in captured
+    assert "confirm_shipped_sync_or_record_disposition" not in captured
 
 
 @pytest.mark.asyncio
@@ -352,6 +402,7 @@ async def test_run_dogfood_reports_read_only_observability(
 
     assert ok is True
     assert "bridge-db dogfood" in captured
+    assert "dispositioned_unprocessed_shipped=0" in captured
     assert "processed_shipped_without_receipt=0" in captured
     assert "FTS: expected=0, indexed=0, missing=0, orphaned=0" in captured
     assert "Latest confirm_shipped_sync: activity_id=1 downstream=notion:abc" in captured

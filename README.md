@@ -168,8 +168,9 @@ The MCP `status` result enriches the compact summary with `freshness`:
   `personal_ops` entries with `state`, `latest`, and `age_hours`.
 - `handoffs`: pending/active counts, stale counts, oldest ages, and unknown-age
   counts for pending and active handoffs.
-- `shipped_events`: actionable unprocessed count, processed-without-receipt
-  count, and the shipped-event `next_action`.
+- `shipped_events`: raw unprocessed, actionable unprocessed,
+  dispositioned/non-actionable unprocessed, processed-without-receipt count, and
+  the shipped-event `next_action`.
 - `overall`: `fresh`, `attention`, `stale`, or `unknown`.
 - `next_actions`: up to five deterministic `{action, owner, reason}` entries.
 
@@ -196,7 +197,8 @@ service, table, migration, tool, or CLI flag.
 activity rows are recent context, while `shipped_sync_receipts` is the proof
 ledger for downstream shipped-event syncs. Treat `processed_shipped_without_receipt=0`
 and `fts_missing=0` as primary clean signals, and use
-`actionable_unprocessed_shipped=0` when policy dispositions explain why raw
+`actionable_unprocessed_shipped=0` with
+`dispositioned_unprocessed_shipped>0` when policy dispositions explain why raw
 `unprocessed_shipped` remains nonzero.
 
 `get_recent_activity` is the raw compatibility feed: it returns individual
