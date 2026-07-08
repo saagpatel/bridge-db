@@ -8,7 +8,7 @@ import secrets
 import sys
 import tempfile
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 
 async def _run_doctor() -> bool:
@@ -89,7 +89,7 @@ def _fts_detail(fts_index: dict[str, Any]) -> str:
     )
 
 
-async def run_status() -> bool:
+async def run_status(*, now: datetime | None = None) -> bool:
     """Print a compact operator-facing bridge status summary."""
     from bridge_db import config
     from bridge_db.db import open_db
@@ -97,7 +97,7 @@ async def run_status() -> bool:
 
     db = await open_db(config.DB_PATH)
     try:
-        summary = await collect_status_summary(db)
+        summary = await collect_status_summary(db, now=now)
     finally:
         await db.close()
 
@@ -141,6 +141,9 @@ async def run_status() -> bool:
     attention = _status_attention(summary)
     if attention:
         print(f"  Attention: {attention}")
+    freshness_lines = _status_freshness_lines(summary)
+    for line in freshness_lines:
+        print(f"  {line}")
     print(
         "  Latest snapshots:"
         f" cc={summary['latest_snapshots']['cc']}, codex={summary['latest_snapshots']['codex']}"
@@ -148,6 +151,39 @@ async def run_status() -> bool:
     print(f"  Latest activity: {summary['latest_activity_json']}")
 
     return bool(summary["ok"])
+
+
+def _status_freshness_lines(summary: dict[str, Any]) -> list[str]:
+    """Return compact CLI freshness hints without dumping raw status JSON."""
+    freshness = summary.get("freshness")
+    if not isinstance(freshness, dict):
+        return []
+    freshness_block = cast(dict[str, Any], freshness)
+
+    overall = str(freshness_block.get("overall", "unknown"))
+    lines = [f"Freshness: {overall}"]
+    actions_raw = freshness_block.get("next_actions")
+    if not isinstance(actions_raw, list):
+        return lines
+    actions = cast(list[object], actions_raw)
+
+    action_labels: list[str] = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        action_block = cast(dict[str, Any], action)
+        action_name = action_block.get("action")
+        if not isinstance(action_name, str) or action_name == "mark_shipped_processed":
+            continue
+        owner = action_block.get("owner")
+        if isinstance(owner, str) and owner:
+            action_labels.append(f"{action_name} ({owner})")
+        else:
+            action_labels.append(action_name)
+
+    if action_labels:
+        lines.append(f"Next actions: {', '.join(action_labels)}")
+    return lines
 
 
 def _status_attention(summary: dict[str, Any]) -> str | None:

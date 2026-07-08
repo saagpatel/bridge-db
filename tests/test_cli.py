@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import aiosqlite
@@ -33,6 +34,53 @@ from bridge_db.db import (
     open_db,
     upsert_fts_entry,
 )
+
+FIXED_NOW = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
+
+
+async def _seed_cli_snapshot(
+    db: aiosqlite.Connection,
+    system: str,
+    snapshot_date: str,
+    created_at: str,
+) -> None:
+    data = '{"active_projects":"- bridge-db"}'
+    cursor = await db.execute(
+        "INSERT INTO system_snapshots (system, snapshot_date, data, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        (system, snapshot_date, data, created_at),
+    )
+    snapshot_id = cursor.lastrowid
+    assert snapshot_id is not None
+    await upsert_fts_entry(db, "snapshot", str(snapshot_id), fts_text_for_snapshot(data))
+
+
+async def _seed_cli_activity(
+    db: aiosqlite.Connection,
+    source: str,
+    created_at: str,
+    tags: list[str] | None = None,
+) -> None:
+    cursor = await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary, tags, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            source,
+            created_at,
+            "bridge-db",
+            "checked operator status",
+            json.dumps(tags or []),
+            created_at,
+        ),
+    )
+    activity_id = cursor.lastrowid
+    assert activity_id is not None
+    await upsert_fts_entry(
+        db,
+        "activity",
+        str(activity_id),
+        fts_text_for_activity("bridge-db", "checked operator status", None),
+    )
 
 
 def test_mark_audit_posture_classifies_legacy_and_blocked_rows() -> None:
@@ -141,6 +189,88 @@ async def test_run_status_reports_degraded_when_bridge_file_missing(
     assert "Overall: degraded" in captured
     assert "exists=False, age=missing" in captured
     assert "Attention: bridge health is degraded" in captured
+
+
+@pytest.mark.asyncio
+async def test_run_status_reports_freshness_attention_without_degrading_health(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    bridge_path = tmp_path / "claude_ai_context.md"
+    bridge_path.write_text("# bridge\n", encoding="utf-8")
+
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    monkeypatch.setattr(cfg, "BRIDGE_FILE_PATH", bridge_path)
+
+    db = await open_db(db_path)
+    try:
+        await _seed_cli_snapshot(db, "cc", "2026-07-04", "2026-07-04T11:00:00Z")
+        await _seed_cli_snapshot(db, "codex", "2026-07-07", "2026-07-07T11:00:00Z")
+        await db.commit()
+    finally:
+        await db.close()
+
+    ok = await run_status(now=FIXED_NOW)
+    captured = capsys.readouterr().out
+
+    assert ok is True
+    assert "Overall: healthy" in captured
+    assert "Freshness: stale" in captured
+    assert "Next actions: cc_refresh_snapshot (cc)" in captured
+
+
+@pytest.mark.asyncio
+async def test_run_status_degraded_exit_code_stays_tied_to_bridge_health(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = tmp_path / "bridge.db"
+
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    monkeypatch.setattr(cfg, "BRIDGE_FILE_PATH", tmp_path / "missing.md")
+
+    db = await open_db(db_path)
+    try:
+        await _seed_cli_snapshot(db, "cc", "2026-07-07", "2026-07-07T11:00:00Z")
+        await _seed_cli_snapshot(db, "codex", "2026-07-07", "2026-07-07T11:00:00Z")
+        await db.commit()
+    finally:
+        await db.close()
+
+    ok = await run_status(now=FIXED_NOW)
+    captured = capsys.readouterr().out
+
+    assert ok is False
+    assert "Overall: degraded" in captured
+    assert "Freshness: attention" in captured
+
+
+@pytest.mark.asyncio
+async def test_run_status_freshness_actions_use_safe_operator_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    bridge_path = tmp_path / "claude_ai_context.md"
+    bridge_path.write_text("# bridge\n", encoding="utf-8")
+
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    monkeypatch.setattr(cfg, "BRIDGE_FILE_PATH", bridge_path)
+
+    db = await open_db(db_path)
+    try:
+        await _seed_cli_snapshot(db, "cc", "2026-07-07", "2026-07-07T11:00:00Z")
+        await _seed_cli_snapshot(db, "codex", "2026-07-07", "2026-07-07T11:00:00Z")
+        await _seed_cli_activity(db, "cc", "2026-07-07T11:00:00Z", tags=["SHIPPED"])
+        await db.commit()
+    finally:
+        await db.close()
+
+    ok = await run_status(now=FIXED_NOW)
+    captured = capsys.readouterr().out
+
+    assert ok is True
+    assert "Freshness: attention" in captured
+    assert "confirm_shipped_sync_or_record_disposition (operator)" in captured
+    assert "mark_shipped_processed" not in captured
 
 
 @pytest.mark.asyncio
