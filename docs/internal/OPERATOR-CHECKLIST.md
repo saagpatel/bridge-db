@@ -169,6 +169,9 @@ Manual equivalent:
    `detail` field for the requested `activity_ids`, `updated_ids`, and
    `missing_ids`, then confirm `status` still reports
    `processed_shipped_without_receipt=0`.
+   Dogfood may still show old `shipped_bypass_ids` audit detail from before
+   the F7 guard; when the live receiptless counter is zero, treat that as
+   historical evidence rather than current operator action.
 4. Use `mcp__bridge_db__recall_stats(days=7)` only to evaluate recall over
    bridge-owned state: sections, activity, snapshots, and handoffs.
 5. Confirm `uv run python -m bridge_db --status` reports `fts_missing=0` and

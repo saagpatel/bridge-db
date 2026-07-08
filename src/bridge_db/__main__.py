@@ -223,13 +223,17 @@ def _has_detailed_mark_audit(rows: list[dict[str, Any]]) -> bool:
     return all(token in detail for token in ("activity_ids=", "updated_ids=", "missing_ids="))
 
 
-def mark_audit_posture(rows: list[dict[str, Any]]) -> str:
+def mark_audit_posture(
+    rows: list[dict[str, Any]], processed_shipped_without_receipt: int = 0
+) -> str:
     if not rows:
         return "none observed"
     detail = str(rows[0].get("detail") or "")
     if "blocked_shipped_ids=" in detail:
         return "blocked shipped misuse observed"
     if "shipped_bypass_ids=" in detail:
+        if processed_shipped_without_receipt == 0:
+            return "historical shipped bypass evidence only; no receiptless shipped rows"
         return "legacy shipped bypass observed"
     if _has_detailed_mark_audit(rows):
         return "non-shipped compatibility detail current"
@@ -255,7 +259,9 @@ async def run_dogfood() -> bool:
     recent_confirm = collect_audit_tail(tool="confirm_shipped_sync", limit=10)
     recent_mark = collect_audit_tail(tool="mark_shipped_processed", limit=10)
     recall = collect_recall_stats(days=7)
-    mark_posture = mark_audit_posture(recent_mark)
+    mark_posture = mark_audit_posture(
+        recent_mark, int(summary["signals"]["processed_shipped_without_receipt"])
+    )
 
     print("bridge-db dogfood")
     print(f"  Overall: {summary['overall']}")
