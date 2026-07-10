@@ -522,6 +522,8 @@ async def test_sync_demotes_changed_section_to_ingested(
         owner="claude_ai",
         content="original content",
         source_trust="operator",
+        attempted_by="claude_ai",
+        operation="update_section",
     )
     await db.commit()
 
@@ -557,6 +559,8 @@ async def test_sync_preserves_label_when_content_unchanged(
         owner="claude_ai",
         content=parsed["career"],
         source_trust="operator",
+        attempted_by="claude_ai",
+        operation="update_section",
     )
     await db.commit()
 
@@ -588,6 +592,8 @@ async def test_sync_off_mode_keeps_legacy_label_preservation(
         owner="claude_ai",
         content="original",
         source_trust="operator",
+        attempted_by="claude_ai",
+        operation="update_section",
     )
     await db.commit()
 
@@ -625,6 +631,8 @@ async def test_sync_unchanged_despite_trailing_newline_variance(
         owner="claude_ai",
         content=parsed["career"] + "\n",
         source_trust="operator",
+        attempted_by="claude_ai",
+        operation="update_section",
     )
     await db.commit()
 

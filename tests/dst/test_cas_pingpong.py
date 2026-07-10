@@ -137,9 +137,14 @@ async def run_cas_pingpong(base: Path, seed: int, mode: str = "warn") -> dict[st
         "SELECT content, version FROM context_sections WHERE section_name = ?",
         (SECTION,),
     ).fetchone()
-    receipts = conn.execute(
-        "SELECT COUNT(*) AS n FROM write_conflicts WHERE operation = 'update_section'"
+    rejection_receipts = conn.execute(
+        "SELECT COUNT(*) AS n FROM write_conflicts "
+        "WHERE operation = 'update_section' AND reason IN ('stale_cas', 'missing_cas')"
     ).fetchone()["n"]
+    blind_receipts = conn.execute(
+        "SELECT current_content_sha256 FROM write_conflicts "
+        "WHERE operation = 'update_section' AND reason = 'legacy_blind_write'"
+    ).fetchall()
     conn.close()
 
     blind_result, cas_result = results["blind"], results["cas"]
@@ -150,8 +155,13 @@ async def run_cas_pingpong(base: Path, seed: int, mode: str = "warn") -> dict[st
     rejected = sum(1 for r in results.values() if not r["ok"])
 
     assert row is not None
-    # Every rejected write leaves exactly one durable receipt, either mode.
-    assert receipts == rejected, f"seed {seed} mode={mode}"
+    # INV-5, both halves, either mode: every rejected write leaves exactly
+    # one rejection receipt, and every ACCEPTED blind overwrite of an
+    # existing row leaves a legacy_blind_write receipt naming the displaced
+    # content's sha — the displacement may be legal (warn), never trace-free.
+    assert rejection_receipts == rejected, f"seed {seed} mode={mode}"
+    expected_blind = 1 if blind_result["ok"] else 0
+    assert len(blind_receipts) == expected_blind, f"seed {seed} mode={mode}"
     if mode == "enforce":
         # INV-4 CONTROL: a blind write can never displace committed work —
         # the lost-update shape must be unreachable on every seed.
@@ -164,7 +174,10 @@ async def run_cas_pingpong(base: Path, seed: int, mode: str = "warn") -> dict[st
         "lost_update": lost_update,
         "final_content": row["content"],
         "final_version": row["version"],
-        "receipts": receipts,
+        "receipts": rejection_receipts,
+        "displaced_sha": blind_receipts[0]["current_content_sha256"]
+        if blind_receipts
+        else None,
         "hash": trace_hash(trace),
     }
 
@@ -180,14 +193,22 @@ async def run_cas_pingpong_enforce(base: Path, seed: int) -> dict[str, Any]:
 async def test_warn_mode_lost_update_rederived(tmp_path: Path) -> None:
     """RC-3 acceptance, arm 1: the pinned seed reproduces the warn-mode lost
     update — both writers read one version, both got ok:True, the CAS
-    writer's committed content is displaced by the blind write with zero
-    conflict receipts. INV-4 RED: the evidence case for flipping the
-    default to enforce."""
+    writer's committed content is displaced by the blind write. INV-4 stays
+    RED (the config-level evidence case for flipping the default), but the
+    displacement is no longer trace-free: the Phase 3 INV-5 fix leaves a
+    legacy_blind_write receipt whose current_content_sha256 names exactly
+    the displaced committed content. On pre-fix code that receipt does not
+    exist and the sha assertion goes red."""
+    from bridge_db.db import content_sha256
+
     outcome = await run_cas_pingpong(tmp_path, LOST_UPDATE_SEED, mode="warn")
     assert outcome["lost_update"]
     assert outcome["blind"]["legacy_blind_write"]
     assert outcome["final_content"] == "content from blind"
-    assert outcome["receipts"] == 0  # the displacement is silent — the gap
+    assert outcome["receipts"] == 0  # no rejection happened — both writes landed
+    # INV-5: the displaced content (the CAS writer's committed work) is
+    # named by sha in the blind-overwrite receipt — forensics has a trail.
+    assert outcome["displaced_sha"] == content_sha256("content from cas")
     assert sometimes_counts().get("legacy_blind_write_accepted", 0) >= 1
 
 

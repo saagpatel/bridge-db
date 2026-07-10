@@ -11,7 +11,7 @@ Coverage roster (label → cheapest pinned firing run):
 - fault_fired_in_receipt_window → receipt-crash @ CRASHING_SEED
 - stale_claim_receipt_written   → receipt-crash @ CRASHING_SEED (recovery arm)
 - legacy_blind_write_accepted   → cas-pingpong warn @ LOST_UPDATE_SEED
-- stale_cas_rejection           → cas-pingpong warn @ seed 0 (CAS loses)
+- stale_cas_rejection           → cas-pingpong warn @ STALE_CAS_SEED (CAS loses)
 - missing_cas_rejection         → cas-pingpong enforce @ LOST_UPDATE_SEED
 - wal_truncated                 → wal-starvation control @ PINNED_SEED
 
@@ -34,8 +34,11 @@ from dst.test_receipt_crash import CRASHING_SEED, run_receipt_crash
 from dst.test_wal_starvation import PINNED_SEED, run_wal_starvation
 
 # cas-pingpong warn arm where the CAS writer loses (blind write commits
-# first, CAS token goes stale) — pinned by the 2026-07-10 probe.
-STALE_CAS_SEED = 0
+# first, CAS token goes stale). Re-pinned 0 → 1 with the Phase-3 INV-5
+# fix: moving receipts inside _upsert_section changed the rejection
+# path's op count, shifting the RNG alignment (declared window change;
+# this gate is what caught the old seed going dead).
+STALE_CAS_SEED = 1
 
 EXPECTED_LABELS = frozenset(
     {

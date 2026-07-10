@@ -85,9 +85,16 @@ async def test_section_cas_write_steps_version_and_counts_rejections(
 ) -> None:
     """Planted INV-4 assertions: a CAS write steps version by exactly 1
     (always() stays silent) and a stale CAS is counted as reached."""
-    first = await _upsert_section(db, "career", "claude_ai", "v1 content")
+    first = await _upsert_section(
+        db,
+        "career",
+        "claude_ai",
+        "v1 content",
+        attempted_by="claude_ai",
+        operation="update_section",
+    )
     await db.commit()
-    assert first == {"written": True, "legacy_blind_write": False}
+    assert first == {"written": True, "legacy_blind_write": False, "receipt_id": None}
 
     cursor = await db.execute(
         "SELECT version FROM context_sections WHERE section_name = 'career'"
@@ -97,15 +104,35 @@ async def test_section_cas_write_steps_version_and_counts_rejections(
     base_version = row["version"]
 
     cas_write = await _upsert_section(
-        db, "career", "claude_ai", "v2 content", if_match_version=base_version
+        db,
+        "career",
+        "claude_ai",
+        "v2 content",
+        attempted_by="claude_ai",
+        operation="update_section",
+        if_match_version=base_version,
     )
     await db.commit()
-    assert cas_write == {"written": True, "legacy_blind_write": False}
+    assert cas_write == {
+        "written": True,
+        "legacy_blind_write": False,
+        "receipt_id": None,
+    }
 
     stale = await _upsert_section(
-        db, "career", "claude_ai", "v3 content", if_match_version=base_version
+        db,
+        "career",
+        "claude_ai",
+        "v3 content",
+        attempted_by="claude_ai",
+        operation="update_section",
+        if_match_version=base_version,
     )
-    assert stale == {"written": False, "reason": "stale_cas"}
+    assert stale["written"] is False
+    assert stale["reason"] == "stale_cas"
+    # INV-5: the rejection receipt is staged by _upsert_section itself, in
+    # the same transaction as the refused write — not left to the caller.
+    assert stale["receipt_id"] is not None
     assert sometimes_counts().get("stale_cas_rejection") == 1
 
 
@@ -120,7 +147,14 @@ async def test_always_tx_violation_rolls_back_before_raising(
     """A violation inside an open write transaction must not leave the
     uncommitted write on the shared connection for a later caller's commit
     to flush silently."""
-    first = await _upsert_section(db, "career", "claude_ai", "tx probe")
+    first = await _upsert_section(
+        db,
+        "career",
+        "claude_ai",
+        "tx probe",
+        attempted_by="claude_ai",
+        operation="update_section",
+    )
     assert first["written"] is True  # write open, NOT committed
 
     with pytest.raises(InvariantViolation):

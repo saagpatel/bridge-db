@@ -52,7 +52,9 @@ async def _seed_cli_snapshot(
     )
     snapshot_id = cursor.lastrowid
     assert snapshot_id is not None
-    await upsert_fts_entry(db, "snapshot", str(snapshot_id), fts_text_for_snapshot(data))
+    await upsert_fts_entry(
+        db, "snapshot", str(snapshot_id), fts_text_for_snapshot(data)
+    )
 
 
 async def _seed_cli_activity(
@@ -209,7 +211,9 @@ async def test_run_status_clarifies_dispositioned_unprocessed_shipped(
             db,
             "activity",
             str(activity_id),
-            fts_text_for_activity("bridge-db", "non-actionable ship", None, ["SHIPPED"]),
+            fts_text_for_activity(
+                "bridge-db", "non-actionable ship", None, ["SHIPPED"]
+            ),
         )
         await db.execute(
             """
@@ -366,7 +370,9 @@ async def test_run_dogfood_reports_read_only_observability(
                         "caller": None,
                         "project": None,
                         "ok": True,
-                        "detail": ("activity_ids=[1] updated_ids=[1] missing_ids=[] updated=1/1"),
+                        "detail": (
+                            "activity_ids=[1] updated_ids=[1] missing_ids=[] updated=1/1"
+                        ),
                     }
                 ),
             ]
@@ -405,8 +411,13 @@ async def test_run_dogfood_reports_read_only_observability(
     assert "dispositioned_unprocessed_shipped=0" in captured
     assert "processed_shipped_without_receipt=0" in captured
     assert "FTS: expected=0, indexed=0, missing=0, orphaned=0" in captured
-    assert "Latest confirm_shipped_sync: activity_id=1 downstream=notion:abc" in captured
-    assert "Compatibility audit posture: non-shipped compatibility detail current" in captured
+    assert (
+        "Latest confirm_shipped_sync: activity_id=1 downstream=notion:abc" in captured
+    )
+    assert (
+        "Compatibility audit posture: non-shipped compatibility detail current"
+        in captured
+    )
 
 
 @pytest.mark.asyncio
@@ -494,7 +505,9 @@ async def test_reconcile_canonical_keys_cli_reports_counts(
 
     db = await open_db(db_path)
     try:
-        row = await (await db.execute("SELECT canonical_key FROM activity_log")).fetchone()
+        row = await (
+            await db.execute("SELECT canonical_key FROM activity_log")
+        ).fetchone()
         assert row is not None
         assert row["canonical_key"] == "saagpatel/operant"
     finally:
@@ -566,7 +579,9 @@ async def test_log_session_boundary_uses_fts_safe_activity_path(
         assert metrics["expected"] == 3
         assert metrics["indexed"] == 3
 
-        cursor = await db.execute("SELECT COUNT(*) FROM activity_log WHERE source = 'cc'")
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM activity_log WHERE source = 'cc'"
+        )
         count_row = await cursor.fetchone()
         assert count_row is not None
         assert count_row[0] == 3
@@ -692,14 +707,18 @@ def test_enroll_writes_hashed_token_with_0600(
     assert (tmp_path / "principals.json").stat().st_mode & 0o777 == 0o600
 
 
-def test_enroll_refuses_without_tty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_enroll_refuses_without_tty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(config, "PRINCIPALS_PATH", tmp_path / "principals.json")
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     assert run_enroll("cc") is False
     assert not (tmp_path / "principals.json").exists()
 
 
-def test_enroll_rejects_unknown_caller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_enroll_rejects_unknown_caller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(config, "PRINCIPALS_PATH", tmp_path / "principals.json")
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     assert run_enroll("mallory") is False
@@ -740,6 +759,8 @@ async def test_promote_section_sets_operator_label(
         owner="claude_ai",
         content="reviewed content",
         source_trust="ingested",
+        attempted_by="claude_ai",
+        operation="update_section",
     )
     await db.commit()
     # run_promote_section opens its own connection to the same file the `db`
@@ -767,7 +788,10 @@ def test_enroll_rotation_replaces_old_hash(
     run_enroll("cc")
     second = json.loads((tmp_path / "principals.json").read_text(encoding="utf-8"))
 
-    assert first["principals"]["cc"]["token_sha256"] != second["principals"]["cc"]["token_sha256"]
+    assert (
+        first["principals"]["cc"]["token_sha256"]
+        != second["principals"]["cc"]["token_sha256"]
+    )
     assert len(second["principals"]) == 1
     out = capsys.readouterr().out
     assert "rotated" in out

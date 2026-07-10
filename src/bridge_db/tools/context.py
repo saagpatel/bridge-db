@@ -72,6 +72,10 @@ async def _upsert_section(
     content: str,
     source_trust: SourceTrust | None = None,
     *,
+    attempted_by: str,
+    operation: str,
+    principal: str | None = None,
+    receipt_surface: str = "context_section",
     if_match_updated_at: str | None = None,
     if_match_version: int | None = None,
 ) -> dict[str, Any]:
@@ -81,6 +85,12 @@ async def _upsert_section(
     #
     # if_match_version is the real CAS token. if_match_updated_at remains a
     # compatibility guard for existing callers and is enforced when supplied.
+    #
+    # INV-5: conflict receipts are not caller-optional. Every rejection
+    # (stale_cas, missing_cas) and every accepted blind overwrite of an
+    # existing row stages its receipt HERE, in the same transaction as the
+    # write decision, so the caller's single commit makes both durable
+    # atomically — attempted_by/operation are required for that reason.
     if if_match_version is not None or if_match_updated_at is not None:
         conditions = ["section_name = ?"]
         params: list[Any] = [content, source_trust, section_name]
@@ -115,11 +125,32 @@ async def _upsert_section(
         # shared connection and fire on a false violation.
         if cursor.rowcount == 0:
             sometimes("stale_cas_rejection")
-            return {"written": False, "reason": "stale_cas"}
+            # The zero-change UPDATE holds the transaction open; the receipt
+            # (and its diagnostic re-read) stage into it — no separate
+            # receipt transaction to crash out of.
+            receipt_id, current = await _record_section_conflict(
+                db,
+                section_name=section_name,
+                caller=attempted_by,
+                operation=operation,
+                reason="stale_cas",
+                attempted_content=content,
+                attempted_source_trust=source_trust,
+                principal=principal,
+                stale_version=if_match_version,
+                stale_updated_at=if_match_updated_at,
+                surface=receipt_surface,
+            )
+            return {
+                "written": False,
+                "reason": "stale_cas",
+                "receipt_id": receipt_id,
+                "current": current,
+            }
         await upsert_fts_entry(
             db, "section", section_name, fts_text_for_section(section_name, content)
         )
-        return {"written": True, "legacy_blind_write": False}
+        return {"written": True, "legacy_blind_write": False, "receipt_id": None}
 
     cursor = await db.execute(
         "SELECT version FROM context_sections WHERE section_name = ?",
@@ -129,8 +160,25 @@ async def _upsert_section(
     legacy_blind_write = existing is not None
     if legacy_blind_write and _context_cas_mode() == "enforce":
         sometimes("missing_cas_rejection")
-        return {"written": False, "reason": "missing_cas"}
+        receipt_id, current = await _record_section_conflict(
+            db,
+            section_name=section_name,
+            caller=attempted_by,
+            operation=operation,
+            reason="missing_cas",
+            attempted_content=content,
+            attempted_source_trust=source_trust,
+            principal=principal,
+            surface=receipt_surface,
+        )
+        return {
+            "written": False,
+            "reason": "missing_cas",
+            "receipt_id": receipt_id,
+            "current": current,
+        }
 
+    receipt_id = None
     if existing is None:
         await db.execute(
             """
@@ -140,6 +188,21 @@ async def _upsert_section(
             (section_name, owner, content, source_trust),
         )
     else:
+        # Accepted blind overwrite (warn mode): the displacement stays legal
+        # — that is INV-4's separate, config-level question — but it is
+        # never trace-free. Staged BEFORE the UPDATE so the receipt's
+        # current_* fields capture the displaced version and content sha.
+        receipt_id, _ = await _record_section_conflict(
+            db,
+            section_name=section_name,
+            caller=attempted_by,
+            operation=operation,
+            reason="legacy_blind_write",
+            attempted_content=content,
+            attempted_source_trust=source_trust,
+            principal=principal,
+            surface=receipt_surface,
+        )
         await db.execute(
             """
             UPDATE context_sections SET
@@ -155,7 +218,11 @@ async def _upsert_section(
         db, "section", section_name, fts_text_for_section(section_name, content)
     )
     sometimes("legacy_blind_write_accepted", legacy_blind_write)
-    return {"written": True, "legacy_blind_write": legacy_blind_write}
+    return {
+        "written": True,
+        "legacy_blind_write": legacy_blind_write,
+        "receipt_id": receipt_id,
+    }
 
 
 async def _section_row(db: Any, section_name: str) -> Any | None:
@@ -296,70 +363,35 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
                     )
                     continue
 
+        # INV-5: on rejection the receipt is staged by _upsert_section in
+        # the same transaction as the refused write; the batch commit below
+        # makes both durable together.
+        result = await _upsert_section(
+            db=db,
+            section_name=section_name,
+            owner="claude_ai",
+            content=content,
+            source_trust="ingested" if auth_active else None,
+            attempted_by="sync_from_file",
+            operation="sync_from_file",
+            receipt_surface="markdown_sync",
+            if_match_version=current["version"] if current is not None else None,
+        )
+        if not result["written"]:
+            refreshed = result["current"]
+            conflicts.append(
+                {
+                    "section_name": section_name,
+                    "receipt_id": result["receipt_id"],
+                    "reason": result["reason"],
+                    "current_version": refreshed["version"]
+                    if refreshed is not None
+                    else None,
+                }
+            )
+            continue
         if auth_active:
-            result = await _upsert_section(
-                db=db,
-                section_name=section_name,
-                owner="claude_ai",
-                content=content,
-                source_trust="ingested",
-                if_match_version=current["version"] if current is not None else None,
-            )
-            if not result["written"]:
-                receipt_id, refreshed = await _record_section_conflict(
-                    db,
-                    section_name=section_name,
-                    caller="sync_from_file",
-                    operation="sync_from_file",
-                    reason=result["reason"],
-                    attempted_content=content,
-                    attempted_source_trust="ingested",
-                    stale_version=current["version"] if current is not None else None,
-                    surface="markdown_sync",
-                )
-                conflicts.append(
-                    {
-                        "section_name": section_name,
-                        "receipt_id": receipt_id,
-                        "reason": result["reason"],
-                        "current_version": refreshed["version"]
-                        if refreshed is not None
-                        else None,
-                    }
-                )
-                continue
             demoted.append(section_name)
-        else:
-            result = await _upsert_section(
-                db=db,
-                section_name=section_name,
-                owner="claude_ai",
-                content=content,
-                if_match_version=current["version"] if current is not None else None,
-            )
-            if not result["written"]:
-                receipt_id, refreshed = await _record_section_conflict(
-                    db,
-                    section_name=section_name,
-                    caller="sync_from_file",
-                    operation="sync_from_file",
-                    reason=result["reason"],
-                    attempted_content=content,
-                    attempted_source_trust=None,
-                    stale_version=current["version"] if current is not None else None,
-                    surface="markdown_sync",
-                )
-                conflicts.append(
-                    {
-                        "section_name": section_name,
-                        "receipt_id": receipt_id,
-                        "reason": result["reason"],
-                        "current_version": refreshed["version"]
-                        if refreshed is not None
-                        else None,
-                    }
-                )
-                continue
 
         synced_sections.append(section_name)
 
@@ -463,30 +495,18 @@ def register(mcp: FastMCP) -> None:
             owner=owner,
             content=content,
             source_trust=source_trust,
+            attempted_by=caller,
+            operation="update_section",
+            principal=get_principal(ctx),
             if_match_updated_at=if_match_updated_at,
             if_match_version=if_match_version,
         )
         if not result["written"]:
-            # Optimistic-concurrency conflict: the section changed since the caller
-            # read it. The conditional UPDATE matched 0 rows but still opened an
-            # implicit write transaction — roll it back to release the lock before
-            # the diagnostic read below. This tool performs no DB write above
-            # _upsert_section, so the rollback discards nothing else (keep that
-            # invariant if this function is ever extended).
-            await db.rollback()
-            receipt_id, current = await _record_section_conflict(
-                db,
-                section_name=section_name,
-                caller=caller,
-                operation="update_section",
-                reason=result["reason"],
-                attempted_content=content,
-                attempted_source_trust=source_trust,
-                principal=get_principal(ctx),
-                stale_version=if_match_version,
-                stale_updated_at=if_match_updated_at,
-            )
+            # Optimistic-concurrency conflict. The receipt was staged by
+            # _upsert_section in the same transaction as the rejected write
+            # (INV-5) — this commit makes both durable atomically.
             await db.commit()
+            receipt_id, current = result["receipt_id"], result["current"]
             logger.info(
                 "section update conflict: %s by %s (reason=%s receipt=%s)",
                 section_name,
@@ -533,7 +553,9 @@ def register(mcp: FastMCP) -> None:
                 caller,
                 section_name,
                 ok=True,
-                detail=f"mode={_context_cas_mode()}",
+                detail=(
+                    f"mode={_context_cas_mode()} receipt_id={result.get('receipt_id')}"
+                ),
             )
         logger.info("section updated: %s by %s", section_name, caller)
         return {
