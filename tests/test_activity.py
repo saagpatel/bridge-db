@@ -1252,6 +1252,30 @@ async def test_prune_returns_pruned_rows(db: aiosqlite.Connection) -> None:
     assert isinstance(pruned_id, int) and pruned_tags == "[]"
 
 
+async def test_prune_emits_audit_line(
+    db: aiosqlite.Connection, fns: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, str | None]] = []
+
+    def fake_log_audit(
+        tool: str, caller: str, project: str, ok: bool = True, detail: str | None = None
+    ) -> None:
+        calls.append((tool, detail))
+
+    monkeypatch.setattr(mod, "log_audit", fake_log_audit)
+    ctx = make_ctx(db)
+    for i in range(config.ACTIVITY_RETENTION_PER_SOURCE + 1):
+        await fns["log_activity"](
+            caller="cc", project_name="p", summary=f"row {i}", ctx=ctx
+        )
+
+    prune_calls = [c for c in calls if c[0] == "log_activity.prune"]
+    assert len(prune_calls) == 1  # only the 51st insert pruned anything
+    detail = prune_calls[0][1]
+    assert detail is not None
+    assert "pruned=1" in detail and "ids_head=" in detail and "source=cc" in detail
+
+
 async def test_log_activity_accepts_notion_os(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
