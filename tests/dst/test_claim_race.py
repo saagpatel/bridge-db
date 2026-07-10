@@ -35,7 +35,7 @@ RACING_SEED = 0
 SEED_SWEEP = range(0, 30)
 
 
-def _handoff_fns() -> dict[str, Any]:
+def handoff_fns() -> dict[str, Any]:
     cap = CaptureMCP()
     handoffs_mod.register(cap)
     return cap.fns
@@ -54,7 +54,7 @@ async def _claim_writer(
     sim = SimConnection(
         db_path, sim_clock, rng, trace, scheduler=scheduler, writer_id=writer_id
     )
-    fns = _handoff_fns()
+    fns = handoff_fns()
     ctx = make_ctx(cast(aiosqlite.Connection, sim))
     try:
         result = await fns["pick_up_handoff"](
@@ -81,7 +81,7 @@ async def run_claim_race(base: Path, seed: int) -> dict[str, Any]:
     db_path = base / f"race-{seed}.db"
 
     setup = await open_sim_db(db_path, sim_clock, rng, trace)
-    fns = _handoff_fns()
+    fns = handoff_fns()
     setup_ctx = make_ctx(cast(aiosqlite.Connection, setup))
 
     clock.install(sim_clock.now)

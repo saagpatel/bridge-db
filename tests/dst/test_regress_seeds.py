@@ -11,9 +11,11 @@ from typing import Any
 import pytest
 
 from dst.test_claim_race import run_claim_race
+from dst.test_receipt_crash import run_receipt_crash
 
 _SCENARIOS: dict[str, Callable[[Path, int], Awaitable[dict[str, Any]]]] = {
     "claim-race": run_claim_race,
+    "receipt-crash": run_receipt_crash,
 }
 
 _SEEDS_FILE = Path(__file__).parent / "regress_seeds.txt"

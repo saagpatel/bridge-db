@@ -22,13 +22,15 @@ import asyncio
 import hashlib
 import json
 import sqlite3
-from collections.abc import Coroutine, Mapping
+from collections.abc import Coroutine, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from random import Random
-from typing import Any
+from typing import Any, Literal, NoReturn
 
 from bridge_db.db import apply_pragmas, ensure_schema
+from bridge_db.invariants import sometimes
 
 TraceEvent = dict[str, Any]
 
@@ -54,6 +56,71 @@ def trace_hash(trace: list[TraceEvent]) -> str:
 
 def _fingerprint(sql: str) -> str:
     return " ".join(sql.split())[:80]
+
+
+class SimCrash(Exception):
+    """Simulated process death (R3 §1.1): the writer's connection is gone
+    mid-tool-call and its open transaction is discarded, exactly as if the
+    OS killed the process between two commits."""
+
+
+FaultOp = Literal["execute", "pre-commit"]
+FaultKind = Literal["crash", "busy", "delay"]
+
+# R3 §1.1 buggify probabilities: each point coin-flips live/dead once per
+# run, then a live point fires at p=0.25 per hit — both off the run RNG.
+LIVENESS_P = 0.5
+FIRE_P = 0.25
+
+
+@dataclass(frozen=True)
+class FaultPoint:
+    """One (statement-fingerprint, op-type) buggify site (R3 §1.1).
+
+    ``match`` is a substring tested against the statement fingerprint. For
+    ``op="pre-commit"`` it is tested against the last statement executed in
+    the current transaction — that is what makes a two-op window like
+    rollback→receipt-commit (WC-6) landable with precision.
+    ``label`` names a ``sometimes()`` counter fired on every hit, the
+    non-vacuity evidence that the fault actually landed (gate G5).
+    """
+
+    match: str
+    op: FaultOp
+    kind: FaultKind
+    label: str | None = None
+
+
+class FaultPlan:
+    """Per-run fault decisions, drawn from the run RNG in a fixed order."""
+
+    def __init__(
+        self, points: Sequence[FaultPoint], rng: Random, trace: list[TraceEvent]
+    ) -> None:
+        self._rng = rng
+        self._trace = trace
+        # Liveness is decided once per run per point, in registration order,
+        # so the draw sequence — and therefore the whole run — is seed-stable.
+        self._live = [(point, rng.random() < LIVENESS_P) for point in points]
+
+    def fire(self, op: FaultOp, fingerprint: str, writer_id: str) -> FaultPoint | None:
+        for point, live in self._live:
+            if not live or point.op != op or point.match not in fingerprint:
+                continue
+            if self._rng.random() >= FIRE_P:
+                continue
+            self._trace.append(
+                {
+                    "op": "fault",
+                    "kind": point.kind,
+                    "writer": writer_id,
+                    "sql": fingerprint,
+                }
+            )
+            if point.label is not None:
+                sometimes(point.label)
+            return point
+        return None
 
 
 class SimCursor:
@@ -93,12 +160,16 @@ class SimConnection:
         trace: list[TraceEvent],
         scheduler: "SimScheduler | None" = None,
         writer_id: str = "w0",
+        faults: FaultPlan | None = None,
     ) -> None:
         self._clock = clock
         self._rng = rng
         self._trace = trace
         self._scheduler = scheduler
         self._writer_id = writer_id
+        self._faults = faults
+        self._last_fingerprint = ""
+        self._closed = False
         self._step = 0
         # timeout=0: SQLITE_BUSY surfaces immediately instead of blocking in
         # the C-layer busy handler — the retry becomes a scheduler-owned,
@@ -134,9 +205,36 @@ class SimConnection:
             }
         )
 
+    def _crash(self) -> NoReturn:
+        # Process death: the open transaction dies with the connection —
+        # anything staged since the last commit is discarded.
+        self._conn.rollback()
+        self._conn.close()
+        self._closed = True
+        raise SimCrash(f"writer {self._writer_id} crashed by fault injection")
+
+    async def _maybe_fault(self, op: FaultOp, fingerprint: str) -> bool:
+        """Apply any firing fault; True means the caller should retry the op."""
+        if self._faults is None:
+            return False
+        point = self._faults.fire(op, fingerprint, self._writer_id)
+        if point is None:
+            return False
+        if point.kind == "crash":
+            self._crash()
+        if point.kind == "busy":
+            return True  # injected BUSY: park again and retry, like the real one
+        # delay: one forced extra scheduling round before the op proceeds
+        await self._yield_and_trace("delay", fingerprint)
+        return False
+
     async def execute(self, sql: str, parameters: Any = ()) -> SimCursor:
         while True:
             await self._yield_and_trace("execute", sql)
+            fingerprint = _fingerprint(sql)
+            self._last_fingerprint = fingerprint
+            if await self._maybe_fault("execute", fingerprint):
+                continue
             try:
                 return SimCursor(self._conn.execute(sql, parameters))
             except sqlite3.OperationalError as exc:
@@ -145,31 +243,41 @@ class SimConnection:
                 # SQLITE_BUSY: a first-class schedulable event — park again
                 # and retry when the scheduler next grants this writer.
                 self._trace.append(
-                    {"writer": self._writer_id, "op": "busy", "sql": _fingerprint(sql)}
+                    {"writer": self._writer_id, "op": "busy", "sql": fingerprint}
                 )
 
     async def executescript(self, sql_script: str) -> SimCursor:
         await self._yield_and_trace("executescript", sql_script)
+        self._last_fingerprint = _fingerprint(sql_script)
         return SimCursor(self._conn.executescript(sql_script))
 
     async def commit(self) -> None:
         while True:
             await self._yield_and_trace("commit", "")
+            if await self._maybe_fault("pre-commit", self._last_fingerprint):
+                continue
             try:
                 self._conn.commit()
-                return
             except sqlite3.OperationalError as exc:
                 if "locked" not in str(exc):
                     raise
                 self._trace.append({"writer": self._writer_id, "op": "busy_commit"})
+                continue
+            # Transaction boundary: pre-commit points key on statements of
+            # the CURRENT tx only, so a later commit can't falsely match.
+            self._last_fingerprint = ""
+            return
 
     async def rollback(self) -> None:
         await self._yield_and_trace("rollback", "")
         self._conn.rollback()
+        self._last_fingerprint = ""
 
     async def close(self) -> None:
         await self._yield_and_trace("close", "")
-        self._conn.close()
+        if not self._closed:
+            self._conn.close()
+            self._closed = True
 
 
 class SimScheduler:
