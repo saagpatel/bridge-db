@@ -19,7 +19,7 @@ from bridge_db.db import (
     upsert_fts_entry,
 )
 from bridge_db.instruction_boundary import instruction_boundary
-from bridge_db.invariants import always, sometimes
+from bridge_db.invariants import always_tx, sometimes
 from bridge_db.models import SECTION_OWNERS, CallerID, SourceTrust
 
 logger = logging.getLogger("bridge_db.tools.context")
@@ -101,28 +101,21 @@ async def _upsert_section(
             """,  # noqa: S608 — conditions are assembled from fixed predicates only.
             params,
         )
-        always(
+        await always_tx(
+            db,
             cursor.rowcount <= 1,
             "INV-4: section CAS update must match at most one row",
             section_name=section_name,
             rowcount=cursor.rowcount,
         )
+        # INV-4's step-by-1 needs no re-read: the UPDATE sets
+        # version = version + 1 in the same statement that matched
+        # version = if_match_version, so rowcount == 1 IS the step proof.
+        # A post-write SELECT would race legal concurrent writers on the
+        # shared connection and fire on a false violation.
         if cursor.rowcount == 0:
             sometimes("stale_cas_rejection")
             return {"written": False, "reason": "stale_cas"}
-        if if_match_version is not None:
-            check = await db.execute(
-                "SELECT version FROM context_sections WHERE section_name = ?",
-                (section_name,),
-            )
-            stepped = await check.fetchone()
-            always(
-                stepped is not None and stepped["version"] == if_match_version + 1,
-                "INV-4: version must step by exactly 1 on a CAS write",
-                section_name=section_name,
-                expected_version=if_match_version + 1,
-                actual_version=stepped["version"] if stepped is not None else None,
-            )
         await upsert_fts_entry(
             db, "section", section_name, fts_text_for_section(section_name, content)
         )

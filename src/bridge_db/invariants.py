@@ -55,6 +55,23 @@ def always(condition: bool, message: str, **context: Any) -> None:
     raise InvariantViolation(message, context)
 
 
+async def always_tx(db: Any, condition: bool, message: str, **context: Any) -> None:
+    """``always()`` for a site with an open write transaction on ``db``.
+
+    Rolls the transaction back before raising: the MCP dispatcher converts
+    the raise into an error result for the one tool call (the process
+    survives), and without the rollback the long-lived shared connection
+    would keep the uncommitted write open until an unrelated later caller's
+    ``commit()`` silently flushed the corrupt state to disk.
+    """
+    if not condition:
+        try:
+            await db.rollback()
+        except Exception:
+            logger.exception("rollback before invariant raise failed")
+    always(condition, message, **context)
+
+
 def sometimes(label: str, condition: bool = True) -> None:
     """Record that a labelled condition was reached. Counter only; never raises."""
     if not condition:

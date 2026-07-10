@@ -8,6 +8,7 @@ from bridge_db.audit import iter_jsonl
 from bridge_db.invariants import (
     InvariantViolation,
     always,
+    always_tx,
     reset_sometimes_counts,
     sometimes,
     sometimes_counts,
@@ -15,11 +16,6 @@ from bridge_db.invariants import (
 from bridge_db.tools.context import (
     _upsert_section,  # pyright: ignore[reportPrivateUsage]
 )
-
-
-@pytest.fixture(autouse=True)
-def clean_counters() -> None:
-    reset_sometimes_counts()
 
 
 def _audit_events() -> list[dict[str, object]]:
@@ -104,7 +100,6 @@ async def test_section_cas_write_steps_version_and_counts_rejections(
         db, "career", "claude_ai", "v2 content", if_match_version=base_version
     )
     await db.commit()
-    # The INV-4 version-step always() ran inside _upsert_section and held.
     assert cas_write == {"written": True, "legacy_blind_write": False}
 
     stale = await _upsert_section(
@@ -112,3 +107,28 @@ async def test_section_cas_write_steps_version_and_counts_rejections(
     )
     assert stale == {"written": False, "reason": "stale_cas"}
     assert sometimes_counts().get("stale_cas_rejection") == 1
+
+
+async def test_always_tx_holds_is_silent(db: aiosqlite.Connection) -> None:
+    await always_tx(db, True, "INV-test: holds", key="value")
+    assert _audit_events() == []
+
+
+async def test_always_tx_violation_rolls_back_before_raising(
+    db: aiosqlite.Connection,
+) -> None:
+    """A violation inside an open write transaction must not leave the
+    uncommitted write on the shared connection for a later caller's commit
+    to flush silently."""
+    first = await _upsert_section(db, "career", "claude_ai", "tx probe")
+    assert first["written"] is True  # write open, NOT committed
+
+    with pytest.raises(InvariantViolation):
+        await always_tx(db, False, "INV-test: tx fired", key=1)
+
+    cursor = await db.execute(
+        "SELECT COUNT(*) AS n FROM context_sections WHERE section_name = 'career'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["n"] == 0  # the open write was rolled back, not left dangling

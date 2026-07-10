@@ -16,7 +16,7 @@ from bridge_db.db import (
     upsert_fts_entry,
 )
 from bridge_db.instruction_boundary import instruction_boundary
-from bridge_db.invariants import always, sometimes
+from bridge_db.invariants import always, always_tx, sometimes
 from bridge_db.models import CallerID, SourceTrust
 from bridge_db.project_resolver import resolve as resolve_project
 
@@ -259,7 +259,8 @@ def register(mcp: FastMCP) -> None:
             """,
             (gate_identity, handoff_id),
         )
-        always(
+        await always_tx(
+            db,
             cursor.rowcount <= 1,
             "INV-1: handoff claim CAS must commit at most one winner",
             handoff_id=handoff_id,
