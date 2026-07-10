@@ -14,7 +14,7 @@ from bridge_db import config
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # A migration post-hook runs after its DDL, before the version bump+commit
 # (e.g. FTS repopulation). Its return value is ignored.
@@ -104,7 +104,8 @@ CREATE TABLE IF NOT EXISTS pending_handoffs (
     cleared_at TEXT,
     status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'active', 'cleared')),
     canonical_key TEXT,
-    source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested'))
+    source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested')),
+    claimed_by TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_handoff_status ON pending_handoffs(status);
@@ -438,6 +439,11 @@ CREATE INDEX IF NOT EXISTS idx_scl_routing ON session_classification(routing_bas
 """
 
 
+# Migration v12 → v13: add claimed_by to pending_handoffs so INV-13's
+# handoff-claimant fix has a durable column to record against.
+_MIGRATION_V12_TO_V13 = "ALTER TABLE pending_handoffs ADD COLUMN claimed_by TEXT;\n"
+
+
 async def apply_pragmas(db: aiosqlite.Connection) -> None:
     """Apply all required PRAGMAs. Safe to call on every connection open."""
     await db.execute("PRAGMA journal_mode=WAL")
@@ -505,6 +511,7 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         (10, _MIGRATION_V9_TO_V10, None),
         (11, _MIGRATION_V10_TO_V11, reindex_all_activity_fts),
         (12, _MIGRATION_V11_TO_V12, None),
+        (13, _MIGRATION_V12_TO_V13, None),
     ]
     for target, ddl, post_hook in migrations:
         if current_version >= target:
