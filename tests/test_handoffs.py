@@ -599,6 +599,11 @@ async def test_clear_allows_own_active_claim(
     assert result["cleared"] is True
     assert result["cleared_count"] == 1
     assert result["refused_count"] == 0
+    cursor = await db.execute(
+        "SELECT status FROM pending_handoffs WHERE id = ?", (created["handoff_id"],)
+    )
+    row = await cursor.fetchone()
+    assert row is not None and row["status"] == "cleared"
 
 
 async def test_clear_allows_unclaimed_pending(

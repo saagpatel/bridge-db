@@ -412,9 +412,31 @@ def register(mcp: FastMCP) -> None:
                 UPDATE pending_handoffs
                 SET status = 'cleared', cleared_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
                 WHERE id IN ({id_placeholders})
+                  AND (
+                      status = 'pending'
+                      OR (
+                          status = 'active'
+                          AND (claimed_by IS NULL OR claimed_by = ?)
+                      )
+                  )
+                """,
+                [*clearable_ids, gate_identity],
+            )
+            cursor = await db.execute(
+                f"""
+                SELECT id FROM pending_handoffs
+                WHERE id IN ({id_placeholders}) AND status != 'cleared'
                 """,
                 clearable_ids,
             )
+            race_refused_ids = [row["id"] for row in await cursor.fetchall()]
+            if race_refused_ids:
+                refused_ids.extend(race_refused_ids)
+                clearable_ids = [
+                    handoff_id
+                    for handoff_id in clearable_ids
+                    if handoff_id not in race_refused_ids
+                ]
         await db.commit()
 
         if refused_ids:
