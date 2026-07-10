@@ -16,6 +16,7 @@ from bridge_db.db import (
     upsert_fts_entry,
 )
 from bridge_db.instruction_boundary import instruction_boundary
+from bridge_db.invariants import always, sometimes
 from bridge_db.models import CallerID, SourceTrust
 from bridge_db.project_resolver import resolve as resolve_project
 
@@ -258,6 +259,12 @@ def register(mcp: FastMCP) -> None:
             """,
             (gate_identity, handoff_id),
         )
+        always(
+            cursor.rowcount <= 1,
+            "INV-1: handoff claim CAS must commit at most one winner",
+            handoff_id=handoff_id,
+            rowcount=cursor.rowcount,
+        )
         if cursor.rowcount == 0:
             # CAS guard: another 'cc'/'codex' caller transitioned this handoff out
             # of 'pending' between our SELECT above and this UPDATE (the TOCTOU
@@ -286,6 +293,7 @@ def register(mcp: FastMCP) -> None:
                 },
             )
             await db.commit()
+            sometimes("raced_claim_receipt_written")
             log_audit(
                 "pick_up_handoff",
                 caller,
@@ -395,6 +403,12 @@ def register(mcp: FastMCP) -> None:
         clearable_ids: list[int] = []
         refused_ids: list[int] = []
         for row in rows:
+            always(
+                row["status"] in ("pending", "active"),
+                "INV-3: only pending|active handoffs may move toward cleared",
+                handoff_id=row["id"],
+                status=row["status"],
+            )
             claimant = row["claimed_by"]
             if (
                 row["status"] == "active"
@@ -438,6 +452,7 @@ def register(mcp: FastMCP) -> None:
                     if handoff_id not in race_refused_ids
                 ]
         await db.commit()
+        sometimes("clear_refused_foreign_claim", bool(refused_ids))
 
         if refused_ids:
             log_audit(

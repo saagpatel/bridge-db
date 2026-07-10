@@ -19,6 +19,7 @@ from bridge_db.db import (
     upsert_fts_entry,
 )
 from bridge_db.instruction_boundary import instruction_boundary
+from bridge_db.invariants import always, sometimes
 from bridge_db.models import SECTION_OWNERS, CallerID, SourceTrust
 
 logger = logging.getLogger("bridge_db.tools.context")
@@ -100,8 +101,28 @@ async def _upsert_section(
             """,  # noqa: S608 — conditions are assembled from fixed predicates only.
             params,
         )
+        always(
+            cursor.rowcount <= 1,
+            "INV-4: section CAS update must match at most one row",
+            section_name=section_name,
+            rowcount=cursor.rowcount,
+        )
         if cursor.rowcount == 0:
+            sometimes("stale_cas_rejection")
             return {"written": False, "reason": "stale_cas"}
+        if if_match_version is not None:
+            check = await db.execute(
+                "SELECT version FROM context_sections WHERE section_name = ?",
+                (section_name,),
+            )
+            stepped = await check.fetchone()
+            always(
+                stepped is not None and stepped["version"] == if_match_version + 1,
+                "INV-4: version must step by exactly 1 on a CAS write",
+                section_name=section_name,
+                expected_version=if_match_version + 1,
+                actual_version=stepped["version"] if stepped is not None else None,
+            )
         await upsert_fts_entry(
             db, "section", section_name, fts_text_for_section(section_name, content)
         )
@@ -114,6 +135,7 @@ async def _upsert_section(
     existing = await cursor.fetchone()
     legacy_blind_write = existing is not None
     if legacy_blind_write and _context_cas_mode() == "enforce":
+        sometimes("missing_cas_rejection")
         return {"written": False, "reason": "missing_cas"}
 
     if existing is None:
@@ -139,6 +161,7 @@ async def _upsert_section(
     await upsert_fts_entry(
         db, "section", section_name, fts_text_for_section(section_name, content)
     )
+    sometimes("legacy_blind_write_accepted", legacy_blind_write)
     return {"written": True, "legacy_blind_write": legacy_blind_write}
 
 

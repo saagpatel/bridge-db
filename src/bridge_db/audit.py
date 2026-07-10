@@ -3,11 +3,10 @@
 import json
 import logging
 from collections.abc import Iterator
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from bridge_db import config
+from bridge_db import clock, config
 
 logger = logging.getLogger("bridge_db.audit")
 
@@ -22,7 +21,7 @@ def log_audit(
     """Append one audit event to the audit JSONL log. Never raises."""
     try:
         event: dict[str, Any] = {
-            "ts": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "ts": clock.now().isoformat().replace("+00:00", "Z"),
             "tool": tool,
             "caller": caller,
             "project": project,
