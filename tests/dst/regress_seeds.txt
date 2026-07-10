@@ -1,0 +1,4 @@
+# DST regression-seed corpus (R3 §2): every bug-finding or
+# behavior-pinning seed is committed here and replays forever.
+# Format: <scenario> <seed>  — loader: tests/dst/test_regress_seeds.py
+claim-race 0

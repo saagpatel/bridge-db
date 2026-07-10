@@ -18,9 +18,11 @@ Three pieces, all harness-side:
   the final DB file is a pure function of (seed, scenario, git SHA).
 """
 
+import asyncio
 import hashlib
 import json
 import sqlite3
+from collections.abc import Coroutine, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from random import Random
@@ -89,12 +91,19 @@ class SimConnection:
         clock: SimClock,
         rng: Random,
         trace: list[TraceEvent],
+        scheduler: "SimScheduler | None" = None,
+        writer_id: str = "w0",
     ) -> None:
         self._clock = clock
         self._rng = rng
         self._trace = trace
+        self._scheduler = scheduler
+        self._writer_id = writer_id
         self._step = 0
-        self._conn = sqlite3.connect(str(db_path))
+        # timeout=0: SQLITE_BUSY surfaces immediately instead of blocking in
+        # the C-layer busy handler — the retry becomes a scheduler-owned,
+        # seeded event (R3 §1.1) rather than invisible wall-clock waiting.
+        self._conn = sqlite3.connect(str(db_path), timeout=0)
         self._conn.row_factory = sqlite3.Row
         self._conn.create_function("strftime", -1, self._sim_strftime)
 
@@ -110,12 +119,15 @@ class SimConnection:
             "extend the model rather than letting it silently diverge"
         )
 
-    def _pre_op(self, op: str, sql: str) -> None:
+    async def _yield_and_trace(self, op: str, sql: str) -> None:
+        if self._scheduler is not None:
+            await self._scheduler.yield_point(self._writer_id)
         self._clock.tick(self._rng.randrange(0, 3))
         self._step += 1
         self._trace.append(
             {
                 "step": self._step,
+                "writer": self._writer_id,
                 "op": op,
                 "sql": _fingerprint(sql),
                 "clock": self._clock.now().isoformat(),
@@ -123,24 +135,98 @@ class SimConnection:
         )
 
     async def execute(self, sql: str, parameters: Any = ()) -> SimCursor:
-        self._pre_op("execute", sql)
-        return SimCursor(self._conn.execute(sql, parameters))
+        while True:
+            await self._yield_and_trace("execute", sql)
+            try:
+                return SimCursor(self._conn.execute(sql, parameters))
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc):
+                    raise
+                # SQLITE_BUSY: a first-class schedulable event — park again
+                # and retry when the scheduler next grants this writer.
+                self._trace.append(
+                    {"writer": self._writer_id, "op": "busy", "sql": _fingerprint(sql)}
+                )
 
     async def executescript(self, sql_script: str) -> SimCursor:
-        self._pre_op("executescript", sql_script)
+        await self._yield_and_trace("executescript", sql_script)
         return SimCursor(self._conn.executescript(sql_script))
 
     async def commit(self) -> None:
-        self._pre_op("commit", "")
-        self._conn.commit()
+        while True:
+            await self._yield_and_trace("commit", "")
+            try:
+                self._conn.commit()
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc):
+                    raise
+                self._trace.append({"writer": self._writer_id, "op": "busy_commit"})
 
     async def rollback(self) -> None:
-        self._pre_op("rollback", "")
+        await self._yield_and_trace("rollback", "")
         self._conn.rollback()
 
     async def close(self) -> None:
-        self._pre_op("close", "")
+        await self._yield_and_trace("close", "")
         self._conn.close()
+
+
+class SimScheduler:
+    """Cooperative interleaving driver (R3 §1.3, Phase 2), seeded.
+
+    Every writer task parks at every connection op (``yield_point``); this
+    loop picks which parked writer proceeds using the run's RNG. All
+    concurrency in a sim run is therefore an explicit, replayable sequence
+    of grant events — there is no other scheduler.
+    """
+
+    def __init__(self, rng: Random, trace: list[TraceEvent]) -> None:
+        self._rng = rng
+        self._trace = trace
+        self._parked: dict[str, asyncio.Event] = {}
+        self._arrival = asyncio.Event()
+
+    async def yield_point(self, writer_id: str) -> None:
+        event = asyncio.Event()
+        self._parked[writer_id] = event
+        self._arrival.set()
+        await event.wait()
+
+    async def _finishing(self, coro: Coroutine[Any, Any, Any]) -> Any:
+        try:
+            return await coro
+        finally:
+            self._arrival.set()
+
+    async def run(
+        self, writers: Mapping[str, Coroutine[Any, Any, Any]]
+    ) -> dict[str, Any]:
+        """Drive writer coroutines to completion; return their results by id.
+
+        A writer that raises propagates its exception here (writer scripts
+        are expected to catch domain errors like ToolError themselves and
+        return an outcome value instead).
+        """
+        tasks = {
+            writer_id: asyncio.create_task(self._finishing(coro))
+            for writer_id, coro in writers.items()
+        }
+        while True:
+            live = [w for w, t in tasks.items() if not t.done()]
+            if not live:
+                break
+            parked_live = sorted(w for w in live if w in self._parked)
+            if len(parked_live) < len(live):
+                # Some live writer is still running toward its next park
+                # (or completion) — wait for the next arrival.
+                self._arrival.clear()
+                await self._arrival.wait()
+                continue
+            choice = self._rng.choice(parked_live)
+            self._trace.append({"op": "grant", "writer": choice})
+            self._parked.pop(choice).set()
+        return {w: t.result() for w, t in tasks.items()}
 
 
 async def open_sim_db(
