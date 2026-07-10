@@ -9,7 +9,12 @@ from pydantic import Field
 
 from bridge_db.audit import log_audit
 from bridge_db.auth import clamp_source_trust, get_principal, require_caller
-from bridge_db.db import fts_text_for_handoff, get_db, record_write_conflict, upsert_fts_entry
+from bridge_db.db import (
+    fts_text_for_handoff,
+    get_db,
+    record_write_conflict,
+    upsert_fts_entry,
+)
 from bridge_db.instruction_boundary import instruction_boundary
 from bridge_db.models import CallerID, SourceTrust
 from bridge_db.project_resolver import resolve as resolve_project
@@ -21,9 +26,14 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool()
     async def create_handoff(
         caller: Annotated[
-            CallerID, Field(description="Must be 'claude_ai' — only Claude.ai dispatches handoffs")
+            CallerID,
+            Field(
+                description="Must be 'claude_ai' — only Claude.ai dispatches handoffs"
+            ),
         ],
-        project_name: Annotated[str, Field(description="Name of the project being handed off")],
+        project_name: Annotated[
+            str, Field(description="Name of the project being handed off")
+        ],
         project_path: Annotated[
             str | None, Field(description="Absolute path to the project directory")
         ] = None,
@@ -45,7 +55,9 @@ def register(mcp: FastMCP) -> None:
         """Create a project handoff for Claude Code or Codex to pick up. Only claude_ai may dispatch."""
         require_caller(ctx, caller, tool="create_handoff")
         if caller != "claude_ai":
-            raise ToolError(f"Only 'claude_ai' may create handoffs; caller was '{caller}'")
+            raise ToolError(
+                f"Only 'claude_ai' may create handoffs; caller was '{caller}'"
+            )
         source_trust, source_trust_clamped = clamp_source_trust(
             source_trust, caller=caller, tool="create_handoff"
         )
@@ -81,7 +93,11 @@ def register(mcp: FastMCP) -> None:
         await db.commit()
 
         log_audit(
-            "create_handoff", caller, project_name, ok=True, detail=f"source_trust={source_trust}"
+            "create_handoff",
+            caller,
+            project_name,
+            ok=True,
+            detail=f"source_trust={source_trust}",
         )
         if resolution.registry_present and not resolution.matched:
             # Drift: a real handoff with no canonical match. Surface it via the
@@ -96,7 +112,8 @@ def register(mcp: FastMCP) -> None:
                 detail="no canonical match in project-registry; flagged for triage",
             )
             logger.warning(
-                "create_handoff: unmatched project_name %r (no canonical key)", project_name
+                "create_handoff: unmatched project_name %r (no canonical key)",
+                project_name,
             )
 
         logger.info("handoff created: id=%d project=%s", handoff_id, project_name)
@@ -146,7 +163,8 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool()
     async def pick_up_handoff(
         caller: Annotated[
-            CallerID, Field(description="The system picking up the handoff: 'cc' or 'codex'")
+            CallerID,
+            Field(description="The system picking up the handoff: 'cc' or 'codex'"),
         ],
         handoff_id: Annotated[int, Field(description="ID of the handoff to pick up")],
         confirm: Annotated[
@@ -167,7 +185,9 @@ def register(mcp: FastMCP) -> None:
         """
         require_caller(ctx, caller, tool="pick_up_handoff")
         if caller not in ("cc", "codex"):
-            raise ToolError(f"Only 'cc' or 'codex' may pick up handoffs; caller was '{caller}'")
+            raise ToolError(
+                f"Only 'cc' or 'codex' may pick up handoffs; caller was '{caller}'"
+            )
 
         db = get_db(ctx)
         cursor = await db.execute(
@@ -179,7 +199,9 @@ def register(mcp: FastMCP) -> None:
         if row is None:
             raise ToolError(f"No handoff found with id {handoff_id}")
         if row["status"] != "pending":
-            raise ToolError(f"Handoff {handoff_id} is not pending (status: {row['status']})")
+            raise ToolError(
+                f"Handoff {handoff_id} is not pending (status: {row['status']})"
+            )
 
         trust = row["source_trust"]
         project = row["project_name"]
@@ -229,10 +251,12 @@ def register(mcp: FastMCP) -> None:
         cursor = await db.execute(
             """
             UPDATE pending_handoffs
-            SET status = 'active', picked_up_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            SET status = 'active',
+                picked_up_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                claimed_by = ?
             WHERE id = ? AND status = 'pending'
             """,
-            (handoff_id,),
+            (gate_identity, handoff_id),
         )
         if cursor.rowcount == 0:
             # CAS guard: another 'cc'/'codex' caller transitioned this handoff out
@@ -256,7 +280,9 @@ def register(mcp: FastMCP) -> None:
                 current_source_trust=trust,
                 detail={
                     "project_name": project,
-                    "current_status": current_status["status"] if current_status is not None else None,
+                    "current_status": current_status["status"]
+                    if current_status is not None
+                    else None,
                 },
             )
             await db.commit()
@@ -273,7 +299,9 @@ def register(mcp: FastMCP) -> None:
                 f"Conflict receipt: {receipt_id}."
             )
         await db.commit()
-        decision = "allowed confirm=true" if (trust != "operator" and confirm) else "allowed"
+        decision = (
+            "allowed confirm=true" if (trust != "operator" and confirm) else "allowed"
+        )
         log_audit(
             "pick_up_handoff",
             caller,
@@ -281,7 +309,12 @@ def register(mcp: FastMCP) -> None:
             ok=True,
             detail=f"source_trust={trust} decision={decision}",
         )
-        logger.info("handoff picked up: id=%d by %s (source_trust=%s)", handoff_id, caller, trust)
+        logger.info(
+            "handoff picked up: id=%d by %s (source_trust=%s)",
+            handoff_id,
+            caller,
+            trust,
+        )
         return {
             "ok": True,
             "handoff_id": handoff_id,
@@ -289,20 +322,26 @@ def register(mcp: FastMCP) -> None:
             "canonical_key": row["canonical_key"],
             "source_trust": trust,
             "status": "active",
+            "claimed_by": gate_identity,
         }
 
     @mcp.tool()
     async def clear_handoff(
         caller: Annotated[
-            CallerID, Field(description="Must be 'cc' or 'codex' — clears matched handoffs")
+            CallerID,
+            Field(description="Must be 'cc' or 'codex' — clears matched handoffs"),
         ],
-        project_name: Annotated[str, Field(description="Project name to match and clear")],
+        project_name: Annotated[
+            str, Field(description="Project name to match and clear")
+        ],
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Clear a handoff by project name (mark as done). Called by /end after completing project work."""
         require_caller(ctx, caller, tool="clear_handoff")
         if caller not in ("cc", "codex"):
-            raise ToolError(f"Only 'cc' or 'codex' may clear handoffs; caller was '{caller}'")
+            raise ToolError(
+                f"Only 'cc' or 'codex' may clear handoffs; caller was '{caller}'"
+            )
 
         db = get_db(ctx)
         # Match by exact project_name OR — when the incoming name resolves through
@@ -330,7 +369,11 @@ def register(mcp: FastMCP) -> None:
         rows = await cursor.fetchall()
         if not rows:
             # Not an error — handoff may not exist; /end calls this opportunistically
-            return {"ok": True, "cleared": False, "reason": "No active handoff found for project"}
+            return {
+                "ok": True,
+                "cleared": False,
+                "reason": "No active handoff found for project",
+            }
 
         handoff_ids = [row["id"] for row in rows]
         await db.execute(
@@ -343,7 +386,10 @@ def register(mcp: FastMCP) -> None:
         )
         await db.commit()
         logger.info(
-            "handoffs cleared: project=%s by %s count=%d", project_name, caller, len(handoff_ids)
+            "handoffs cleared: project=%s by %s count=%d",
+            project_name,
+            caller,
+            len(handoff_ids),
         )
         return {
             "ok": True,
