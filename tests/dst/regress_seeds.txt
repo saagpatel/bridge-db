@@ -2,8 +2,11 @@
 # behavior-pinning seed is committed here and replays forever.
 # Format: <scenario> <seed>  — loader: tests/dst/test_regress_seeds.py
 claim-race 0
-# receipt-crash: WC-6 gap pin (INV-2 RED by design until the Phase-3 fix)
-receipt-crash 11
+# receipt-crash: WC-6 — Phase-3 INV-2 fix pin (crash still lands; the
+# retry converges the ledger to one durable stale_claim receipt).
+# Re-pinned 11 → 5: the fix removed the loser-path rollback op, shifting
+# the RNG alignment (declared window change).
+receipt-crash 5
 # cas-pingpong: RC-3 — warn arm is the INV-4 lost-update evidence seed,
 # enforce arm is the CONTROL on the identical interleaving
 cas-pingpong-warn 2

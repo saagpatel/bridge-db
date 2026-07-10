@@ -1,16 +1,18 @@
 """Phase 2 scenario WC-6: crash landed in the loser-receipt window (R4 §B).
 
 The fault point keys on the write_conflicts INSERT fingerprint and fires
-pre-commit — the two-op rollback→receipt-commit window in pick_up_handoff
-(handoffs.py, loser path). A crash there kills the loser after its
-raced_claim receipt is staged but before it commits: the race was genuine,
-the ledger stays empty, and the loss is silent exactly when contention
-telemetry matters.
+pre-commit in pick_up_handoff's loser path. A crash there kills the loser
+after its raced_claim receipt is staged but before it commits.
 
-GAP LEDGER (R3 gap #1, gate G6): INV-2 is expected-RED here on current
-code. The pinned test asserts the VIOLATION reproduces. When Phase 3 lands
-receipt-before-raise / idempotent receipts, this seed must flip and the
-assertions below get inverted to receipts == 1.
+GAP FLIPPED (R3 gap #1 → Phase 3 fix): the loser path now stages the
+receipt inside the claim attempt's own transaction (no separate
+rollback→receipt-commit window), and a refused re-attempt writes an
+idempotent stale_claim receipt. A crash before the single commit still
+discards the in-flight raced_claim row — the irreducible at-most-once
+residue of process death — but the caller's natural retry converges the
+ledger to exactly one durable, attributable receipt. The pinned seed
+asserts the RECOVERY, and the pre-fix silent-loss shape (zero rows after
+retry) would fail these assertions red.
 """
 
 import asyncio
@@ -38,10 +40,11 @@ from dst.sim import (
 )
 from dst.test_claim_race import handoff_fns
 
-# Pinned by the 2026-07-10 discovery sweep (4/40 seeds landed the crash
-# in-window: 11, 12, 21, 34): race + live fault + in-window fire — the
-# crash lands between the receipt INSERT and its commit.
-CRASHING_SEED = 11
+# Re-pinned 2026-07-10 with the Phase-3 INV-2 fix: removing the loser
+# path's rollback op shifted the RNG draw alignment, so the pre-fix seed
+# (11) no longer lands the fault — a declared window change, not lost
+# determinism. Post-fix sweep: 6/40 seeds land it (5, 18, 20, 21, 28, 34).
+CRASHING_SEED = 5
 SEED_SWEEP = range(0, 40)
 
 _WINDOW_LABEL = "fault_fired_in_receipt_window"
@@ -94,6 +97,45 @@ async def _crashy_claim_writer(
         await sim.close()
 
 
+async def _recovery_retry(
+    db_path: Path,
+    sim_clock: SimClock,
+    rng: Random,
+    trace: list[TraceEvent],
+    scheduler: SimScheduler,
+    handoff_id: int,
+    caller: str,
+) -> dict[str, Any]:
+    """The crashed loser's caller retries on fresh connections (fresh
+    process, no faults — the declared crash was a one-time event). The
+    pre-check refusal writes the idempotent stale_claim receipt that makes
+    the crashed loss durable; the second retry proves the dedupe converges
+    to one row instead of growing per attempt."""
+    outcomes: list[str] = []
+    for _attempt in range(2):
+        # writer_id must equal the task key handed to scheduler.run — the
+        # grant loop matches parked entries by that id; a mismatched id
+        # parks forever and deadlocks the drain.
+        sim = SimConnection(
+            db_path,
+            sim_clock,
+            rng,
+            trace,
+            scheduler=scheduler,
+            writer_id="recovery",
+        )
+        fns = handoff_fns()
+        ctx = make_ctx(cast(aiosqlite.Connection, sim))
+        try:
+            await fns["pick_up_handoff"](caller=caller, handoff_id=handoff_id, ctx=ctx)
+            outcomes.append("won")
+        except ToolError as exc:
+            outcomes.append("refused" if "not pending" in str(exc) else "error")
+        finally:
+            await sim.close()
+    return {"outcomes": outcomes}
+
+
 async def run_receipt_crash(base: Path, seed: int) -> dict[str, Any]:
     """One seeded WC-6 run; per-seed oracle asserts inside.
 
@@ -144,14 +186,35 @@ async def run_receipt_crash(base: Path, seed: int) -> dict[str, Any]:
         }
         async with asyncio.timeout(30):
             results = await scheduler.run(writers)
+
+        crashed = [w for w, r in results.items() if r["outcome"] == "crashed"]
+        recovery: dict[str, Any] | None = None
+        if crashed:
+            recovered = await scheduler.run(
+                {
+                    "recovery": _recovery_retry(
+                        db_path,
+                        sim_clock,
+                        rng,
+                        trace,
+                        scheduler,
+                        handoff_id,
+                        crashed[0],
+                    )
+                }
+            )
+            recovery = recovered["recovery"]
     finally:
         clock.reset()
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT status, claimed_by FROM pending_handoffs").fetchone()
-    receipts = conn.execute(
+    raced = conn.execute(
         "SELECT COUNT(*) AS n FROM write_conflicts WHERE reason = 'raced_claim'"
+    ).fetchone()["n"]
+    stale = conn.execute(
+        "SELECT COUNT(*) AS n FROM write_conflicts WHERE reason = 'stale_claim'"
     ).fetchone()["n"]
     conn.close()
 
@@ -165,31 +228,43 @@ async def run_receipt_crash(base: Path, seed: int) -> dict[str, Any]:
     assert row["status"] == "active"
     assert row["claimed_by"] == winners[0]
     if fired:
-        # The gap, oracle-detected: a genuine raced loss with zero receipt
-        # rows — the crash discarded the staged INSERT (INV-2 RED).
+        # Post-fix INV-2: the in-flight raced_claim receipt died with the
+        # crashed process (at-most-once residue), but the caller's retry
+        # made the loss durable — exactly one stale_claim receipt,
+        # converged across a double retry.
         assert outcomes.count("crashed") == 1, f"seed {seed}"
-        assert receipts == 0, f"seed {seed}: receipts={receipts}"
+        assert raced == 0, f"seed {seed}: raced={raced}"
+        assert recovery is not None
+        assert recovery["outcomes"] == ["refused", "refused"], f"seed {seed}"
+        assert stale == 1, f"seed {seed}: stale={stale}"
     else:
-        # Fault stayed out of the window: INV-2 exact count must hold.
+        # Fault stayed out of the window: INV-2 exact counts must hold on
+        # both ledgers — one raced_claim per raced loser, one idempotent
+        # stale_claim per pre-check loser.
         assert outcomes.count("crashed") == 0, f"seed {seed}"
-        assert receipts == outcomes.count("lost_receipt"), f"seed {seed}"
+        assert raced == outcomes.count("lost_receipt"), f"seed {seed}"
+        assert stale == outcomes.count("lost_precheck"), f"seed {seed}"
 
     return {
         "outcomes": outcomes,
-        "receipts": receipts,
+        "raced_receipts": raced,
+        "stale_receipts": stale,
         "fired": fired,
         "hash": trace_hash(trace),
     }
 
 
-async def test_receipt_loss_gap_rederived(tmp_path: Path) -> None:
-    """WC-6 acceptance: the pinned seed deterministically reproduces a raced
-    loss with zero receipt rows, crash landed inside the exact window
-    (non-vacuity counter > 0), INV-2 firing at the oracle."""
+async def test_receipt_loss_recovered_after_crash(tmp_path: Path) -> None:
+    """WC-6 flipped green (Phase 3 INV-2 fix): the pinned crash seed lands
+    the fault in the exact window (non-vacuity counter > 0), the in-flight
+    raced_claim receipt dies with the process, and the caller's retry
+    converges the ledger to exactly one durable stale_claim receipt. On
+    pre-fix code the retry leaves zero rows — these assertions go red."""
     outcome = await run_receipt_crash(tmp_path, CRASHING_SEED)
     assert outcome["fired"] >= 1
     assert outcome["outcomes"] == ["crashed", "won"]
-    assert outcome["receipts"] == 0
+    assert outcome["raced_receipts"] == 0
+    assert outcome["stale_receipts"] == 1
 
 
 async def test_fault_lands_in_window_across_sweep(tmp_path: Path) -> None:
@@ -212,4 +287,5 @@ async def test_receipt_crash_replay_is_bit_identical(tmp_path: Path) -> None:
     second = await run_receipt_crash(tmp_path / "b", CRASHING_SEED)
     assert first["hash"] == second["hash"]
     assert first["outcomes"] == second["outcomes"]
-    assert first["receipts"] == second["receipts"]
+    assert first["raced_receipts"] == second["raced_receipts"]
+    assert first["stale_receipts"] == second["stale_receipts"]

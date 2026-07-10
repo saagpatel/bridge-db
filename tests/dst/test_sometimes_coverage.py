@@ -9,6 +9,7 @@ firing seed per label and fails if any corpus-reachable label stays 0.
 Coverage roster (label → cheapest pinned firing run):
 - raced_claim_receipt_written   → claim-race @ RACING_SEED
 - fault_fired_in_receipt_window → receipt-crash @ CRASHING_SEED
+- stale_claim_receipt_written   → receipt-crash @ CRASHING_SEED (recovery arm)
 - legacy_blind_write_accepted   → cas-pingpong warn @ LOST_UPDATE_SEED
 - stale_cas_rejection           → cas-pingpong warn @ seed 0 (CAS loses)
 - missing_cas_rejection         → cas-pingpong enforce @ LOST_UPDATE_SEED
@@ -40,6 +41,7 @@ EXPECTED_LABELS = frozenset(
     {
         "raced_claim_receipt_written",
         "fault_fired_in_receipt_window",
+        "stale_claim_receipt_written",
         "legacy_blind_write_accepted",
         "stale_cas_rejection",
         "missing_cas_rejection",

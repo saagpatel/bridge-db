@@ -10,6 +10,7 @@ from pydantic import Field
 from bridge_db.audit import log_audit
 from bridge_db.auth import clamp_source_trust, get_principal, require_caller
 from bridge_db.db import (
+    find_write_conflict,
     fts_text_for_handoff,
     get_db,
     record_write_conflict,
@@ -192,7 +193,7 @@ def register(mcp: FastMCP) -> None:
 
         db = get_db(ctx)
         cursor = await db.execute(
-            "SELECT id, project_name, status, source_trust, canonical_key "
+            "SELECT id, project_name, status, source_trust, canonical_key, claimed_by "
             "FROM pending_handoffs WHERE id = ?",
             (handoff_id,),
         )
@@ -200,8 +201,50 @@ def register(mcp: FastMCP) -> None:
         if row is None:
             raise ToolError(f"No handoff found with id {handoff_id}")
         if row["status"] != "pending":
+            # INV-2 recovery half: a refused re-attempt is the loser's only
+            # durable trace when its raced_claim receipt died with a crashed
+            # process — record it, idempotently, before raising. The distinct
+            # reason keeps the raced_claim ledger phantom-free: a late or
+            # retried arrival is not itself a race.
+            receipt_id = await find_write_conflict(
+                db,
+                surface="handoff",
+                target_key=str(handoff_id),
+                operation="pick_up_handoff",
+                attempted_by=caller,
+                reason="stale_claim",
+            )
+            if receipt_id is None:
+                receipt_id = await record_write_conflict(
+                    db,
+                    surface="handoff",
+                    target_key=str(handoff_id),
+                    operation="pick_up_handoff",
+                    attempted_by=caller,
+                    principal=get_principal(ctx),
+                    reason="stale_claim",
+                    current_source_trust=row["source_trust"],
+                    detail={
+                        "project_name": row["project_name"],
+                        "current_status": row["status"],
+                        "claimed_by": row["claimed_by"],
+                    },
+                )
+                await db.commit()
+            sometimes("stale_claim_receipt_written")
+            log_audit(
+                "pick_up_handoff",
+                caller,
+                row["project_name"],
+                ok=False,
+                detail=(
+                    f"decision=stale_claim status={row['status']} "
+                    f"receipt_id={receipt_id}"
+                ),
+            )
             raise ToolError(
-                f"Handoff {handoff_id} is not pending (status: {row['status']})"
+                f"Handoff {handoff_id} is not pending (status: {row['status']}). "
+                f"Conflict receipt: {receipt_id}."
             )
 
         trust = row["source_trust"]
@@ -271,7 +314,13 @@ def register(mcp: FastMCP) -> None:
             # of 'pending' between our SELECT above and this UPDATE (the TOCTOU
             # window). The status-guarded UPDATE — not the earlier SELECT — is the
             # real, single-winner claim.
-            await db.rollback()
+            #
+            # INV-2: the receipt stays in the claim attempt's own transaction.
+            # The zero-change UPDATE already holds it open; the re-read and
+            # receipt INSERT stage into it and the single commit below makes
+            # the loss durable atomically. The old rollback→separate-receipt-
+            # commit shape left a two-op crash window that silently dropped
+            # the receipt (DST corpus: receipt-crash seed 11).
             status_cursor = await db.execute(
                 "SELECT status FROM pending_handoffs WHERE id = ?",
                 (handoff_id,),

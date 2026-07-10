@@ -115,6 +115,9 @@ async def run_claim_race(base: Path, seed: int) -> dict[str, Any]:
     receipts = conn.execute(
         "SELECT COUNT(*) AS n FROM write_conflicts WHERE reason = 'raced_claim'"
     ).fetchone()["n"]
+    stale = conn.execute(
+        "SELECT COUNT(*) AS n FROM write_conflicts WHERE reason = 'stale_claim'"
+    ).fetchone()["n"]
     conn.close()
 
     outcomes = sorted(r["outcome"] for r in results.values())
@@ -124,8 +127,10 @@ async def run_claim_race(base: Path, seed: int) -> dict[str, Any]:
     assert row is not None
     assert row["status"] == "active"
     assert row["claimed_by"] == winners[0]
-    # INV-2 exact count: one receipt per loser that took the raced branch.
+    # INV-2 exact counts: one raced_claim per raced-branch loser, one
+    # stale_claim per pre-check loser (Phase 3: no loss path is silent).
     assert receipts == outcomes.count("lost_receipt"), f"seed {seed}"
+    assert stale == outcomes.count("lost_precheck"), f"seed {seed}"
 
     return {"outcomes": outcomes, "receipts": receipts, "hash": trace_hash(trace)}
 

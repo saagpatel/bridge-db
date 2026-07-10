@@ -611,6 +611,34 @@ async def record_write_conflict(
     return int(cursor.lastrowid)
 
 
+async def find_write_conflict(
+    db: aiosqlite.Connection,
+    *,
+    surface: str,
+    target_key: str,
+    operation: str,
+    attempted_by: str | None,
+    reason: str,
+) -> int | None:
+    """Return the id of an existing receipt with this identity, if any.
+
+    The dedupe key for idempotent receipt writes: a retrying caller (the
+    normal recovery path after a crashed attempt) converges to exactly one
+    receipt instead of growing the ledger on every retry.
+    """
+    cursor = await db.execute(
+        """
+        SELECT id FROM write_conflicts
+        WHERE surface = ? AND target_key = ? AND operation = ?
+          AND attempted_by IS ? AND reason = ?
+        ORDER BY id LIMIT 1
+        """,
+        (surface, target_key, operation, attempted_by, reason),
+    )
+    row = await cursor.fetchone()
+    return int(row["id"]) if row is not None else None
+
+
 # ── FTS5 content index helpers ───────────────────────────────────────────────
 # Callers are responsible for committing; these helpers only stage writes so
 # they can be composed with other writes in the same tool transaction.
