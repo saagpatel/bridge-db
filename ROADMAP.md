@@ -4,7 +4,7 @@ This roadmap captures the current scope-closed state of bridge-db. All originall
 
 ## Current Position
 
-- Core MCP server is stable, typed, and test-backed. Schema at v10 (adds FTS5 `content_index`, shipped-event sync receipts/dispositions, project provenance, session-cost attribution, context-section CAS, export-state CAS, and durable write-conflict receipts).
+- Core MCP server is stable, typed, and test-backed. Schema at v13 (adds FTS5 `content_index`, shipped-event sync receipts/dispositions, project provenance, session-cost attribution, context-section CAS, export-state CAS, durable write-conflict receipts, session-cost classification, and `pending_handoffs.claimed_by`) — see CLAUDE.md's Architecture section for the full per-version history.
 - SQLite schema and migration path are in place; step-wise migrations proven through v1→current.
 - MCP tools across 10 modules: activity, handoffs, context, snapshots, cost, export, health, recall, audit, conflicts. Verify the current decorator count with `rg '@mcp\.tool' src/bridge_db -c`.
 - Markdown export works as a compatibility layer for file-based clients.
