@@ -619,6 +619,30 @@ async def test_export_renders_pinned_ledger_section(
     assert "durable milestone" in md
 
 
+async def test_export_pinned_ledger_caps_cross_source_rows_newest_first(
+    db: aiosqlite.Connection, all_fns: dict[str, Any]
+) -> None:
+    for index in range(16):
+        await insert_activity_row(
+            db,
+            source="cc" if index % 2 == 0 else "codex",
+            timestamp=f"2026-01-{index + 1:02d}",
+            project_name=f"project-{index % 3}",
+            summary=f"pinned ledger {index:02d}",
+            tags=["SHIPPED" if index % 2 == 0 else "LEDGER"],
+        )
+    await db.commit()
+
+    md = await _build_markdown(db)
+    pinned_section = md.split("## Pinned Ledger\n", 1)[1]
+    pinned_lines = [line for line in pinned_section.splitlines() if "pinned ledger" in line]
+
+    assert len(pinned_lines) == 15
+    assert "pinned ledger 00" not in pinned_section
+    assert "pinned ledger 15" in pinned_lines[0]
+    assert "pinned ledger 01" in pinned_lines[-1]
+
+
 async def test_export_omits_pinned_ledger_when_empty(
     db: aiosqlite.Connection, all_fns: dict[str, Any]
 ) -> None:

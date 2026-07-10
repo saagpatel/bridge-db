@@ -175,9 +175,11 @@ async def build_markdown(db: Any) -> str:
     else:
         cc_snapshot_md = "## Claude Code State Snapshot\n_No snapshot yet._\n"
 
-    def _render_activity_rows(rows: list[Any]) -> list[str]:
+    def _render_activity_rows(
+        rows: list[Any], *, newest_first: bool = False
+    ) -> list[str]:
         lines: list[str] = []
-        for r in reversed(rows):
+        for r in rows if newest_first else reversed(rows):
             tags: list[str] = json.loads(r["tags"])
             tag_str = f" [{']['.join(tags)}]" if tags else ""
             branch_str = f" ({r['branch']})" if r["branch"] else ""
@@ -255,7 +257,9 @@ async def build_markdown(db: Any) -> str:
     ledger_md = ""
     if ledger_rows:
         ledger_md = (
-            "## Pinned Ledger\n" + "\n".join(_render_activity_rows(ledger_rows)) + "\n"
+            "## Pinned Ledger\n"
+            + "\n".join(_render_activity_rows(ledger_rows, newest_first=True))
+            + "\n"
         )
 
     # --- Pending Handoffs ---

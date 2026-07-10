@@ -441,7 +441,9 @@ CREATE INDEX IF NOT EXISTS idx_scl_routing ON session_classification(routing_bas
 
 # Migration v12 → v13: add claimed_by to pending_handoffs so INV-13's
 # handoff-claimant fix has a durable column to record against.
-_MIGRATION_V12_TO_V13 = "ALTER TABLE pending_handoffs ADD COLUMN claimed_by TEXT;\n"
+_MIGRATION_V12_TO_V13 = """
+ALTER TABLE pending_handoffs ADD COLUMN claimed_by TEXT;
+"""
 
 
 async def apply_pragmas(db: aiosqlite.Connection) -> None:

@@ -252,7 +252,9 @@ def register(mcp: FastMCP) -> None:
 
         Retention (BD-INV-1): unprotected entries auto-prune to the most recent
         50 per source; entries tagged SHIPPED or LEDGER (case-insensitive) are
-        NEVER pruned. Every prune emits a `log_activity.prune` audit line.
+        NEVER pruned. Case-insensitivity applies only to retention protection;
+        the shipped-sync feed and health nags match exact-case SHIPPED. Every
+        prune emits a `log_activity.prune` audit line.
 
         Tag conventions (tags are indexed in content_index, so they are recall-able):
         - SHIPPED: a feature/artifact reached a durable, usable state. Requires an
@@ -287,9 +289,13 @@ def register(mcp: FastMCP) -> None:
         log_audit("log_activity", caller, project_name, ok=True)
         if insert_result.pruned_rows:
             pruned_ids = [row_id for row_id, _ in insert_result.pruned_rows]
-            pruned_tags = sorted(
-                {tag for _, raw in insert_result.pruned_rows for tag in json.loads(raw)}
-            )
+            pruned_tag_set: set[str] = set()
+            for _, raw in insert_result.pruned_rows:
+                try:
+                    pruned_tag_set.update(json.loads(raw))
+                except json.JSONDecodeError:
+                    logger.warning("could not decode tags for pruned activity row")
+            pruned_tags = sorted(pruned_tag_set)
             log_audit(
                 "log_activity.prune",
                 caller,
