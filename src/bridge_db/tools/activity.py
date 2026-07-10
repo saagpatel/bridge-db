@@ -226,9 +226,13 @@ def register(mcp: FastMCP) -> None:
             list[str] | None,
             Field(
                 description=(
-                    "Optional tags (indexed for recall). Vocabulary: SHIPPED, HYGIENE, "
-                    "RESEARCH, MAINTENANCE; DECISION for an architectural rationale/ADR; "
-                    "PROJECT_IDEA for a newly-explored concept."
+                    "Optional tags (indexed for recall). SHIPPED = durable ship "
+                    "event, syncs to the Notion Build Log and is retention-"
+                    "protected. LEDGER = durable catch-up entry ('what happened "
+                    "/ what it does / what it points to'), retention-protected, "
+                    "pinned by get_activity_signal. Both match case-"
+                    "insensitively. Other tags are free-form and searchable but "
+                    "NOT retention-protected."
                 )
             ),
         ] = None,
@@ -244,15 +248,20 @@ def register(mcp: FastMCP) -> None:
         ] = "agent",
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
-        """Log a session activity entry. Auto-prunes to the most recent 50 entries per source.
+        """Log a session activity entry.
+
+        Retention (BD-INV-1): unprotected entries auto-prune to the most recent
+        50 per source; entries tagged SHIPPED or LEDGER (case-insensitive) are
+        NEVER pruned. Every prune emits a `log_activity.prune` audit line.
 
         Tag conventions (tags are indexed in content_index, so they are recall-able):
-        - SHIPPED / HYGIENE / RESEARCH / MAINTENANCE: standard activity classes.
-        - DECISION: attach to an entry whose summary records an architectural choice
-          and its rationale (an ADR-lite), so the "why" stays retrievable later
-          instead of living only in a chat that was never logged.
-        - PROJECT_IDEA: attach when a new project concept is first explored, so the
-          idea is captured at the source rather than surfacing later as a recall miss.
+        - SHIPPED: a feature/artifact reached a durable, usable state. Requires an
+          eventual confirm_shipped_sync receipt or record_shipped_event_disposition —
+          unsynced SHIPPED rows nag in health until terminally resolved.
+        - LEDGER: a durable operator-facing record for the next agent's catch-up.
+          Attach when the operator says "log this to BridgeDB" or the entry should
+          outlive the rolling window.
+        - Anything else: free-form, searchable, prunable.
         """
         require_caller(ctx, caller, tool="log_activity")
         source_trust, source_trust_clamped = clamp_source_trust(
