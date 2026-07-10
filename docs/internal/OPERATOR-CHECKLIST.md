@@ -196,11 +196,16 @@ Manual equivalent:
 
 ## Retention And Receipts
 
-Activity retention and shipped-sync receipts answer different questions:
+Activity retention is two-tier as of BD-INV-1 (shipped 2026-07-10 — see
+`docs/internal/ACTIVITY-LEDGER-DISCOVERY-2026-07-09.md` for the discovery audit
+that motivated it):
 
-- `activity_log` keeps the latest 50 rows per source for ordinary activity
-  writes. This is a convenience retention policy for recent context, not a
-  proof ledger.
+- `activity_log` keeps the latest 50 rows per source for **unprotected**
+  activity writes — a convenience retention policy for recent context. Rows
+  tagged `SHIPPED` or `LEDGER` (case-insensitive) are permanently retained:
+  **BD-INV-1: retention never deletes a protected row, its receipt, or its
+  disposition.** Protected rows ARE a durable proof ledger, not just recent
+  context.
 - `activity_log.timestamp` is the caller's logical activity date or timestamp,
   while `activity_log.created_at` is the UTC insertion timestamp. Activity
   `since` filters match either field so closeouts inserted just after UTC
@@ -209,7 +214,18 @@ Activity retention and shipped-sync receipts answer different questions:
 - `system_snapshots` keeps the latest 10 rows per system family; Codex
   operating snapshots and consulted-node snapshots are retained independently.
 - `shipped_sync_receipts` is the downstream proof ledger for shipped events that
-  were confirmed through `confirm_shipped_sync`.
+  were confirmed through `confirm_shipped_sync`. It (and
+  `shipped_event_dispositions`) still declare `ON DELETE CASCADE` against
+  `activity_log(id)` — that FK is intentionally untouched. Once its parent
+  `SHIPPED` row is retention-protected, the row can never prune, so the cascade
+  can never fire in practice. **This is by design** — the fix was protecting
+  the parent row, not rewiring the child; do not "fix" the FK separately if you
+  see it during a review.
+- `health` and `--dogfood` add `ledger_protected_count` (current protected-row
+  count), `receipt_orphan_count`, and `disposition_orphan_count`. The orphan
+  counts should always read `0`; a nonzero value means a protected row was
+  deleted anyway and BD-INV-1 was violated. Every prune also emits a
+  `log_activity.prune` audit line naming the deleted ids and tags.
 - Claude Code SessionEnd logging uses `--log-session-boundary`; that path adds
   an FTS row and intentionally does not run activity retention pruning.
 - If activity counts move, verify health through `--status`, `--dogfood`,

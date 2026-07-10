@@ -144,6 +144,13 @@ counts and first/last timestamps. This is a read-side signal policy only: it
 does not delete activity rows, alter audit history, or change shipped/handoff
 semantics.
 
+Rows tagged `SHIPPED` or `LEDGER` (case-insensitive) are retention-exempt —
+BD-INV-1: retention never deletes a protected row, its receipt, or its
+disposition. `get_activity_signal` surfaces protected rows as `kind:"ledger"`
+entries alongside the substantive/aggregate rows, and `export_bridge_markdown`
+renders a `## Pinned Ledger` section covering protected rows across all
+sources.
+
 Activity entries carry both `timestamp` and `created_at`. `timestamp` is the
 caller-supplied logical activity date or timestamp; `created_at` is the UTC
 insertion timestamp. For `since` filters on activity reads, bridge-db matches
@@ -151,7 +158,13 @@ either field, so `since="YYYY-MM-DD"` includes rows inserted on that UTC date
 even when the logical activity date is the previous operator-local day.
 
 `record_shipped_event_disposition` is for non-receipt decisions only. It does
-not add `PROCESSED` and does not write to `shipped_sync_receipts`.
+not add `PROCESSED` and does not write to `shipped_sync_receipts`. Dispositioned
+rows no longer re-appear on repeat sync runs: `get_shipped_events(unprocessed_only=True)`
+now excludes both `PROCESSED` rows and rows carrying a disposition.
+
+`get_shipped_events` also takes a `limit` param (default 200, max 1000, newest
+first) alongside `since` and `unprocessed_only`, so a client passing its own
+`limit` is now honored instead of silently ignored.
 
 `mark_shipped_processed` remains a compatibility path only for non-shipped
 operational rows. It refuses `SHIPPED` activity ids before updating anything.

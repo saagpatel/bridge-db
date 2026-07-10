@@ -1,6 +1,7 @@
 """Tests for activity log tools."""
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,9 @@ def fns(db: aiosqlite.Connection) -> dict[str, Any]:
     return cap.fns
 
 
-async def test_log_activity_inserts_row(db: aiosqlite.Connection, fns: dict[str, Any]) -> None:
+async def test_log_activity_inserts_row(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
     ctx = make_ctx(db)
     result = await fns["log_activity"](
         caller="cc",
@@ -49,22 +52,32 @@ async def test_log_activity_persists_and_echoes_source_trust(
     asserted = await fns["log_activity"](
         caller="cc", project_name="A", summary="s", source_trust="operator", ctx=ctx
     )
-    defaulted = await fns["log_activity"](caller="cc", project_name="B", summary="s", ctx=ctx)
+    defaulted = await fns["log_activity"](
+        caller="cc", project_name="B", summary="s", ctx=ctx
+    )
 
     assert asserted["source_trust"] == "operator"
     assert defaulted["source_trust"] == "agent"
 
-    cursor = await db.execute("SELECT project_name, source_trust FROM activity_log ORDER BY id")
+    cursor = await db.execute(
+        "SELECT project_name, source_trust FROM activity_log ORDER BY id"
+    )
     rows: list[aiosqlite.Row] = await cursor.fetchall()  # type: ignore[assignment]
     trust = {r["project_name"]: r["source_trust"] for r in rows}
     assert trust["A"] == "operator"
     assert trust["B"] == "agent"
 
 
-async def test_insert_activity_row_defaults_source_trust_agent(db: aiosqlite.Connection) -> None:
+async def test_insert_activity_row_defaults_source_trust_agent(
+    db: aiosqlite.Connection,
+) -> None:
     """The shared helper (used by the --log-session-boundary hook) defaults to 'agent'."""
     await insert_activity_row(
-        db, source="cc", timestamp="2026-06-10", project_name="boundary", summary="session end"
+        db,
+        source="cc",
+        timestamp="2026-06-10",
+        project_name="boundary",
+        summary="session end",
     )
     await db.commit()
     cursor = await db.execute(
@@ -155,7 +168,9 @@ async def test_get_recent_activity_since_includes_recently_created_prior_date(
     )
     await db.commit()
 
-    recent = await fns["get_recent_activity"](source="codex", since="2026-06-21", ctx=ctx)
+    recent = await fns["get_recent_activity"](
+        source="codex", since="2026-06-21", ctx=ctx
+    )
 
     assert [entry["project_name"] for entry in recent] == ["MidnightCloseout"]
     assert recent[0]["timestamp"] == "2026-06-20"
@@ -167,10 +182,18 @@ async def test_get_recent_activity_breaks_created_at_ties_by_id(
 ) -> None:
     ctx = make_ctx(db)
     await fns["log_activity"](
-        caller="cc", project_name="OldTie", summary="first", timestamp="2026-04-01", ctx=ctx
+        caller="cc",
+        project_name="OldTie",
+        summary="first",
+        timestamp="2026-04-01",
+        ctx=ctx,
     )
     await fns["log_activity"](
-        caller="cc", project_name="NewTie", summary="second", timestamp="2026-04-01", ctx=ctx
+        caller="cc",
+        project_name="NewTie",
+        summary="second",
+        timestamp="2026-04-01",
+        ctx=ctx,
     )
     await db.execute(
         "UPDATE activity_log SET created_at = '2026-04-01T00:00:00Z' WHERE source = 'cc'"
@@ -298,7 +321,8 @@ async def test_get_activity_signal_reserves_substantive_row_when_lifecycle_bucke
     assert len(signal) == 20
     assert sum(1 for entry in signal if entry["kind"] == "lifecycle_aggregate") == 19
     assert any(
-        entry["kind"] == "activity" and entry["project_name"] == "evals" for entry in signal
+        entry["kind"] == "activity" and entry["project_name"] == "evals"
+        for entry in signal
     )
 
 
@@ -372,7 +396,9 @@ async def test_get_activity_signal_since_includes_recently_created_prior_date(
     )
     await db.commit()
 
-    signal = await fns["get_activity_signal"](source="codex", since="2026-06-21", ctx=ctx)
+    signal = await fns["get_activity_signal"](
+        source="codex", since="2026-06-21", ctx=ctx
+    )
 
     assert len(signal) == 1
     assert signal[0]["kind"] == "activity"
@@ -404,12 +430,91 @@ async def test_get_activity_signal_does_not_mutate_fts_or_audit(
     assert not config.AUDIT_LOG_PATH.exists()
 
 
-async def test_get_shipped_events(db: aiosqlite.Connection, fns: dict[str, Any]) -> None:
+async def test_signal_pins_protected_rows_beyond_window(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="cc",
+        project_name="p",
+        summary="durable milestone",
+        tags=["SHIPPED"],
+        timestamp="2026-01-01",
+        ctx=ctx,
+    )
+    for i in range(config.ACTIVITY_RETENTION_PER_SOURCE + 10):
+        await fns["log_activity"](
+            caller="cc",
+            project_name="p",
+            summary=f"noise {i}",
+            timestamp="2026-01-02",
+            ctx=ctx,
+        )
+
+    signal = await fns["get_activity_signal"](limit=5, ctx=ctx)
+    ledger = [e for e in signal if e["kind"] == "ledger"]
+    assert len(ledger) == 1
+    assert ledger[0]["summary"] == "durable milestone"
+    assert len([e for e in signal if e["kind"] != "ledger"]) <= 5
+
+
+async def test_signal_ledger_dedupes_recent_protected(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="cc", project_name="p", summary="fresh ship", tags=["SHIPPED"], ctx=ctx
+    )
+    signal = await fns["get_activity_signal"](limit=10, ctx=ctx)
+    matches = [e for e in signal if e["summary"] == "fresh ship"]
+    assert len(matches) == 1
+    assert matches[0]["kind"] == "ledger"
+
+
+async def test_signal_stays_flat_list(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    signal: list[dict[str, Any]] = await fns["get_activity_signal"](ctx=make_ctx(db))
+    assert isinstance(signal, list)
+    assert all(isinstance(e, dict) and "kind" in e for e in signal)
+
+
+async def test_signal_substantive_window_backfills_around_pins(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    for i in range(8):
+        await fns["log_activity"](
+            caller="cc",
+            project_name="p",
+            summary=f"plain {i}",
+            timestamp="2026-01-01",
+            ctx=ctx,
+        )
+    for i in range(3):
+        await fns["log_activity"](
+            caller="cc",
+            project_name="p",
+            summary=f"ship {i}",
+            tags=["SHIPPED"],
+            timestamp="2026-01-02",
+            ctx=ctx,
+        )
+    signal = await fns["get_activity_signal"](limit=5, ctx=ctx)
+    assert len([e for e in signal if e["kind"] == "ledger"]) == 3
+    assert len([e for e in signal if e["kind"] == "activity"]) == 5  # backfilled, not 2
+
+
+async def test_get_shipped_events(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
     ctx = make_ctx(db)
     await fns["log_activity"](
         caller="cc", project_name="A", summary="shipped", tags=["SHIPPED"], ctx=ctx
     )
-    await fns["log_activity"](caller="cc", project_name="B", summary="not shipped", ctx=ctx)
+    await fns["log_activity"](
+        caller="cc", project_name="B", summary="not shipped", ctx=ctx
+    )
 
     shipped = await fns["get_shipped_events"](ctx=ctx)
     assert len(shipped) == 1
@@ -448,9 +553,15 @@ async def test_get_shipped_events_unprocessed_only(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
     ctx = make_ctx(db)
-    await fns["log_activity"](caller="cc", project_name="A", summary="s", tags=["SHIPPED"], ctx=ctx)
     await fns["log_activity"](
-        caller="cc", project_name="B", summary="s", tags=["SHIPPED", "PROCESSED"], ctx=ctx
+        caller="cc", project_name="A", summary="s", tags=["SHIPPED"], ctx=ctx
+    )
+    await fns["log_activity"](
+        caller="cc",
+        project_name="B",
+        summary="s",
+        tags=["SHIPPED", "PROCESSED"],
+        ctx=ctx,
     )
 
     unprocessed = await fns["get_shipped_events"](unprocessed_only=True, ctx=ctx)
@@ -497,7 +608,11 @@ async def test_get_shipped_events_includes_notion_sync_contract(
 
     ctx = make_ctx(db)
     await fns["log_activity"](
-        caller="cc", project_name="ready-project", summary="s", tags=["SHIPPED"], ctx=ctx
+        caller="cc",
+        project_name="ready-project",
+        summary="s",
+        tags=["SHIPPED"],
+        ctx=ctx,
     )
     await fns["log_activity"](
         caller="cc",
@@ -507,7 +622,11 @@ async def test_get_shipped_events_includes_notion_sync_contract(
         ctx=ctx,
     )
     await fns["log_activity"](
-        caller="cc", project_name="missing-project", summary="s", tags=["SHIPPED"], ctx=ctx
+        caller="cc",
+        project_name="missing-project",
+        summary="s",
+        tags=["SHIPPED"],
+        ctx=ctx,
     )
 
     shipped = await fns["get_shipped_events"](ctx=ctx)
@@ -533,7 +652,9 @@ async def test_get_shipped_events_marks_policy_backed_meta_events(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = tmp_path / "project-registry.json"
-    registry.write_text(json.dumps({"entries": [], "resolution_overrides": {}}), encoding="utf-8")
+    registry.write_text(
+        json.dumps({"entries": [], "resolution_overrides": {}}), encoding="utf-8"
+    )
     policy = tmp_path / "meta-shipped-events.json"
     policy.write_text(
         json.dumps(
@@ -560,7 +681,11 @@ async def test_get_shipped_events_marks_policy_backed_meta_events(
         ctx=ctx,
     )
     await fns["log_activity"](
-        caller="cc", project_name="missing-project", summary="s", tags=["SHIPPED"], ctx=ctx
+        caller="cc",
+        project_name="missing-project",
+        summary="s",
+        tags=["SHIPPED"],
+        ctx=ctx,
     )
 
     shipped = await fns["get_shipped_events"](ctx=ctx)
@@ -619,8 +744,14 @@ async def test_record_shipped_event_disposition_is_non_receipt(
     assert disposition is not None
     assert json.loads(disposition["tags"]) == ["SHIPPED"]
     assert disposition["disposition_type"] == "unsynced_by_policy"
-    assert disposition["policy_ref"] == "/home/user/Documents/Codex/operating-system-audits/example.md"
-    assert disposition["reason"] == "experimental local artifact with no durable downstream target"
+    assert (
+        disposition["policy_ref"]
+        == "/home/user/Documents/Codex/operating-system-audits/example.md"
+    )
+    assert (
+        disposition["reason"]
+        == "experimental local artifact with no durable downstream target"
+    )
     assert disposition["decided_by"] == "codex"
     assert disposition["notes"] == "leave pending without receipt"
 
@@ -643,7 +774,11 @@ async def test_record_shipped_event_disposition_rejects_receipted_event(
 ) -> None:
     ctx = make_ctx(db)
     await fns["log_activity"](
-        caller="cc", project_name="personal-ops", summary="merged", tags=["SHIPPED"], ctx=ctx
+        caller="cc",
+        project_name="personal-ops",
+        summary="merged",
+        tags=["SHIPPED"],
+        ctx=ctx,
     )
     cursor = await db.execute("SELECT id FROM activity_log")
     row = await cursor.fetchone()
@@ -696,14 +831,19 @@ async def test_mark_shipped_processed_idempotent(
     assert result2["updated_ids"] == []
     assert result2["missing_ids"] == []
 
-    cursor2 = await db.execute("SELECT tags FROM activity_log WHERE id = ?", (activity_id,))
+    cursor2 = await db.execute(
+        "SELECT tags FROM activity_log WHERE id = ?", (activity_id,)
+    )
     row2 = await cursor2.fetchone()
     assert row2 is not None
     assert json.loads(row2["tags"]).count("PROCESSED") == 1
 
 
 async def test_mark_shipped_processed_audit_names_activity_ids(
-    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Compatibility processing audit rows should be enough to review what was touched."""
     audit_path = tmp_path / "audit.jsonl"
@@ -720,7 +860,9 @@ async def test_mark_shipped_processed_audit_names_activity_ids(
     activity_id = row["id"]
     missing_id = activity_id + 999
 
-    result = await fns["mark_shipped_processed"](activity_ids=[activity_id, missing_id], ctx=ctx)
+    result = await fns["mark_shipped_processed"](
+        activity_ids=[activity_id, missing_id], ctx=ctx
+    )
 
     assert result["updated"] == 1
     assert result["activity_ids"] == [activity_id, missing_id]
@@ -743,7 +885,10 @@ async def test_mark_shipped_processed_empty_raises(
 
 
 async def test_mark_shipped_processed_rejects_shipped_rows(
-    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """F7: SHIPPED rows require proof or disposition, while non-shipped operational
     events still pass through the compatibility path."""
@@ -754,7 +899,11 @@ async def test_mark_shipped_processed_rejects_shipped_rows(
 
     # operational (non-shipped) event — legitimate use, no receipt lifecycle
     await fns["log_activity"](
-        caller="personal_ops", project_name="Ops", summary="s", tags=["TASK_DONE"], ctx=ctx
+        caller="personal_ops",
+        project_name="Ops",
+        summary="s",
+        tags=["TASK_DONE"],
+        ctx=ctx,
     )
     # genuine shipped artifact — should go through confirm_shipped_sync instead
     await fns["log_activity"](
@@ -775,7 +924,9 @@ async def test_mark_shipped_processed_rejects_shipped_rows(
     assert last["ok"] is False
     assert f"blocked_shipped_ids=[{shipped_id}]" in last["detail"]
 
-    cursor2 = await db.execute("SELECT tags FROM activity_log WHERE id = ?", (shipped_id,))
+    cursor2 = await db.execute(
+        "SELECT tags FROM activity_log WHERE id = ?", (shipped_id,)
+    )
     row2 = await cursor2.fetchone()
     assert row2 is not None
     assert "PROCESSED" not in json.loads(row2["tags"])
@@ -786,7 +937,11 @@ async def test_mark_shipped_processed_refuses_mixed_batch_with_shipped_id(
 ) -> None:
     ctx = make_ctx(db)
     await fns["log_activity"](
-        caller="personal_ops", project_name="Ops", summary="done", tags=["TASK_DONE"], ctx=ctx
+        caller="personal_ops",
+        project_name="Ops",
+        summary="done",
+        tags=["TASK_DONE"],
+        ctx=ctx,
     )
     await fns["log_activity"](
         caller="cc", project_name="Ship", summary="shipped", tags=["SHIPPED"], ctx=ctx
@@ -809,7 +964,9 @@ async def test_confirm_shipped_sync_requires_downstream_proof(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
     ctx = make_ctx(db)
-    await fns["log_activity"](caller="cc", project_name="A", summary="s", tags=["SHIPPED"], ctx=ctx)
+    await fns["log_activity"](
+        caller="cc", project_name="A", summary="s", tags=["SHIPPED"], ctx=ctx
+    )
     cursor = await db.execute("SELECT id FROM activity_log")
     row = await cursor.fetchone()
     assert row is not None
@@ -844,7 +1001,10 @@ async def test_confirm_shipped_sync_rejects_non_shipped_event(
 
 
 async def test_confirm_shipped_sync_records_receipt_and_marks_processed(
-    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bridge_path = tmp_path / "bridge.md"
     monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge_path)
@@ -893,12 +1053,17 @@ async def test_confirm_shipped_sync_records_receipt_and_marks_processed(
     assert receipt["notes"] == "Updated personal-ops portfolio row"
 
     shipped = await fns["get_shipped_events"](ctx=ctx)
-    assert shipped[0]["sync_receipt"]["downstream_ref"] == ("35bc21f1-caf0-81cb-9426-dd264ef668b2")
+    assert shipped[0]["sync_receipt"]["downstream_ref"] == (
+        "35bc21f1-caf0-81cb-9426-dd264ef668b2"
+    )
     assert bridge_path.exists()
 
 
 async def test_confirm_shipped_sync_auto_export_records_context_export_state(
-    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(config, "BRIDGE_FILE_PATH", tmp_path / "bridge.md")
     await db.execute(
@@ -944,7 +1109,9 @@ async def test_confirm_shipped_sync_is_idempotent_and_can_refresh_receipt(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
     ctx = make_ctx(db)
-    await fns["log_activity"](caller="cc", project_name="A", summary="s", tags=["SHIPPED"], ctx=ctx)
+    await fns["log_activity"](
+        caller="cc", project_name="A", summary="s", tags=["SHIPPED"], ctx=ctx
+    )
     cursor = await db.execute("SELECT id FROM activity_log")
     row = await cursor.fetchone()
     assert row is not None
@@ -985,7 +1152,9 @@ async def test_log_activity_prunes_to_retention_limit(
     ctx = make_ctx(db)
     limit = config.ACTIVITY_RETENTION_PER_SOURCE
     for i in range(limit + 5):
-        await fns["log_activity"](caller="cc", project_name=f"P{i}", summary="s", ctx=ctx)
+        await fns["log_activity"](
+            caller="cc", project_name=f"P{i}", summary="s", ctx=ctx
+        )
 
     cursor = await db.execute("SELECT COUNT(*) FROM activity_log WHERE source = 'cc'")
     row = await cursor.fetchone()
@@ -1023,12 +1192,169 @@ async def test_log_activity_retention_keeps_highest_ids_when_created_at_ties(
     )
     await db.commit()
 
-    cursor = await db.execute("SELECT id FROM activity_log WHERE source = 'cc' ORDER BY id")
+    cursor = await db.execute(
+        "SELECT id FROM activity_log WHERE source = 'cc' ORDER BY id"
+    )
     rows = await cursor.fetchall()
     assert [row["id"] for row in rows] == list(range(6, 56))
 
     metrics = await collect_fts_index_metrics(db)
     assert metrics["ok"] is True
+
+
+async def test_protected_rows_survive_retention_prune(db: aiosqlite.Connection) -> None:
+    limit = config.ACTIVITY_RETENTION_PER_SOURCE
+    await insert_activity_row(
+        db,
+        source="cc",
+        timestamp="2026-01-01",
+        project_name="p",
+        summary="shipped thing",
+        tags=["SHIPPED"],
+        retention_limit=limit,
+    )
+    for i in range(limit + 10):
+        await insert_activity_row(
+            db,
+            source="cc",
+            timestamp="2026-01-02",
+            project_name="p",
+            summary=f"noise {i}",
+            retention_limit=limit,
+        )
+    await db.commit()
+
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM activity_log WHERE source='cc' "
+        "AND EXISTS (SELECT 1 FROM json_each(tags) WHERE upper(value)='SHIPPED')"
+    )
+    row = await cursor.fetchone()
+    assert row is not None and row[0] == 1  # survived past the cap
+
+    cursor = await db.execute("SELECT COUNT(*) FROM activity_log WHERE source='cc'")
+    row = await cursor.fetchone()
+    assert row is not None and row[0] == limit + 1  # newest-50 ∪ protected
+
+
+async def test_protected_tag_match_is_case_insensitive(
+    db: aiosqlite.Connection,
+) -> None:
+    limit = config.ACTIVITY_RETENTION_PER_SOURCE
+    await insert_activity_row(
+        db,
+        source="cc",
+        timestamp="2026-01-01",
+        project_name="p",
+        summary="lowercase ledger",
+        tags=["ledger"],
+        retention_limit=limit,
+    )
+    for i in range(limit + 5):
+        await insert_activity_row(
+            db,
+            source="cc",
+            timestamp="2026-01-02",
+            project_name="p",
+            summary=f"noise {i}",
+            retention_limit=limit,
+        )
+    await db.commit()
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM activity_log WHERE source='cc' "
+        "AND EXISTS (SELECT 1 FROM json_each(tags) WHERE upper(value)='LEDGER')"
+    )
+    row = await cursor.fetchone()
+    assert row is not None and row[0] == 1
+
+
+async def test_protected_rows_keep_fts_mirror(db: aiosqlite.Connection) -> None:
+    limit = config.ACTIVITY_RETENTION_PER_SOURCE
+    result = await insert_activity_row(
+        db,
+        source="cc",
+        timestamp="2026-01-01",
+        project_name="p",
+        summary="durable entry",
+        tags=["LEDGER"],
+        retention_limit=limit,
+    )
+    for i in range(limit + 5):
+        await insert_activity_row(
+            db,
+            source="cc",
+            timestamp="2026-01-02",
+            project_name="p",
+            summary=f"noise {i}",
+            retention_limit=limit,
+        )
+    await db.commit()
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM content_index WHERE source_type='activity' AND source_id=?",
+        (str(result.activity_id),),
+    )
+    row = await cursor.fetchone()
+    assert row is not None and row[0] == 1
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM content_index WHERE source_type='activity'"
+    )
+    fts_row = await cursor.fetchone()
+    cursor = await db.execute("SELECT COUNT(*) FROM activity_log")
+    base_row = await cursor.fetchone()
+    assert fts_row is not None and base_row is not None and fts_row[0] == base_row[0]
+
+
+async def test_prune_returns_pruned_rows(db: aiosqlite.Connection) -> None:
+    limit = config.ACTIVITY_RETENTION_PER_SOURCE
+    for i in range(limit):
+        await insert_activity_row(
+            db,
+            source="cc",
+            timestamp="2026-01-01",
+            project_name="p",
+            summary=f"row {i}",
+            retention_limit=limit,
+        )
+    result = await insert_activity_row(
+        db,
+        source="cc",
+        timestamp="2026-01-02",
+        project_name="p",
+        summary="the 51st",
+        retention_limit=limit,
+    )
+    await db.commit()
+    assert len(result.pruned_rows) == 1
+    pruned_id, pruned_tags = result.pruned_rows[0]
+    assert isinstance(pruned_id, int) and pruned_tags == "[]"
+
+
+async def test_prune_emits_audit_line(
+    db: aiosqlite.Connection, fns: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, str | None]] = []
+
+    def fake_log_audit(
+        tool: str, caller: str, project: str, ok: bool = True, detail: str | None = None
+    ) -> None:
+        calls.append((tool, detail))
+
+    monkeypatch.setattr(mod, "log_audit", fake_log_audit)
+    ctx = make_ctx(db)
+    for i in range(config.ACTIVITY_RETENTION_PER_SOURCE + 1):
+        await fns["log_activity"](
+            caller="cc", project_name="p", summary=f"row {i}", ctx=ctx
+        )
+
+    prune_calls = [c for c in calls if c[0] == "log_activity.prune"]
+    assert len(prune_calls) == 1  # only the 51st insert pruned anything
+    detail = prune_calls[0][1]
+    assert detail is not None
+    assert (
+        "pruned=1" in detail
+        and "ids_head=" in detail
+        and "tags=" in detail
+        and "source=cc" in detail
+    )
 
 
 async def test_log_activity_accepts_notion_os(
@@ -1108,7 +1434,10 @@ async def test_log_activity_warn_allows_mismatch(
 
 
 async def test_mark_shipped_processed_triggers_auto_export(
-    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """After mark_shipped_processed, the bridge markdown file should be written."""
     bridge_path = tmp_path / "bridge.md"
@@ -1159,3 +1488,82 @@ async def test_log_activity_clamps_operator_label_in_db(
     row = await cursor.fetchone()
     assert row is not None
     assert row["source_trust"] == "agent"
+
+
+async def test_unprocessed_only_excludes_dispositioned_rows(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="cc", project_name="A", summary="shipped", tags=["SHIPPED"], ctx=ctx
+    )
+    cursor = await db.execute("SELECT id FROM activity_log")
+    row = await cursor.fetchone()
+    assert row is not None
+    await db.execute(
+        """
+        INSERT INTO shipped_event_dispositions (
+            activity_id, disposition_type, reason, decided_by
+        )
+        VALUES (?, 'unsynced_by_policy', 'experimental artifact', 'codex')
+        """,
+        (row["id"],),
+    )
+    await db.commit()
+
+    unprocessed = await fns["get_shipped_events"](unprocessed_only=True, ctx=ctx)
+    assert unprocessed == []
+
+    everything = await fns["get_shipped_events"](ctx=ctx)
+    assert len(everything) == 1
+    assert (
+        everything[0]["policy_disposition"]["disposition_type"] == "unsynced_by_policy"
+    )
+
+
+async def test_get_shipped_events_honors_limit(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    for i in range(5):
+        await fns["log_activity"](
+            caller="cc",
+            project_name=f"p{i}",
+            summary=f"ship {i}",
+            tags=["SHIPPED"],
+            timestamp=f"2026-07-0{i + 1}",
+            ctx=ctx,
+        )
+    limited = await fns["get_shipped_events"](limit=2, ctx=ctx)
+    assert len(limited) == 2
+    assert limited[0]["project_name"] == "p4"  # newest first
+
+
+def test_meta_policy_cache_is_mtime_keyed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy_path = tmp_path / "meta-shipped-events.json"
+    policy_path.write_text(
+        json.dumps({"projects": {"proj": {"reason": "first"}}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(config, "META_SHIPPED_EVENTS_PATH", policy_path)
+    monkeypatch.setattr(mod, "_META_POLICY_CACHE", None)  # reset the module global
+
+    first = mod._load_meta_shipped_event_policy("proj")  # pyright: ignore[reportPrivateUsage]
+    assert first is not None and first["reason"] == "first"
+
+    # Overwrite content but pin mtime — the cache must serve the old value.
+    stat = policy_path.stat()
+    policy_path.write_text(
+        json.dumps({"projects": {"proj": {"reason": "second"}}}), encoding="utf-8"
+    )
+    os.utime(policy_path, (stat.st_atime, stat.st_mtime))
+    cached = mod._load_meta_shipped_event_policy("proj")  # pyright: ignore[reportPrivateUsage]
+    assert cached is not None and cached["reason"] == "first"
+
+    # Bump mtime — the cache must refresh.
+    os.utime(policy_path, (stat.st_atime, stat.st_mtime + 10))
+    refreshed = mod._load_meta_shipped_event_policy(  # pyright: ignore[reportPrivateUsage]
+        "proj"
+    )
+    assert refreshed is not None and refreshed["reason"] == "second"

@@ -38,7 +38,9 @@ async def test_schema_creates_all_tables(db: aiosqlite.Connection) -> None:
 
 
 async def test_schema_creates_indexes(db: aiosqlite.Connection) -> None:
-    cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='index' ORDER BY name")
+    cursor = await db.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' ORDER BY name"
+    )
     indexes = {row[0] for row in await cursor.fetchall()}
     assert "idx_activity_source" in indexes
     assert "idx_activity_timestamp" in indexes
@@ -100,8 +102,12 @@ async def test_activity_log_source_check_constraint(db: aiosqlite.Connection) ->
         )
 
 
-async def test_pending_handoffs_status_check_constraint(db: aiosqlite.Connection) -> None:
-    await db.execute("INSERT INTO pending_handoffs (project_name, status) VALUES ('P', 'pending')")
+async def test_pending_handoffs_status_check_constraint(
+    db: aiosqlite.Connection,
+) -> None:
+    await db.execute(
+        "INSERT INTO pending_handoffs (project_name, status) VALUES ('P', 'pending')"
+    )
     await db.commit()
     with pytest.raises(aiosqlite.IntegrityError):
         await db.execute(
@@ -281,7 +287,12 @@ async def test_migration_v2_to_current_populates_content_index(tmp_path: Path) -
         assert row is not None
         assert row[0] == SCHEMA_VERSION
 
-        for table in ("context_sections", "activity_log", "system_snapshots", "pending_handoffs"):
+        for table in (
+            "context_sections",
+            "activity_log",
+            "system_snapshots",
+            "pending_handoffs",
+        ):
             cursor = await migrated.execute(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
             count_row = await cursor.fetchone()
             assert count_row is not None
@@ -399,7 +410,9 @@ async def test_migration_v3_to_v4_adds_shipped_sync_receipts(tmp_path: Path) -> 
         )
         await migrated.commit()
 
-        cursor = await migrated.execute("SELECT downstream_ref FROM shipped_sync_receipts")
+        cursor = await migrated.execute(
+            "SELECT downstream_ref FROM shipped_sync_receipts"
+        )
         receipt = await cursor.fetchone()
         assert receipt is not None
         assert receipt["downstream_ref"] == "page-123"
@@ -478,7 +491,9 @@ async def test_migration_v5_to_v6_adds_handoff_canonical_key(tmp_path: Path) -> 
         assert row[0] == SCHEMA_VERSION
 
         # Existing row preserved, new column defaults to NULL.
-        cursor = await migrated.execute("SELECT project_name, canonical_key FROM pending_handoffs")
+        cursor = await migrated.execute(
+            "SELECT project_name, canonical_key FROM pending_handoffs"
+        )
         existing = await cursor.fetchone()
         assert existing is not None
         assert existing["project_name"] == "MyProject"
@@ -597,14 +612,24 @@ async def test_schema_source_trust_defaults_to_agent(db: aiosqlite.Connection) -
     await db.execute("INSERT INTO pending_handoffs (project_name) VALUES ('bridge-db')")
     await db.commit()
 
-    for table in ("context_sections", "activity_log", "system_snapshots", "pending_handoffs"):
+    for table in (
+        "context_sections",
+        "activity_log",
+        "system_snapshots",
+        "pending_handoffs",
+    ):
         cursor = await db.execute(f"SELECT source_trust FROM {table}")
         row = await cursor.fetchone()
         assert row is not None
         assert row["source_trust"] == "agent", f"{table} did not default to 'agent'"
 
 
-_TRUST_TABLES = ("context_sections", "activity_log", "system_snapshots", "pending_handoffs")
+_TRUST_TABLES = (
+    "context_sections",
+    "activity_log",
+    "system_snapshots",
+    "pending_handoffs",
+)
 
 
 async def _insert_with_trust(db: aiosqlite.Connection, table: str, trust: str) -> None:
@@ -651,7 +676,9 @@ async def test_source_trust_accepts_all_valid_values(db: aiosqlite.Connection) -
     await db.commit()
 
 
-async def test_source_trust_check_rejects_unknown_all_tables(db: aiosqlite.Connection) -> None:
+async def test_source_trust_check_rejects_unknown_all_tables(
+    db: aiosqlite.Connection,
+) -> None:
     """Every table's CHECK rejects a value outside the SourceTrust set — guards
     against a dropped CHECK clause on any one of the four ALTER/DDL statements."""
     for table in _TRUST_TABLES:
@@ -675,7 +702,9 @@ async def test_migration_v6_to_v7_adds_source_trust(tmp_path: Path) -> None:
             cursor = await migrated.execute(f"SELECT source_trust FROM {table}")
             r = await cursor.fetchone()
             assert r is not None
-            assert r["source_trust"] == "operator", f"{table} backfill should be 'operator'"
+            assert r["source_trust"] == "operator", (
+                f"{table} backfill should be 'operator'"
+            )
 
         # Agent-authored history keeps the default.
         for table in ("activity_log", "system_snapshots"):
@@ -734,7 +763,9 @@ async def test_migration_v6_to_v7_is_idempotent(tmp_path: Path) -> None:
         await second.close()
 
 
-async def test_migration_v7_to_v8_adds_shipped_event_dispositions(tmp_path: Path) -> None:
+async def test_migration_v7_to_v8_adds_shipped_event_dispositions(
+    tmp_path: Path,
+) -> None:
     """A v7 DB gains the non-receipt shipped-event disposition table."""
     db = await aiosqlite.connect(str(tmp_path / "v7.db"))
     db.row_factory = aiosqlite.Row
@@ -767,6 +798,20 @@ async def test_migration_v7_to_v8_adds_shipped_event_dispositions(tmp_path: Path
             owner TEXT NOT NULL CHECK(owner IN ('claude_ai', 'cc', 'codex')),
             content TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested'))
+        );
+        CREATE TABLE pending_handoffs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_name TEXT NOT NULL,
+            project_path TEXT,
+            roadmap_file TEXT,
+            phase TEXT,
+            dispatched_from TEXT NOT NULL DEFAULT 'claude_ai',
+            dispatched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            picked_up_at TEXT,
+            cleared_at TEXT,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'active', 'cleared')),
+            canonical_key TEXT,
             source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested'))
         );
         INSERT INTO activity_log (source, timestamp, project_name, summary, tags)
@@ -856,6 +901,20 @@ async def test_migration_v9_to_v10_adds_context_versions_and_conflict_tables(
             canonical_key TEXT,
             source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested'))
         );
+        CREATE TABLE pending_handoffs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_name TEXT NOT NULL,
+            project_path TEXT,
+            roadmap_file TEXT,
+            phase TEXT,
+            dispatched_from TEXT NOT NULL DEFAULT 'claude_ai',
+            dispatched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            picked_up_at TEXT,
+            cleared_at TEXT,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'active', 'cleared')),
+            canonical_key TEXT,
+            source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested'))
+        );
         CREATE VIRTUAL TABLE IF NOT EXISTS content_index USING fts5(
             source_type UNINDEXED,
             source_id UNINDEXED,
@@ -924,6 +983,11 @@ async def test_migration_v10_to_v11_reindexes_activity_tags(tmp_path: Path) -> N
         "INSERT INTO content_index (source_type, source_id, text) VALUES ('activity', ?, ?)",
         (act_id, "bridge-db\nrecall precision landed"),
     )
+    # open_db() bootstraps a fresh DB at the current schema, which already has
+    # pending_handoffs.claimed_by (added at v13) — drop it back off so the
+    # rewound version below matches a real pre-v13 DB and the ladder's v13 ALTER
+    # ADD COLUMN can apply cleanly instead of hitting a duplicate column.
+    await db.execute("ALTER TABLE pending_handoffs DROP COLUMN claimed_by")
     await db.execute("PRAGMA user_version = 10")
     await db.commit()
     await db.close()
@@ -956,6 +1020,11 @@ async def test_migration_v11_to_v12_adds_session_classification(tmp_path: Path) 
         VALUES ('sess-v11', 'cost-tracker', '2026-07-01T00:00:00Z', 4.25)
         """
     )
+    # open_db() bootstraps a fresh DB at the current schema, which already has
+    # pending_handoffs.claimed_by (added at v13) — drop it back off so the
+    # rewound version below matches a real pre-v13 DB and the ladder's v13 ALTER
+    # ADD COLUMN can apply cleanly instead of hitting a duplicate column.
+    await db.execute("ALTER TABLE pending_handoffs DROP COLUMN claimed_by")
     await db.execute("PRAGMA user_version = 11")
     await db.commit()
     await db.close()
@@ -1010,6 +1079,11 @@ async def test_migration_v11_to_v12_is_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "v11_idem.db"
 
     db = await open_db(db_path)
+    # open_db() bootstraps a fresh DB at the current schema, which already has
+    # pending_handoffs.claimed_by (added at v13) — drop it back off so the
+    # rewound version below matches a real pre-v13 DB and the ladder's v13 ALTER
+    # ADD COLUMN can apply cleanly instead of hitting a duplicate column.
+    await db.execute("ALTER TABLE pending_handoffs DROP COLUMN claimed_by")
     await db.execute("PRAGMA user_version = 11")
     await db.commit()
     await db.close()

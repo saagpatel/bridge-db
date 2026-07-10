@@ -9,7 +9,12 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from bridge_db import config
 from bridge_db.auth import auth_mode, load_principals
-from bridge_db.db import SCHEMA_VERSION, collect_fts_index_metrics, get_db
+from bridge_db.db import (
+    SCHEMA_VERSION,
+    collect_fts_index_metrics,
+    get_db,
+    protected_tags_predicate,
+)
 from bridge_db.migration import BRIDGE_SECTION_HEADINGS, SECTION_MAP, extract_sections
 
 logger = logging.getLogger("bridge_db.tools.health")
@@ -26,7 +31,12 @@ _ROW_COUNT_TABLES = (
 _ACTIVITY_SOURCES = ("cc", "codex", "claude_ai", "notion_os", "personal_ops")
 _SNAPSHOT_SYSTEMS = ("cc", "codex")
 _TRUST_LEVELS = ("operator", "agent", "ingested")
-_TRUST_TABLES = ("context_sections", "activity_log", "system_snapshots", "pending_handoffs")
+_TRUST_TABLES = (
+    "context_sections",
+    "activity_log",
+    "system_snapshots",
+    "pending_handoffs",
+)
 SNAPSHOT_STALE_AFTER_HOURS = 48.0
 ACTIVITY_QUIET_AFTER_HOURS = 72.0
 PENDING_HANDOFF_STALE_AFTER_HOURS = 168.0
@@ -155,7 +165,9 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         ")"
     )
     actionable_row = await cursor.fetchone()
-    actionable_unprocessed_shipped_count: int = actionable_row[0] if actionable_row else 0
+    actionable_unprocessed_shipped_count: int = (
+        actionable_row[0] if actionable_row else 0
+    )
 
     cursor = await db.execute(
         "SELECT COUNT(*) FROM activity_log AS activity "
@@ -167,7 +179,33 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         ")"
     )
     receiptless_row = await cursor.fetchone()
-    processed_shipped_without_receipt_count: int = receiptless_row[0] if receiptless_row else 0
+    processed_shipped_without_receipt_count: int = (
+        receiptless_row[0] if receiptless_row else 0
+    )
+
+    protected_sql, protected_params = protected_tags_predicate()
+    cursor = await db.execute(
+        f"SELECT COUNT(*) FROM activity_log WHERE {protected_sql}",  # noqa: S608
+        protected_params,
+    )
+    ledger_row = await cursor.fetchone()
+    ledger_protected_count: int = ledger_row[0] if ledger_row else 0
+
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM shipped_sync_receipts AS r "
+        "WHERE NOT EXISTS (SELECT 1 FROM activity_log AS a WHERE a.id = r.activity_id)"
+    )
+    receipt_orphan_row = await cursor.fetchone()
+    receipt_orphan_count: int = receipt_orphan_row[0] if receipt_orphan_row else 0
+
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM shipped_event_dispositions AS d "
+        "WHERE NOT EXISTS (SELECT 1 FROM activity_log AS a WHERE a.id = d.activity_id)"
+    )
+    disposition_orphan_row = await cursor.fetchone()
+    disposition_orphan_count: int = (
+        disposition_orphan_row[0] if disposition_orphan_row else 0
+    )
 
     db_path = config.DB_PATH
     db_exists = db_path.exists()
@@ -188,7 +226,12 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     source_trust_breakdown = await _source_trust_breakdown(db)
 
     # WAL size and claude_ai section drift are soft signals — do not fold into `ok`.
-    ok = db_exists and schema_version == SCHEMA_VERSION and bridge_file_exists and fts_index["ok"]
+    ok = (
+        db_exists
+        and schema_version == SCHEMA_VERSION
+        and bridge_file_exists
+        and fts_index["ok"]
+    )
 
     return {
         "ok": ok,
@@ -202,6 +245,9 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "unprocessed_shipped_count": unprocessed_shipped_count,
         "actionable_unprocessed_shipped_count": actionable_unprocessed_shipped_count,
         "processed_shipped_without_receipt_count": processed_shipped_without_receipt_count,
+        "ledger_protected_count": ledger_protected_count,
+        "receipt_orphan_count": receipt_orphan_count,
+        "disposition_orphan_count": disposition_orphan_count,
         "wal_size_bytes": wal_size_bytes,
         "wal_warning": wal_warning,
         "fts_index": fts_index,
@@ -252,7 +298,9 @@ async def _snapshot_freshness(db: Any, now: datetime) -> dict[str, dict[str, Any
     return snapshots
 
 
-async def _activity_source_freshness(db: Any, now: datetime) -> dict[str, dict[str, Any]]:
+async def _activity_source_freshness(
+    db: Any, now: datetime
+) -> dict[str, dict[str, Any]]:
     activity_sources: dict[str, dict[str, Any]] = {}
     for source in _ACTIVITY_SOURCES:
         cursor = await db.execute(
@@ -463,12 +511,16 @@ async def _collect_freshness_block(
     }
 
 
-async def collect_status_summary(db: Any, *, now: datetime | None = None) -> dict[str, Any]:
+async def collect_status_summary(
+    db: Any, *, now: datetime | None = None
+) -> dict[str, Any]:
     """Collect a compact operator-facing status summary."""
     health = await collect_health_metrics(db)
     fixed_now = now or _utc_now()
 
-    cursor = await db.execute("SELECT COUNT(*) FROM pending_handoffs WHERE status = 'pending'")
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM pending_handoffs WHERE status = 'pending'"
+    )
     pending_handoffs_row = await cursor.fetchone()
     pending_handoffs = pending_handoffs_row[0] if pending_handoffs_row else 0
 
@@ -532,13 +584,17 @@ async def collect_status_summary(db: Any, *, now: datetime | None = None) -> dic
         "signals": {
             "pending_handoffs": pending_handoffs,
             "unprocessed_shipped": health["unprocessed_shipped_count"],
-            "actionable_unprocessed_shipped": health["actionable_unprocessed_shipped_count"],
+            "actionable_unprocessed_shipped": health[
+                "actionable_unprocessed_shipped_count"
+            ],
             "dispositioned_unprocessed_shipped": max(
                 health["unprocessed_shipped_count"]
                 - health["actionable_unprocessed_shipped_count"],
                 0,
             ),
-            "processed_shipped_without_receipt": health["processed_shipped_without_receipt_count"],
+            "processed_shipped_without_receipt": health[
+                "processed_shipped_without_receipt_count"
+            ],
             "fts_missing": health["fts_index"]["missing"],
             "fts_orphaned": health["fts_index"]["orphaned"],
             "claude_ai_unsynced_sections": len(

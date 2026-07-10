@@ -24,6 +24,7 @@ uv run pytest    # verify the install
 - Steady maintenance. Scope is cross-system *state* coordination, lexical `recall`, and observability — not a general knowledge store.
 - Schema v10: context sections carry monotonic `version` tokens; stale writes and raced handoff claims produce durable `write_conflicts` receipts.
 - Schema v12: adds the `session_classification` sidecar for heuristic cost-routing attribution while keeping `session_costs` as pure actuals. Schema v11 backfills activity `tags` into `content_index` so lifecycle tags (SHIPPED, DECISION, ...) are recall-able on existing DBs.
+- Schema v13: adds `claimed_by` to `pending_handoffs` (the INV-13 claimant gate for `clear_handoff`). Riding the same migration train, activity retention now exempts rows tagged `SHIPPED` or `LEDGER` (case-insensitive) from the 50-per-source prune — BD-INV-1: retention never deletes a protected row, its receipt, or its disposition.
 - FTS5 `content_index` mirrors all content tables; `health` and `status` verify source-row / FTS-row alignment.
 - `status` includes a native freshness block for owner-specific snapshot, activity, handoff, and shipped-event attention. Freshness attention is advisory: top-level `ok` / `overall` remain tied to DB, schema, fallback-file, and FTS health.
 - 26 MCP tools across 10 modules (activity, handoffs, context, snapshots, cost, export, health, recall, audit, conflicts).
@@ -145,8 +146,10 @@ args = ["run", "--directory", "/path/to/bridge-db", "python", "-m", "bridge_db"]
 - **Bridge file**: `~/.claude/projects/<encoded-home>/memory/claude_ai_context.md`
   (Claude Code encodes your home dir path by replacing `/` with `-`; the default is derived
   automatically at runtime — override via `BRIDGE_FILE_PATH` if needed)
-- Retention: 50 activity entries per source; 10 snapshots per system family
-  (Codex operating and consulted-node snapshots are retained independently)
+- Retention: unprotected activity entries keep the newest 50 per source; rows
+  tagged `SHIPPED` or `LEDGER` (case-insensitive) are permanently retained
+  (BD-INV-1); 10 snapshots per system family (Codex operating and
+  consulted-node snapshots are retained independently)
 - Health check: `health` MCP tool or `uv run python -m bridge_db --doctor`
 - Operator summary: `uv run python -m bridge_db --status`
 - Dogfood pass: `uv run python -m bridge_db --dogfood` bundles the status, FTS index, WAL, recall, and shipped-sync audit checks used after bridge-sync runs
@@ -193,9 +196,13 @@ itself does not fail the command. bridge-db remains MCP-first and
 SQLite-native; the markdown export is a fallback/mirror, and freshness adds no
 service, table, migration, tool, or CLI flag.
 
-`activity_log` retention and shipped-sync receipts are separate surfaces:
-activity rows are recent context, while `shipped_sync_receipts` is the proof
-ledger for downstream shipped-event syncs. Treat `processed_shipped_without_receipt=0`
+`activity_log` retention is two-tier: unprotected rows remain recent context
+capped at 50 per source, while rows tagged `SHIPPED` or `LEDGER` are
+permanently retained (BD-INV-1). The durable ledger and the
+`shipped_sync_receipts` proof for downstream shipped-event syncs both live
+inside `activity_log` alongside the rolling buffer — a protected row's receipt
+or disposition can no longer cascade-die with it, because the parent row never
+prunes. Treat `processed_shipped_without_receipt=0`
 and `fts_missing=0` as primary clean signals, and use
 `actionable_unprocessed_shipped=0` with
 `dispositioned_unprocessed_shipped>0` when policy dispositions explain why raw

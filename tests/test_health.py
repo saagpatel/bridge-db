@@ -16,6 +16,7 @@ from bridge_db.db import (
     fts_text_for_handoff,
     fts_text_for_section,
     fts_text_for_snapshot,
+    insert_activity_row,
     upsert_fts_entry,
 )
 from bridge_db.tools import health as mod
@@ -131,7 +132,11 @@ async def test_status_pending_handoffs_by_trust(
     ctx = make_ctx(db)
     result = await fns["status"](ctx=ctx)
 
-    assert result["pending_handoffs_by_trust"] == {"operator": 1, "agent": 1, "ingested": 0}
+    assert result["pending_handoffs_by_trust"] == {
+        "operator": 1,
+        "agent": 1,
+        "ingested": 0,
+    }
 
 
 async def test_health_unprocessed_shipped_count(
@@ -225,7 +230,10 @@ async def test_health_counts_processed_shipped_without_receipts(
 
 
 async def test_health_bridge_file_info(
-    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (tmp_path / "test.db").touch()
     bridge = tmp_path / "bridge.md"
@@ -239,7 +247,10 @@ async def test_health_bridge_file_info(
 
 
 async def test_health_bridge_file_missing(
-    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (tmp_path / "test.db").touch()
     monkeypatch.setattr(config, "BRIDGE_FILE_PATH", tmp_path / "nonexistent.md")
@@ -251,7 +262,10 @@ async def test_health_bridge_file_missing(
 
 
 async def test_status_returns_compact_operator_summary(
-    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (tmp_path / "test.db").touch()
     bridge = tmp_path / "bridge.md"
@@ -314,7 +328,9 @@ async def test_status_returns_compact_operator_summary(
 FIXED_NOW = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
 
 
-async def _make_status_health_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def _make_status_health_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     (tmp_path / "test.db").touch()
     bridge = tmp_path / "bridge.md"
     bridge.write_text("# test", encoding="utf-8")
@@ -335,7 +351,9 @@ async def _seed_snapshot(
     )
     snapshot_id = cursor.lastrowid
     assert snapshot_id is not None
-    await upsert_fts_entry(db, "snapshot", str(snapshot_id), fts_text_for_snapshot(data))
+    await upsert_fts_entry(
+        db, "snapshot", str(snapshot_id), fts_text_for_snapshot(data)
+    )
 
 
 async def _seed_activity(
@@ -445,8 +463,13 @@ async def test_status_freshness_reports_missing_snapshots(
     assert result["freshness"]["snapshots"]["cc"]["latest_snapshot_date"] == "none"
     assert result["freshness"]["snapshots"]["cc"]["latest_created_at"] == "none"
     assert result["freshness"]["snapshots"]["cc"]["age_hours"] is None
-    assert result["freshness"]["snapshots"]["cc"]["next_action"] == "cc_refresh_snapshot"
-    assert result["freshness"]["snapshots"]["codex"]["next_action"] == "codex_refresh_snapshot"
+    assert (
+        result["freshness"]["snapshots"]["cc"]["next_action"] == "cc_refresh_snapshot"
+    )
+    assert (
+        result["freshness"]["snapshots"]["codex"]["next_action"]
+        == "codex_refresh_snapshot"
+    )
 
 
 async def test_status_freshness_reports_quiet_and_missing_activity_sources(
@@ -505,7 +528,9 @@ async def test_status_freshness_shipped_event_next_actions(
 ) -> None:
     await _make_status_health_ready(tmp_path, monkeypatch)
     await _seed_activity(db, "cc", "2026-07-07T11:00:00Z", tags=["SHIPPED"])
-    await _seed_activity(db, "codex", "2026-07-07T11:00:00Z", tags=["SHIPPED", "PROCESSED"])
+    await _seed_activity(
+        db, "codex", "2026-07-07T11:00:00Z", tags=["SHIPPED", "PROCESSED"]
+    )
     await db.commit()
 
     result = await mod.collect_status_summary(db, now=FIXED_NOW)
@@ -549,7 +574,9 @@ async def test_status_freshness_counts_dispositioned_unprocessed_shipped(
     db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     await _make_status_health_ready(tmp_path, monkeypatch)
-    activity_id = await _seed_activity(db, "cc", "2026-07-07T11:00:00Z", tags=["SHIPPED"])
+    activity_id = await _seed_activity(
+        db, "cc", "2026-07-07T11:00:00Z", tags=["SHIPPED"]
+    )
     await db.execute(
         """
         INSERT INTO shipped_event_dispositions (
@@ -592,7 +619,9 @@ async def test_status_freshness_malformed_timestamps_are_unknown_without_crashin
 
     assert result["freshness"]["snapshots"]["cc"]["state"] == "unknown"
     assert result["freshness"]["snapshots"]["cc"]["age_hours"] is None
-    assert result["freshness"]["snapshots"]["cc"]["next_action"] == "cc_refresh_snapshot"
+    assert (
+        result["freshness"]["snapshots"]["cc"]["next_action"] == "cc_refresh_snapshot"
+    )
     assert result["freshness"]["activity_sources"]["cc"]["state"] == "unknown"
     assert result["freshness"]["activity_sources"]["cc"]["age_hours"] is None
     assert result["freshness"]["handoffs"]["unknown_pending_count"] == 1
@@ -629,7 +658,10 @@ async def test_status_freshness_preserves_existing_keys_and_top_level_health(
 
 
 async def test_status_breaks_latest_ties_by_id(
-    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (tmp_path / "test.db").touch()
     bridge = tmp_path / "bridge.md"
@@ -650,7 +682,9 @@ async def test_status_breaks_latest_ties_by_id(
         )
         snapshot_id = cursor.lastrowid
         assert snapshot_id is not None
-        await upsert_fts_entry(db, "snapshot", str(snapshot_id), fts_text_for_snapshot(data))
+        await upsert_fts_entry(
+            db, "snapshot", str(snapshot_id), fts_text_for_snapshot(data)
+        )
 
     for project_name in ("old-activity", "new-activity"):
         cursor = await db.execute(
@@ -759,7 +793,10 @@ async def _seed_claude_ai_section(
 
 
 async def test_claude_ai_section_drift_in_sync(
-    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await _seed_claude_ai_section(db, "career", "Platform Engineer target.")
     bridge = tmp_path / "bridge.md"
@@ -774,7 +811,10 @@ async def test_claude_ai_section_drift_in_sync(
 
 
 async def test_claude_ai_section_drift_preserves_nested_h2_headings(
-    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     body = "# Career\n\n## Current Role\nSenior IT engineer.\n\n## Proof Points\n- bridge-db"
     await _seed_claude_ai_section(db, "career", body)
@@ -795,7 +835,10 @@ async def test_claude_ai_section_drift_preserves_nested_h2_headings(
 
 
 async def test_claude_ai_section_drift_detects_mismatch(
-    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # DB holds the synced value; the file has an unsynced inbound edit.
     await _seed_claude_ai_section(db, "career", "Synced value.")
@@ -816,7 +859,10 @@ async def test_claude_ai_section_drift_detects_mismatch(
 
 
 async def test_claude_ai_section_drift_no_file(
-    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(config, "BRIDGE_FILE_PATH", tmp_path / "missing.md")
     result = await fns["health"](ctx=make_ctx(db))
@@ -848,3 +894,30 @@ async def test_health_reports_auth_block(
         "principals_file_exists": True,
         "principals_enrolled": 1,
     }
+
+
+async def test_health_reports_ledger_and_orphan_metrics(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
+) -> None:
+    (tmp_path / "test.db").touch()
+    result = await fns["health"](ctx=make_ctx(db))
+    assert result["ledger_protected_count"] == 0
+    assert result["receipt_orphan_count"] == 0
+    assert result["disposition_orphan_count"] == 0
+
+
+async def test_health_counts_protected_rows(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
+) -> None:
+    (tmp_path / "test.db").touch()
+    await insert_activity_row(
+        db,
+        source="cc",
+        timestamp="2026-01-01",
+        project_name="p",
+        summary="durable",
+        tags=["LEDGER"],
+    )
+    await db.commit()
+    result = await fns["health"](ctx=make_ctx(db))
+    assert result["ledger_protected_count"] == 1

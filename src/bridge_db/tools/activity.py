@@ -15,10 +15,16 @@ from bridge_db.auth import clamp_source_trust, require_caller
 from bridge_db.db import (
     get_db,
     insert_activity_row,
+    protected_tags_predicate,
     reindex_activity_fts,
 )
 from bridge_db.instruction_boundary import instruction_boundary
-from bridge_db.models import ACTIVITY_SOURCES, CallerID, SourceTrust, invalid_source_error
+from bridge_db.models import (
+    ACTIVITY_SOURCES,
+    CallerID,
+    SourceTrust,
+    invalid_source_error,
+)
 from bridge_db.project_resolver import resolve as resolve_project
 
 logger = logging.getLogger("bridge_db.tools.activity")
@@ -43,7 +49,11 @@ _LIFECYCLE_ACTIVITY_SQL = """
 
 def _decode_tags(raw: str) -> list[str]:
     parsed: object = json.loads(raw)
-    return [str(tag) for tag in cast(list[object], parsed)] if isinstance(parsed, list) else []
+    return (
+        [str(tag) for tag in cast(list[object], parsed)]
+        if isinstance(parsed, list)
+        else []
+    )
 
 
 def _activity_payload(row: Any, *, kind: str | None = None) -> dict[str, Any]:
@@ -88,7 +98,11 @@ def _activity_since_condition(
 
 
 def _activity_signal_sort_key(entry: dict[str, Any]) -> tuple[str, str, int]:
-    timestamp = entry["last_ts"] if entry["kind"] == "lifecycle_aggregate" else entry["timestamp"]
+    timestamp = (
+        entry["last_ts"]
+        if entry["kind"] == "lifecycle_aggregate"
+        else entry["timestamp"]
+    )
     created_at = entry["created_at"]
     activity_id = entry.get("latest_activity_id", entry.get("id", 0))
     return (timestamp, created_at, int(activity_id or 0))
@@ -107,7 +121,9 @@ def _select_activity_signal_entries(
     if not selected or any(entry["kind"] == "activity" for entry in selected):
         return selected
 
-    newest_substantive = next((entry for entry in entries if entry["kind"] == "activity"), None)
+    newest_substantive = next(
+        (entry for entry in entries if entry["kind"] == "activity"), None
+    )
     if newest_substantive is None:
         return selected
 
@@ -120,13 +136,29 @@ def _normalize_policy_key(value: str) -> str:
     return value.strip().lower()
 
 
-def _load_meta_shipped_event_policy(project_name: str) -> dict[str, Any] | None:
-    """Return meta-event policy for SHIPPED rows that intentionally skip Notion."""
+_META_POLICY_CACHE: tuple[float, dict[str, Any]] | None = None
+
+
+def _load_meta_policy_root() -> dict[str, Any]:
+    global _META_POLICY_CACHE
+    try:
+        mtime = config.META_SHIPPED_EVENTS_PATH.stat().st_mtime
+    except OSError:
+        return {}
+    if _META_POLICY_CACHE is not None and _META_POLICY_CACHE[0] == mtime:
+        return _META_POLICY_CACHE[1]
     try:
         raw = json.loads(config.META_SHIPPED_EVENTS_PATH.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return None
-    policy_root = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+        return {}
+    root = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+    _META_POLICY_CACHE = (mtime, root)  # pyright: ignore[reportConstantRedefinition]
+    return root
+
+
+def _load_meta_shipped_event_policy(project_name: str) -> dict[str, Any] | None:
+    """Return meta-event policy for SHIPPED rows that intentionally skip Notion."""
+    policy_root = _load_meta_policy_root()
     projects = policy_root.get("projects")
     if not isinstance(projects, dict):
         return None
@@ -164,7 +196,9 @@ async def _export_bridge_markdown_after_processing(db: Any) -> None:
         await db.commit()
         logger.info("auto-export triggered after shipped-event processing")
     except Exception:
-        logger.warning("auto-export after shipped-event processing failed", exc_info=True)
+        logger.warning(
+            "auto-export after shipped-event processing failed", exc_info=True
+        )
 
 
 def register(mcp: FastMCP) -> None:
@@ -179,16 +213,26 @@ def register(mcp: FastMCP) -> None:
                 )
             ),
         ],
-        project_name: Annotated[str, Field(description="Project name, e.g. 'bridge-db'")],
-        summary: Annotated[str, Field(description="One-line description of what was done")],
-        branch: Annotated[str | None, Field(description="Git branch name, if applicable")] = None,
+        project_name: Annotated[
+            str, Field(description="Project name, e.g. 'bridge-db'")
+        ],
+        summary: Annotated[
+            str, Field(description="One-line description of what was done")
+        ],
+        branch: Annotated[
+            str | None, Field(description="Git branch name, if applicable")
+        ] = None,
         tags: Annotated[
             list[str] | None,
             Field(
                 description=(
-                    "Optional tags (indexed for recall). Vocabulary: SHIPPED, HYGIENE, "
-                    "RESEARCH, MAINTENANCE; DECISION for an architectural rationale/ADR; "
-                    "PROJECT_IDEA for a newly-explored concept."
+                    "Optional tags (indexed for recall). SHIPPED = durable ship "
+                    "event, syncs to the Notion Build Log and is retention-"
+                    "protected. LEDGER = durable catch-up entry ('what happened "
+                    "/ what it does / what it points to'), retention-protected, "
+                    "pinned by get_activity_signal. Both match case-"
+                    "insensitively. Other tags are free-form and searchable but "
+                    "NOT retention-protected."
                 )
             ),
         ] = None,
@@ -204,15 +248,20 @@ def register(mcp: FastMCP) -> None:
         ] = "agent",
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
-        """Log a session activity entry. Auto-prunes to the most recent 50 entries per source.
+        """Log a session activity entry.
+
+        Retention (BD-INV-1): unprotected entries auto-prune to the most recent
+        50 per source; entries tagged SHIPPED or LEDGER (case-insensitive) are
+        NEVER pruned. Every prune emits a `log_activity.prune` audit line.
 
         Tag conventions (tags are indexed in content_index, so they are recall-able):
-        - SHIPPED / HYGIENE / RESEARCH / MAINTENANCE: standard activity classes.
-        - DECISION: attach to an entry whose summary records an architectural choice
-          and its rationale (an ADR-lite), so the "why" stays retrievable later
-          instead of living only in a chat that was never logged.
-        - PROJECT_IDEA: attach when a new project concept is first explored, so the
-          idea is captured at the source rather than surfacing later as a recall miss.
+        - SHIPPED: a feature/artifact reached a durable, usable state. Requires an
+          eventual confirm_shipped_sync receipt or record_shipped_event_disposition —
+          unsynced SHIPPED rows nag in health until terminally resolved.
+        - LEDGER: a durable operator-facing record for the next agent's catch-up.
+          Attach when the operator says "log this to BridgeDB" or the entry should
+          outlive the rolling window.
+        - Anything else: free-form, searchable, prunable.
         """
         require_caller(ctx, caller, tool="log_activity")
         source_trust, source_trust_clamped = clamp_source_trust(
@@ -221,7 +270,7 @@ def register(mcp: FastMCP) -> None:
         db = get_db(ctx)
         ts = timestamp or str(date.today())
         resolution = resolve_project(project_name)
-        await insert_activity_row(
+        insert_result = await insert_activity_row(
             db,
             source=caller,
             timestamp=ts,
@@ -236,6 +285,21 @@ def register(mcp: FastMCP) -> None:
         await db.commit()
 
         log_audit("log_activity", caller, project_name, ok=True)
+        if insert_result.pruned_rows:
+            pruned_ids = [row_id for row_id, _ in insert_result.pruned_rows]
+            pruned_tags = sorted(
+                {tag for _, raw in insert_result.pruned_rows for tag in json.loads(raw)}
+            )
+            log_audit(
+                "log_activity.prune",
+                caller,
+                project_name,
+                ok=True,
+                detail=(
+                    f"pruned={len(pruned_ids)} ids_head={pruned_ids[:20]} "
+                    f"tags={pruned_tags} source={caller}"
+                ),
+            )
         if resolution.registry_present and not resolution.matched:
             # Drift: a real write with no canonical match. Surface it via the
             # existing audit log rather than silently recording the drifted name.
@@ -247,7 +311,8 @@ def register(mcp: FastMCP) -> None:
                 detail="no canonical match in project-registry; flagged for triage",
             )
             logger.warning(
-                "log_activity: unmatched project_name %r (no canonical key)", project_name
+                "log_activity: unmatched project_name %r (no canonical key)",
+                project_name,
             )
         logger.info("logged activity: [%s] %s: %s", caller, project_name, summary)
         return {
@@ -271,9 +336,12 @@ def register(mcp: FastMCP) -> None:
                 )
             ),
         ] = None,
-        limit: Annotated[int, Field(description="Max entries to return", ge=1, le=200)] = 20,
+        limit: Annotated[
+            int, Field(description="Max entries to return", ge=1, le=200)
+        ] = 20,
         since: Annotated[
-            str | None, Field(description="Only entries on or after this YYYY-MM-DD date")
+            str | None,
+            Field(description="Only entries on or after this YYYY-MM-DD date"),
         ] = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> list[dict[str, Any]]:
@@ -320,9 +388,12 @@ def register(mcp: FastMCP) -> None:
                 )
             ),
         ] = None,
-        limit: Annotated[int, Field(description="Max signal entries to return", ge=1, le=200)] = 20,
+        limit: Annotated[
+            int, Field(description="Max signal entries to return", ge=1, le=200)
+        ] = 20,
         since: Annotated[
-            str | None, Field(description="Only entries on or after this YYYY-MM-DD date")
+            str | None,
+            Field(description="Only entries on or after this YYYY-MM-DD date"),
         ] = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> list[dict[str, Any]]:
@@ -418,7 +489,9 @@ def register(mcp: FastMCP) -> None:
             aggregate["source_trust"] = trust
             aggregate["instruction_boundary"] = instruction_boundary(trust)
 
-        substantive_params = [*params, limit]
+        # Over-fetch compensates for ledger-id dedupe so protected rows in the
+        # recency window can't shrink the substantive result below limit.
+        substantive_params = [*params, limit + config.LEDGER_SIGNAL_LIMIT]
         substantive_cursor = await db.execute(
             f"""
             SELECT id, source, timestamp, project_name, summary, branch, tags, created_at, canonical_key, source_trust
@@ -431,11 +504,36 @@ def register(mcp: FastMCP) -> None:
         )
         substantive_rows = await substantive_cursor.fetchall()
 
+        protected_sql, protected_params = protected_tags_predicate()
+        ledger_conditions = [
+            *conditions,
+            protected_sql,
+            f"NOT {_LIFECYCLE_ACTIVITY_SQL}",
+        ]
+        ledger_where = "WHERE " + " AND ".join(ledger_conditions)
+        ledger_cursor = await db.execute(
+            f"""
+            SELECT id, source, timestamp, project_name, summary, branch, tags, created_at, canonical_key, source_trust
+            FROM activity_log
+            {ledger_where}
+            ORDER BY timestamp DESC, created_at DESC, id DESC
+            LIMIT ?
+            """,
+            [*params, *protected_params, config.LEDGER_SIGNAL_LIMIT],
+        )
+        ledger_rows = await ledger_cursor.fetchall()
+        ledger_ids = {r["id"] for r in ledger_rows}
+        ledger_entries = [_activity_payload(r, kind="ledger") for r in ledger_rows]
+
         entries = [
             *aggregates.values(),
-            *[_activity_payload(r, kind="activity") for r in substantive_rows],
+            *[
+                _activity_payload(r, kind="activity")
+                for r in substantive_rows
+                if r["id"] not in ledger_ids
+            ],
         ]
-        return _select_activity_signal_entries(entries, limit)
+        return [*ledger_entries, *_select_activity_signal_entries(entries, limit)]
 
     @mcp.tool()
     async def get_shipped_events(
@@ -445,6 +543,12 @@ def register(mcp: FastMCP) -> None:
         unprocessed_only: Annotated[
             bool, Field(description="If true, exclude events already marked PROCESSED")
         ] = False,
+        limit: Annotated[
+            int,
+            Field(
+                description="Max shipped events to return, newest first", ge=1, le=1000
+            ),
+        ] = 200,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> list[dict[str, Any]]:
         """Return activity entries tagged SHIPPED, for Codex bridge-sync to sync to Notion."""
@@ -461,8 +565,13 @@ def register(mcp: FastMCP) -> None:
             conditions.append(
                 "NOT EXISTS (SELECT 1 FROM json_each(tags) WHERE value = 'PROCESSED')"
             )
+            conditions.append(
+                "NOT EXISTS (SELECT 1 FROM shipped_event_dispositions AS d2 "
+                "WHERE d2.activity_id = a.id)"
+            )
 
         where = "WHERE " + " AND ".join(conditions)
+        params.append(limit)
         cursor = await db.execute(
             f"""
             SELECT
@@ -492,6 +601,7 @@ def register(mcp: FastMCP) -> None:
             LEFT JOIN shipped_event_dispositions AS d ON d.activity_id = a.id
             {where}
             ORDER BY a.timestamp DESC
+            LIMIT ?
             """,
             params,
         )
@@ -618,10 +728,14 @@ def register(mcp: FastMCP) -> None:
         # Tags ARE indexed in content_index (see fts_text_for_activity), so each
         # tag mutation below re-indexes its row via reindex_activity_fts.
         for activity_id in activity_ids:
-            cursor = await db.execute("SELECT tags FROM activity_log WHERE id = ?", (activity_id,))
+            cursor = await db.execute(
+                "SELECT tags FROM activity_log WHERE id = ?", (activity_id,)
+            )
             row = await cursor.fetchone()
             if row is None:
-                logger.warning("mark_shipped_processed: id %d not found, skipping", activity_id)
+                logger.warning(
+                    "mark_shipped_processed: id %d not found, skipping", activity_id
+                )
                 missing_ids.append(activity_id)
                 continue
             current_tags: list[str] = json.loads(row["tags"])
@@ -677,7 +791,9 @@ def register(mcp: FastMCP) -> None:
                 f"missing_ids={missing_ids} updated={updated}/{len(activity_ids)}"
             ),
         )
-        logger.info("mark_shipped_processed: updated %d/%d entries", updated, len(activity_ids))
+        logger.info(
+            "mark_shipped_processed: updated %d/%d entries", updated, len(activity_ids)
+        )
         return {
             "ok": True,
             "updated": updated,
@@ -690,8 +806,12 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     async def record_shipped_event_disposition(
-        caller: Annotated[CallerID, Field(description="System recording the disposition")],
-        activity_id: Annotated[int, Field(description="SHIPPED activity entry to classify")],
+        caller: Annotated[
+            CallerID, Field(description="System recording the disposition")
+        ],
+        activity_id: Annotated[
+            int, Field(description="SHIPPED activity entry to classify")
+        ],
         disposition_type: Annotated[
             str,
             Field(
@@ -701,7 +821,9 @@ def register(mcp: FastMCP) -> None:
                 )
             ),
         ],
-        reason: Annotated[str, Field(description="Why this event is not receipt-ready")],
+        reason: Annotated[
+            str, Field(description="Why this event is not receipt-ready")
+        ],
         policy_ref: Annotated[
             str | None,
             Field(description="Optional durable policy or report reference"),
@@ -747,7 +869,9 @@ def register(mcp: FastMCP) -> None:
         )
         receipt = await cursor.fetchone()
         if receipt is not None:
-            raise ToolError(f"Activity entry {activity_id} already has a shipped_sync_receipts row")
+            raise ToolError(
+                f"Activity entry {activity_id} already has a shipped_sync_receipts row"
+            )
 
         await db.execute(
             """
@@ -756,7 +880,14 @@ def register(mcp: FastMCP) -> None:
             )
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (activity_id, disposition, clean_policy_ref, clean_reason, caller, clean_notes),
+            (
+                activity_id,
+                disposition,
+                clean_policy_ref,
+                clean_reason,
+                caller,
+                clean_notes,
+            ),
         )
         await db.commit()
 
@@ -785,15 +916,21 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     async def confirm_shipped_sync(
-        caller: Annotated[CallerID, Field(description="System confirming downstream sync")],
-        activity_id: Annotated[int, Field(description="SHIPPED activity entry that was synced")],
+        caller: Annotated[
+            CallerID, Field(description="System confirming downstream sync")
+        ],
+        activity_id: Annotated[
+            int, Field(description="SHIPPED activity entry that was synced")
+        ],
         downstream_system: Annotated[
             str,
             Field(description="External system updated, e.g. 'notion' or 'github'"),
         ],
         downstream_ref: Annotated[
             str,
-            Field(description="Durable downstream reference, e.g. Notion page ID or URL"),
+            Field(
+                description="Durable downstream reference, e.g. Notion page ID or URL"
+            ),
         ],
         notes: Annotated[
             str | None,
@@ -852,7 +989,9 @@ def register(mcp: FastMCP) -> None:
         await _export_bridge_markdown_after_processing(db)
 
         detail = f"activity_id={activity_id} downstream={system}:{ref}"
-        log_audit("confirm_shipped_sync", caller, row["project_name"], ok=True, detail=detail)
+        log_audit(
+            "confirm_shipped_sync", caller, row["project_name"], ok=True, detail=detail
+        )
         logger.info(
             "confirmed shipped sync: id=%d downstream=%s:%s by=%s",
             activity_id,
