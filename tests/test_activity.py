@@ -1,6 +1,7 @@
 """Tests for activity log tools."""
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -1412,3 +1413,82 @@ async def test_log_activity_clamps_operator_label_in_db(
     row = await cursor.fetchone()
     assert row is not None
     assert row["source_trust"] == "agent"
+
+
+async def test_unprocessed_only_excludes_dispositioned_rows(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="cc", project_name="A", summary="shipped", tags=["SHIPPED"], ctx=ctx
+    )
+    cursor = await db.execute("SELECT id FROM activity_log")
+    row = await cursor.fetchone()
+    assert row is not None
+    await db.execute(
+        """
+        INSERT INTO shipped_event_dispositions (
+            activity_id, disposition_type, reason, decided_by
+        )
+        VALUES (?, 'unsynced_by_policy', 'experimental artifact', 'codex')
+        """,
+        (row["id"],),
+    )
+    await db.commit()
+
+    unprocessed = await fns["get_shipped_events"](unprocessed_only=True, ctx=ctx)
+    assert unprocessed == []
+
+    everything = await fns["get_shipped_events"](ctx=ctx)
+    assert len(everything) == 1
+    assert (
+        everything[0]["policy_disposition"]["disposition_type"] == "unsynced_by_policy"
+    )
+
+
+async def test_get_shipped_events_honors_limit(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    for i in range(5):
+        await fns["log_activity"](
+            caller="cc",
+            project_name=f"p{i}",
+            summary=f"ship {i}",
+            tags=["SHIPPED"],
+            timestamp=f"2026-07-0{i + 1}",
+            ctx=ctx,
+        )
+    limited = await fns["get_shipped_events"](limit=2, ctx=ctx)
+    assert len(limited) == 2
+    assert limited[0]["project_name"] == "p4"  # newest first
+
+
+def test_meta_policy_cache_is_mtime_keyed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy_path = tmp_path / "meta-shipped-events.json"
+    policy_path.write_text(
+        json.dumps({"projects": {"proj": {"reason": "first"}}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(config, "META_SHIPPED_EVENTS_PATH", policy_path)
+    monkeypatch.setattr(mod, "_META_POLICY_CACHE", None)  # reset the module global
+
+    first = mod._load_meta_shipped_event_policy("proj")  # pyright: ignore[reportPrivateUsage]
+    assert first is not None and first["reason"] == "first"
+
+    # Overwrite content but pin mtime — the cache must serve the old value.
+    stat = policy_path.stat()
+    policy_path.write_text(
+        json.dumps({"projects": {"proj": {"reason": "second"}}}), encoding="utf-8"
+    )
+    os.utime(policy_path, (stat.st_atime, stat.st_mtime))
+    cached = mod._load_meta_shipped_event_policy("proj")  # pyright: ignore[reportPrivateUsage]
+    assert cached is not None and cached["reason"] == "first"
+
+    # Bump mtime — the cache must refresh.
+    os.utime(policy_path, (stat.st_atime, stat.st_mtime + 10))
+    refreshed = mod._load_meta_shipped_event_policy(  # pyright: ignore[reportPrivateUsage]
+        "proj"
+    )
+    assert refreshed is not None and refreshed["reason"] == "second"

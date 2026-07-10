@@ -135,13 +135,29 @@ def _normalize_policy_key(value: str) -> str:
     return value.strip().lower()
 
 
-def _load_meta_shipped_event_policy(project_name: str) -> dict[str, Any] | None:
-    """Return meta-event policy for SHIPPED rows that intentionally skip Notion."""
+_META_POLICY_CACHE: tuple[float, dict[str, Any]] | None = None
+
+
+def _load_meta_policy_root() -> dict[str, Any]:
+    global _META_POLICY_CACHE
+    try:
+        mtime = config.META_SHIPPED_EVENTS_PATH.stat().st_mtime
+    except OSError:
+        return {}
+    if _META_POLICY_CACHE is not None and _META_POLICY_CACHE[0] == mtime:
+        return _META_POLICY_CACHE[1]
     try:
         raw = json.loads(config.META_SHIPPED_EVENTS_PATH.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return None
-    policy_root = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+        return {}
+    root = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+    _META_POLICY_CACHE = (mtime, root)  # pyright: ignore[reportConstantRedefinition]
+    return root
+
+
+def _load_meta_shipped_event_policy(project_name: str) -> dict[str, Any] | None:
+    """Return meta-event policy for SHIPPED rows that intentionally skip Notion."""
+    policy_root = _load_meta_policy_root()
     projects = policy_root.get("projects")
     if not isinstance(projects, dict):
         return None
@@ -490,6 +506,12 @@ def register(mcp: FastMCP) -> None:
         unprocessed_only: Annotated[
             bool, Field(description="If true, exclude events already marked PROCESSED")
         ] = False,
+        limit: Annotated[
+            int,
+            Field(
+                description="Max shipped events to return, newest first", ge=1, le=1000
+            ),
+        ] = 200,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> list[dict[str, Any]]:
         """Return activity entries tagged SHIPPED, for Codex bridge-sync to sync to Notion."""
@@ -506,8 +528,13 @@ def register(mcp: FastMCP) -> None:
             conditions.append(
                 "NOT EXISTS (SELECT 1 FROM json_each(tags) WHERE value = 'PROCESSED')"
             )
+            conditions.append(
+                "NOT EXISTS (SELECT 1 FROM shipped_event_dispositions AS d2 "
+                "WHERE d2.activity_id = a.id)"
+            )
 
         where = "WHERE " + " AND ".join(conditions)
+        params.append(limit)
         cursor = await db.execute(
             f"""
             SELECT
@@ -537,6 +564,7 @@ def register(mcp: FastMCP) -> None:
             LEFT JOIN shipped_event_dispositions AS d ON d.activity_id = a.id
             {where}
             ORDER BY a.timestamp DESC
+            LIMIT ?
             """,
             params,
         )
