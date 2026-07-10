@@ -480,7 +480,9 @@ def register(mcp: FastMCP) -> None:
             aggregate["source_trust"] = trust
             aggregate["instruction_boundary"] = instruction_boundary(trust)
 
-        substantive_params = [*params, limit]
+        # Over-fetch compensates for ledger-id dedupe so protected rows in the
+        # recency window can't shrink the substantive result below limit.
+        substantive_params = [*params, limit + config.LEDGER_SIGNAL_LIMIT]
         substantive_cursor = await db.execute(
             f"""
             SELECT id, source, timestamp, project_name, summary, branch, tags, created_at, canonical_key, source_trust

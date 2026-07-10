@@ -479,6 +479,32 @@ async def test_signal_stays_flat_list(
     assert all(isinstance(e, dict) and "kind" in e for e in signal)
 
 
+async def test_signal_substantive_window_backfills_around_pins(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    for i in range(8):
+        await fns["log_activity"](
+            caller="cc",
+            project_name="p",
+            summary=f"plain {i}",
+            timestamp="2026-01-01",
+            ctx=ctx,
+        )
+    for i in range(3):
+        await fns["log_activity"](
+            caller="cc",
+            project_name="p",
+            summary=f"ship {i}",
+            tags=["SHIPPED"],
+            timestamp="2026-01-02",
+            ctx=ctx,
+        )
+    signal = await fns["get_activity_signal"](limit=5, ctx=ctx)
+    assert len([e for e in signal if e["kind"] == "ledger"]) == 3
+    assert len([e for e in signal if e["kind"] == "activity"]) == 5  # backfilled, not 2
+
+
 async def test_get_shipped_events(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
