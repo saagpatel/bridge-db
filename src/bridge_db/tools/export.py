@@ -11,7 +11,7 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 
 from bridge_db import config
-from bridge_db.db import content_sha256, get_db
+from bridge_db.db import content_sha256, get_db, protected_tags_predicate
 
 logger = logging.getLogger("bridge_db.tools.export")
 
@@ -89,7 +89,9 @@ def write_bridge_file(content: str) -> None:
     path = config.BRIDGE_FILE_PATH
     _validate_bridge_file_export(content, path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -104,7 +106,9 @@ def _is_codex_operating_snapshot(data: dict[str, Any]) -> bool:
     return {"infrastructure", "automation_digest", "active_projects"}.issubset(data)
 
 
-async def _latest_codex_operating_snapshot(db: Any) -> tuple[Any | None, dict[str, Any] | None]:
+async def _latest_codex_operating_snapshot(
+    db: Any,
+) -> tuple[Any | None, dict[str, Any] | None]:
     cursor = await db.execute(
         """
         SELECT snapshot_date, data
@@ -128,7 +132,9 @@ async def build_markdown(db: Any) -> str:
     cursor = await db.execute(
         "SELECT section_name, content FROM context_sections ORDER BY section_name"
     )
-    sections: dict[str, str] = {r["section_name"]: r["content"] for r in await cursor.fetchall()}
+    sections: dict[str, str] = {
+        r["section_name"]: r["content"] for r in await cursor.fetchall()
+    }
 
     # --- CC State Snapshot ---
     cursor = await db.execute(
@@ -151,7 +157,9 @@ async def build_markdown(db: Any) -> str:
             total += cr["amount"]
         cost_table += f"| **Total** | **${total:.0f}** |\n"
 
-        cc_snapshot_md = f"## Claude Code State Snapshot\nLast exported: {snap_date}\n\n"
+        cc_snapshot_md = (
+            f"## Claude Code State Snapshot\nLast exported: {snap_date}\n\n"
+        )
         for key, label in [
             ("active_projects", "Active Projects"),
             ("lessons", "Lessons"),
@@ -193,9 +201,7 @@ async def build_markdown(db: Any) -> str:
     # --- Codex State Snapshot ---
     codex_snap_row, cdata = await _latest_codex_operating_snapshot(db)
     if codex_snap_row and cdata is not None:
-        codex_snapshot_md = (
-            f"## Codex State Snapshot\nLast exported: {codex_snap_row['snapshot_date']}\n\n"
-        )
+        codex_snapshot_md = f"## Codex State Snapshot\nLast exported: {codex_snap_row['snapshot_date']}\n\n"
         for key, label in [
             ("infrastructure", "Infrastructure"),
             ("automation_digest", "Automation Digest (Last 7 Days)"),
@@ -215,7 +221,9 @@ async def build_markdown(db: Any) -> str:
     codex_activity_lines = _render_activity_rows(codex_activity_rows)
     codex_activity_md = "## Recent Codex Activity\n"
     codex_activity_md += (
-        "\n".join(codex_activity_lines) if codex_activity_lines else "_No activity yet._"
+        "\n".join(codex_activity_lines)
+        if codex_activity_lines
+        else "_No activity yet._"
     ) + "\n"
 
     # --- Additional source activity (notion_os, personal_ops) — rendered only if rows exist ---
@@ -234,6 +242,21 @@ async def build_markdown(db: Any) -> str:
         if extra_rows:
             lines = _render_activity_rows(extra_rows)
             extra_activity_mds.append(heading + "\n" + "\n".join(lines) + "\n")
+
+    # --- Pinned Ledger (retention-protected rows, all sources) ---
+    protected_sql, protected_params = protected_tags_predicate()
+    cursor = await db.execute(
+        "SELECT timestamp, project_name, summary, branch, tags FROM activity_log "
+        f"WHERE {protected_sql} "  # noqa: S608
+        "ORDER BY timestamp DESC, created_at DESC, id DESC LIMIT 15",
+        protected_params,
+    )
+    ledger_rows = await cursor.fetchall()
+    ledger_md = ""
+    if ledger_rows:
+        ledger_md = (
+            "## Pinned Ledger\n" + "\n".join(_render_activity_rows(ledger_rows)) + "\n"
+        )
 
     # --- Pending Handoffs ---
     cursor = await db.execute(
@@ -288,6 +311,10 @@ async def build_markdown(db: Any) -> str:
         parts.append("")
         parts.append(extra_md)
 
+    if ledger_md:
+        parts.append("")
+        parts.append(ledger_md)
+
     return "\n".join(parts)
 
 
@@ -339,7 +366,9 @@ def register(mcp: FastMCP) -> None:
         await db.commit()
         bridge_path = config.BRIDGE_FILE_PATH
 
-        logger.info("bridge markdown exported: %s (%d bytes)", bridge_path, len(content))
+        logger.info(
+            "bridge markdown exported: %s (%d bytes)", bridge_path, len(content)
+        )
         return {
             "ok": True,
             "path": str(bridge_path),

@@ -7,6 +7,7 @@ import aiosqlite
 import pytest
 from conftest import CaptureMCP, make_ctx
 
+from bridge_db.db import insert_activity_row
 from bridge_db.tools import activity as act_mod
 from bridge_db.tools import context as ctx_mod
 from bridge_db.tools import cost as cost_mod
@@ -127,7 +128,10 @@ async def test_export_records_context_section_export_state(
     try:
         ctx = make_ctx(db)
         await all_fns["update_section"](
-            caller="claude_ai", section_name="career", content="exported career", ctx=ctx
+            caller="claude_ai",
+            section_name="career",
+            content="exported career",
+            ctx=ctx,
         )
         result = await all_fns["export_bridge_markdown"](ctx=ctx)
     finally:
@@ -454,7 +458,9 @@ Prefers MCP when available
     assert status_result["ok"] is True
     assert status_result["signals"]["pending_handoffs"] == 1
     assert status_result["latest_snapshots"]["codex"] == "2026-04-17"
-    assert status_result["latest_activity"]["personal_ops"] == "2026-04-17 (personal-ops)"
+    assert (
+        status_result["latest_activity"]["personal_ops"] == "2026-04-17 (personal-ops)"
+    )
     assert "Operator-ready bridge role" in content
     assert "Phase 5 operator readiness" in content
     assert "## Recent Personal Ops Activity" in content
@@ -478,7 +484,9 @@ def test_write_bridge_file_rejects_empty_core_export_to_claude_fallback(
 ) -> None:
     target = tmp_path / "claude_ai_context.md"
     monkeypatch.setattr(exp_mod.config, "BRIDGE_FILE_PATH", target)
-    monkeypatch.setattr(exp_mod, "_is_claude_home_bridge_path", _always_claude_home_bridge_path)
+    monkeypatch.setattr(
+        exp_mod, "_is_claude_home_bridge_path", _always_claude_home_bridge_path
+    )
     content = "\n".join(
         [
             "## Career & Professional Target",
@@ -526,7 +534,9 @@ def test_write_bridge_file_allows_intentional_empty_fallback_bootstrap(
 ) -> None:
     target = tmp_path / "claude_ai_context.md"
     monkeypatch.setattr(exp_mod.config, "BRIDGE_FILE_PATH", target)
-    monkeypatch.setattr(exp_mod, "_is_claude_home_bridge_path", _always_claude_home_bridge_path)
+    monkeypatch.setattr(
+        exp_mod, "_is_claude_home_bridge_path", _always_claude_home_bridge_path
+    )
     monkeypatch.setenv("BRIDGE_DB_ALLOW_EMPTY_BRIDGE_EXPORT", "1")
     content = "\n".join(
         [
@@ -551,7 +561,9 @@ def test_write_bridge_file_allows_populated_core_export_to_claude_fallback(
 ) -> None:
     target = tmp_path / "claude_ai_context.md"
     monkeypatch.setattr(exp_mod.config, "BRIDGE_FILE_PATH", target)
-    monkeypatch.setattr(exp_mod, "_is_claude_home_bridge_path", _always_claude_home_bridge_path)
+    monkeypatch.setattr(
+        exp_mod, "_is_claude_home_bridge_path", _always_claude_home_bridge_path
+    )
     content = "\n".join(
         [
             "## Career & Professional Target",
@@ -588,3 +600,27 @@ def test_write_bridge_file_atomic_on_replace_failure(
     # atomicity: the original file is untouched and the temp file is cleaned up
     assert target.read_text(encoding="utf-8") == "original\n"
     assert [p.name for p in tmp_path.iterdir()] == ["claude_ai_context.md"]
+
+
+async def test_export_renders_pinned_ledger_section(
+    db: aiosqlite.Connection, all_fns: dict[str, Any]
+) -> None:
+    await insert_activity_row(
+        db,
+        source="cc",
+        timestamp="2026-01-01",
+        project_name="p",
+        summary="durable milestone",
+        tags=["LEDGER"],
+    )
+    await db.commit()
+    md = await _build_markdown(db)
+    assert "## Pinned Ledger" in md
+    assert "durable milestone" in md
+
+
+async def test_export_omits_pinned_ledger_when_empty(
+    db: aiosqlite.Connection, all_fns: dict[str, Any]
+) -> None:
+    md = await _build_markdown(db)
+    assert "## Pinned Ledger" not in md
