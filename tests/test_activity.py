@@ -1273,7 +1273,12 @@ async def test_prune_emits_audit_line(
     assert len(prune_calls) == 1  # only the 51st insert pruned anything
     detail = prune_calls[0][1]
     assert detail is not None
-    assert "pruned=1" in detail and "ids_head=" in detail and "source=cc" in detail
+    assert (
+        "pruned=1" in detail
+        and "ids_head=" in detail
+        and "tags=" in detail
+        and "source=cc" in detail
+    )
 
 
 async def test_log_activity_accepts_notion_os(
