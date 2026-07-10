@@ -336,7 +336,22 @@ def register(mcp: FastMCP) -> None:
         ],
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
-        """Clear a handoff by project name (mark as done). Called by /end after completing project work."""
+        """Clear a handoff by project name (mark as done). Called by /end after completing project work.
+
+        Claimant gate (INV-13): 'pending' rows (never claimed) are always
+        clearable — /finish and /bank clear opportunistically by project name
+        from sessions that never claimed, and that contract is preserved.
+        'active' rows are clearable only when claimed_by is NULL (legacy
+        pre-v13 rows) or equals the gate identity (bound principal, falling
+        back to the claimed caller). Refusals are reported, not raised:
+        ok stays True and the response carries refused_ids/refused_count —
+        deliberately asymmetric with pick_up_handoff's hard refusals, to match
+        this tool's opportunistic no-op contract.
+
+        Scope honesty: all cc windows share one principal, so this gate only
+        protects cross-role clears (cc <-> codex); under live 'warn' auth it
+        is accident-safety, not adversarial protection.
+        """
         require_caller(ctx, caller, tool="clear_handoff")
         if caller not in ("cc", "codex"):
             raise ToolError(
@@ -357,9 +372,11 @@ def register(mcp: FastMCP) -> None:
             match_sql = "project_name = ?"
             match_params = (project_name,)
 
+        gate_identity = get_principal(ctx) or caller
+
         cursor = await db.execute(
             f"""
-            SELECT id
+            SELECT id, status, claimed_by
             FROM pending_handoffs
             WHERE {match_sql} AND status != 'cleared'
             ORDER BY dispatched_at DESC, id DESC
@@ -375,28 +392,65 @@ def register(mcp: FastMCP) -> None:
                 "reason": "No active handoff found for project",
             }
 
-        handoff_ids = [row["id"] for row in rows]
-        await db.execute(
-            f"""
-            UPDATE pending_handoffs
-            SET status = 'cleared', cleared_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-            WHERE {match_sql} AND status != 'cleared'
-            """,
-            match_params,
-        )
+        clearable_ids: list[int] = []
+        refused_ids: list[int] = []
+        for row in rows:
+            claimant = row["claimed_by"]
+            if (
+                row["status"] == "active"
+                and claimant is not None
+                and claimant != gate_identity
+            ):
+                refused_ids.append(row["id"])
+            else:
+                clearable_ids.append(row["id"])
+
+        if clearable_ids:
+            id_placeholders = ", ".join("?" for _ in clearable_ids)
+            await db.execute(
+                f"""
+                UPDATE pending_handoffs
+                SET status = 'cleared', cleared_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                WHERE id IN ({id_placeholders})
+                """,
+                clearable_ids,
+            )
         await db.commit()
+
+        if refused_ids:
+            log_audit(
+                "clear_handoff.refused_foreign_claim",
+                caller,
+                project_name,
+                ok=False,
+                detail=f"refused_ids={refused_ids} gate_identity={gate_identity}",
+            )
+
+        if not clearable_ids:
+            return {
+                "ok": True,
+                "cleared": False,
+                "reason": "All matched handoffs are actively claimed by another identity",
+                "refused_ids": refused_ids,
+                "refused_count": len(refused_ids),
+                "project_name": project_name,
+                "canonical_key": canonical,
+            }
+
         logger.info(
             "handoffs cleared: project=%s by %s count=%d",
             project_name,
             caller,
-            len(handoff_ids),
+            len(clearable_ids),
         )
         return {
             "ok": True,
             "cleared": True,
-            "handoff_id": handoff_ids[0],
-            "handoff_ids": handoff_ids,
-            "cleared_count": len(handoff_ids),
+            "handoff_id": clearable_ids[0],
+            "handoff_ids": clearable_ids,
+            "cleared_count": len(clearable_ids),
+            "refused_ids": refused_ids,
+            "refused_count": len(refused_ids),
             "project_name": project_name,
             "canonical_key": canonical,
         }

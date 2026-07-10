@@ -545,6 +545,109 @@ async def test_handoff_lifecycle_across_pending_pickup_and_clear(
     assert second_row["status"] == "pending"
 
 
+async def test_clear_refuses_other_roles_active_claim(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    created = await fns["create_handoff"](
+        caller="claude_ai",
+        project_name="ForeignClaim",
+        project_path="/tmp/fc",
+        phase="Phase 1",
+        source_trust="operator",
+        ctx=ctx,
+    )
+    await fns["pick_up_handoff"](
+        caller="codex", handoff_id=created["handoff_id"], ctx=ctx
+    )
+
+    result = await fns["clear_handoff"](
+        caller="cc", project_name="ForeignClaim", ctx=ctx
+    )
+    assert result["ok"] is True
+    assert result["cleared"] is False
+    assert result["refused_count"] == 1
+    assert result["refused_ids"] == [created["handoff_id"]]
+    assert "reason" in result
+
+    cursor = await db.execute(
+        "SELECT status FROM pending_handoffs WHERE id = ?", (created["handoff_id"],)
+    )
+    row = await cursor.fetchone()
+    assert row is not None and row["status"] == "active"
+
+
+async def test_clear_allows_own_active_claim(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    created = await fns["create_handoff"](
+        caller="claude_ai",
+        project_name="OwnClaim",
+        project_path="/tmp/oc",
+        phase="Phase 1",
+        source_trust="operator",
+        ctx=ctx,
+    )
+    await fns["pick_up_handoff"](
+        caller="codex", handoff_id=created["handoff_id"], ctx=ctx
+    )
+
+    result = await fns["clear_handoff"](
+        caller="codex", project_name="OwnClaim", ctx=ctx
+    )
+    assert result["cleared"] is True
+    assert result["cleared_count"] == 1
+    assert result["refused_count"] == 0
+
+
+async def test_clear_allows_unclaimed_pending(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await fns["create_handoff"](
+        caller="claude_ai",
+        project_name="NeverClaimed",
+        project_path="/tmp/nc",
+        phase="Phase 1",
+        ctx=ctx,
+    )
+    result = await fns["clear_handoff"](
+        caller="cc", project_name="NeverClaimed", ctx=ctx
+    )
+    assert result["cleared"] is True
+    assert result["refused_count"] == 0
+
+
+async def test_clear_allows_legacy_null_claimant_active(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    created = await fns["create_handoff"](
+        caller="claude_ai",
+        project_name="LegacyActive",
+        project_path="/tmp/la",
+        phase="Phase 1",
+        source_trust="operator",
+        ctx=ctx,
+    )
+    await fns["pick_up_handoff"](
+        caller="codex", handoff_id=created["handoff_id"], ctx=ctx
+    )
+    # Simulate a pre-v13 active row: claimant identity was never recorded.
+    await db.execute(
+        "UPDATE pending_handoffs SET claimed_by = NULL WHERE id = ?",
+        (created["handoff_id"],),
+    )
+    await db.commit()
+
+    result = await fns["clear_handoff"](
+        caller="cc", project_name="LegacyActive", ctx=ctx
+    )
+    assert result["cleared"] is True
+    assert result["cleared_count"] == 1
+
+
 async def test_pick_up_records_claimant(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
