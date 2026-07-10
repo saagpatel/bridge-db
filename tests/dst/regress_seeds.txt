@@ -4,3 +4,7 @@
 claim-race 0
 # receipt-crash: WC-6 gap pin (INV-2 RED by design until the Phase-3 fix)
 receipt-crash 11
+# cas-pingpong: RC-3 — warn arm is the INV-4 lost-update evidence seed,
+# enforce arm is the CONTROL on the identical interleaving
+cas-pingpong-warn 2
+cas-pingpong-enforce 2
