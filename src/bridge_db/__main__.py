@@ -286,6 +286,11 @@ async def run_dogfood() -> bool:
     print(
         f"  WAL: size_bytes={health['wal_size_bytes']}, warning={health['wal_warning']}"
     )
+    print(
+        f"  Ledger: protected={health['ledger_protected_count']} "
+        f"receipt_orphans={health['receipt_orphan_count']} "
+        f"disposition_orphans={health['disposition_orphan_count']}"
+    )
     print(f"  FTS: {_fts_detail(health['fts_index'])}")
     print(
         "  Recall:"
@@ -305,6 +310,8 @@ async def run_dogfood() -> bool:
         and summary["signals"]["processed_shipped_without_receipt"] == 0
         and health["fts_index"]["ok"]
         and not health["wal_warning"]
+        and health["receipt_orphan_count"] == 0
+        and health["disposition_orphan_count"] == 0
     )
 
 
