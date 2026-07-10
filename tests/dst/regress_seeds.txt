@@ -8,3 +8,7 @@ receipt-crash 11
 # enforce arm is the CONTROL on the identical interleaving
 cas-pingpong-warn 2
 cas-pingpong-enforce 2
+# wal-starvation: WC-9 — red arm pins the leaked-tx wall (INV-10 fires,
+# checkpoint starved); control arm pins bounded-WAL liveness
+wal-starvation-red 0
+wal-starvation-control 0

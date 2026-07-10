@@ -64,8 +64,15 @@ class SimCrash(Exception):
     OS killed the process between two commits."""
 
 
+class SimInjectedError(Exception):
+    """Injected statement failure (R3 §1.1): the op raises but the
+    connection survives WITH its transaction still open — the raw material
+    of a leaked-transaction bug (INV-10) when the tool has no rollback
+    path and the caller swallows the error."""
+
+
 FaultOp = Literal["execute", "pre-commit"]
-FaultKind = Literal["crash", "busy", "delay"]
+FaultKind = Literal["crash", "busy", "delay", "error"]
 
 # R3 §1.1 buggify probabilities: each point coin-flips live/dead once per
 # run, then a live point fires at p=0.25 per hit — both off the run RNG.
@@ -92,22 +99,33 @@ class FaultPoint:
 
 
 class FaultPlan:
-    """Per-run fault decisions, drawn from the run RNG in a fixed order."""
+    """Per-run fault decisions, drawn from the run RNG in a fixed order.
+
+    Probabilities default to the R3 §1.1 buggify constants; a scenario may
+    override them (e.g. 1.0/1.0 for a declared always-on fault, the
+    "declared faults" slot in R4's canonical pass-condition form).
+    """
 
     def __init__(
-        self, points: Sequence[FaultPoint], rng: Random, trace: list[TraceEvent]
+        self,
+        points: Sequence[FaultPoint],
+        rng: Random,
+        trace: list[TraceEvent],
+        liveness_p: float = LIVENESS_P,
+        fire_p: float = FIRE_P,
     ) -> None:
         self._rng = rng
         self._trace = trace
+        self._fire_p = fire_p
         # Liveness is decided once per run per point, in registration order,
         # so the draw sequence — and therefore the whole run — is seed-stable.
-        self._live = [(point, rng.random() < LIVENESS_P) for point in points]
+        self._live = [(point, rng.random() < liveness_p) for point in points]
 
     def fire(self, op: FaultOp, fingerprint: str, writer_id: str) -> FaultPoint | None:
         for point, live in self._live:
             if not live or point.op != op or point.match not in fingerprint:
                 continue
-            if self._rng.random() >= FIRE_P:
+            if self._rng.random() >= self._fire_p:
                 continue
             self._trace.append(
                 {
@@ -222,11 +240,24 @@ class SimConnection:
             return False
         if point.kind == "crash":
             self._crash()
+        if point.kind == "error":
+            # The statement fails but the connection — and any transaction
+            # already open on it — survives. Whether that becomes a leak is
+            # up to the tool's (absent) rollback path and the caller.
+            raise SimInjectedError(
+                f"injected statement failure on {self._writer_id}: {fingerprint}"
+            )
         if point.kind == "busy":
             return True  # injected BUSY: park again and retry, like the real one
         # delay: one forced extra scheduling round before the op proceeds
         await self._yield_and_trace("delay", fingerprint)
         return False
+
+    @property
+    def in_transaction(self) -> bool:
+        """The shim-side probe behind INV-10: a tool call that returns (or
+        raises out) while this is True has leaked an open transaction."""
+        return not self._closed and self._conn.in_transaction
 
     async def execute(self, sql: str, parameters: Any = ()) -> SimCursor:
         while True:
@@ -279,6 +310,14 @@ class SimConnection:
             self._conn.close()
             self._closed = True
 
+    def teardown(self) -> None:
+        """Harness-side cleanup outside the scheduled run — no yield, no
+        trace. For connections deliberately left open across a drain (a
+        leaked-transaction wall) that can no longer park for a grant."""
+        if not self._closed:
+            self._conn.close()
+            self._closed = True
+
 
 class SimScheduler:
     """Cooperative interleaving driver (R3 §1.3, Phase 2), seeded.
@@ -294,8 +333,13 @@ class SimScheduler:
         self._trace = trace
         self._parked: dict[str, asyncio.Event] = {}
         self._arrival = asyncio.Event()
+        self._draining = False
 
     async def yield_point(self, writer_id: str) -> None:
+        if self._draining:
+            # Grant budget exhausted: cancelled writers must still be able
+            # to run cleanup (connection close) without parking forever.
+            return
         event = asyncio.Event()
         self._parked[writer_id] = event
         self._arrival.set()
@@ -308,21 +352,35 @@ class SimScheduler:
             self._arrival.set()
 
     async def run(
-        self, writers: Mapping[str, Coroutine[Any, Any, Any]]
+        self,
+        writers: Mapping[str, Coroutine[Any, Any, Any]],
+        max_grants: int | None = None,
     ) -> dict[str, Any]:
         """Drive writer coroutines to completion; return their results by id.
 
         A writer that raises propagates its exception here (writer scripts
         are expected to catch domain errors like ToolError themselves and
         return an outcome value instead).
+
+        ``max_grants`` bounds the observation window: a starvation scenario
+        (e.g. writers spinning on BUSY behind a leaked transaction) never
+        drains on its own, so once the budget is spent every still-live
+        writer is cancelled and reported as ``None`` — starved.
         """
         tasks = {
             writer_id: asyncio.create_task(self._finishing(coro))
             for writer_id, coro in writers.items()
         }
+        grants = 0
         while True:
             live = [w for w, t in tasks.items() if not t.done()]
             if not live:
+                break
+            if max_grants is not None and grants >= max_grants:
+                self._draining = True
+                for task in tasks.values():
+                    if not task.done():
+                        task.cancel()
                 break
             parked_live = sorted(w for w in live if w in self._parked)
             if len(parked_live) < len(live):
@@ -333,8 +391,15 @@ class SimScheduler:
                 continue
             choice = self._rng.choice(parked_live)
             self._trace.append({"op": "grant", "writer": choice})
+            grants += 1
             self._parked.pop(choice).set()
-        return {w: t.result() for w, t in tasks.items()}
+        results: dict[str, Any] = {}
+        for writer_id, task in tasks.items():
+            try:
+                results[writer_id] = await task
+            except asyncio.CancelledError:
+                results[writer_id] = None  # starved at the grant budget
+        return results
 
 
 async def open_sim_db(

@@ -13,12 +13,15 @@ import pytest
 from dst.test_cas_pingpong import run_cas_pingpong_enforce, run_cas_pingpong_warn
 from dst.test_claim_race import run_claim_race
 from dst.test_receipt_crash import run_receipt_crash
+from dst.test_wal_starvation import run_wal_starvation_control, run_wal_starvation_red
 
 _SCENARIOS: dict[str, Callable[[Path, int], Awaitable[dict[str, Any]]]] = {
     "claim-race": run_claim_race,
     "receipt-crash": run_receipt_crash,
     "cas-pingpong-warn": run_cas_pingpong_warn,
     "cas-pingpong-enforce": run_cas_pingpong_enforce,
+    "wal-starvation-red": run_wal_starvation_red,
+    "wal-starvation-control": run_wal_starvation_control,
 }
 
 _SEEDS_FILE = Path(__file__).parent / "regress_seeds.txt"
