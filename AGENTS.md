@@ -25,6 +25,7 @@ bridge-db is a SQLite-backed MCP server for cross-system state sharing between C
 - Keep stdout reserved for MCP JSON-RPC; logging belongs on stderr.
 - Preserve caller ownership rules and source/system mapping.
 - Preserve FTS5 consistency for every write path that touches indexed tables.
+- Activity retention exempts rows tagged `SHIPPED` or `LEDGER` (case-insensitive) from the 50-per-source prune — BD-INV-1: retention never deletes a protected row, its receipt, or its disposition.
 - Prefer maintenance-only changes unless a new coordination surface is explicitly requested.
 
 ## Review guidelines

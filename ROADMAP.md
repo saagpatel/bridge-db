@@ -174,6 +174,42 @@ Shipped (PRs #6, #7)
 Scope note
 - These are within-scope extensions: they extract more signal from existing state/logs, not new data types. Bridge remains a cross-system state bridge, not a knowledge store.
 
+## Phase 7: Durable Ledger — Reopened 2026-07-10
+
+The 2026-04-17 scope closure above (Phases 0/1/2 of the Semantic Memory Arc) ruled
+out expanding bridge-db into a semantic knowledge store. **That closure stands —
+nothing in this phase revisits it.**
+
+Separately, a 2026-07-09/10 discovery audit
+(`docs/internal/ACTIVITY-LEDGER-DISCOVERY-2026-07-09.md`) found that the
+undocumented 50-per-source activity prune could silently delete `SHIPPED` rows
+before their downstream Notion sync ran, and that their receipts would
+cascade-delete in the same transaction. This is cross-system *state*
+coordination — the exact category this roadmap's own reopening clause names
+("reopen only if a concrete new cross-system coordination need surfaces") —
+not a knowledge-store expansion, so the roadmap reopens for this narrow scope.
+
+Shipped
+- Rows tagged `SHIPPED` or `LEDGER` (case-insensitive) are now retention-exempt
+  — BD-INV-1: retention never deletes a protected row, its receipt, or its
+  disposition.
+- Every prune emits a `log_activity.prune` audit line naming the deleted ids
+  and tags.
+- `health` and `--dogfood` add `ledger_protected_count`, `receipt_orphan_count`,
+  and `disposition_orphan_count`; the orphan counts gate `--dogfood`.
+- `get_activity_signal` surfaces protected rows as `kind:"ledger"` entries;
+  `export_bridge_markdown` renders a `## Pinned Ledger` section.
+- `get_shipped_events` gained a `limit` param, and `unprocessed_only` now also
+  excludes dispositioned rows so they stop re-appearing on every sync run.
+- Schema v13 adds `pending_handoffs.claimed_by` (the INV-13 claimant gate for
+  `clear_handoff`), riding the same migration train.
+
+Scope note
+- This is a within-scope extension of cross-system *state* coordination, not a
+  reopening of the semantic-memory closure. The Phase −1 lexical `recall`
+  ceiling and the "not a general knowledge store" scope pin (CLAUDE.md, README,
+  AGENTS.md, OPERATOR-CHECKLIST.md) still stand unchanged.
+
 ## Steady State
 
 Future work is maintenance-only:
