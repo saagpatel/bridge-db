@@ -430,6 +430,55 @@ async def test_get_activity_signal_does_not_mutate_fts_or_audit(
     assert not config.AUDIT_LOG_PATH.exists()
 
 
+async def test_signal_pins_protected_rows_beyond_window(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="cc",
+        project_name="p",
+        summary="durable milestone",
+        tags=["SHIPPED"],
+        timestamp="2026-01-01",
+        ctx=ctx,
+    )
+    for i in range(config.ACTIVITY_RETENTION_PER_SOURCE + 10):
+        await fns["log_activity"](
+            caller="cc",
+            project_name="p",
+            summary=f"noise {i}",
+            timestamp="2026-01-02",
+            ctx=ctx,
+        )
+
+    signal = await fns["get_activity_signal"](limit=5, ctx=ctx)
+    ledger = [e for e in signal if e["kind"] == "ledger"]
+    assert len(ledger) == 1
+    assert ledger[0]["summary"] == "durable milestone"
+    assert len([e for e in signal if e["kind"] != "ledger"]) <= 5
+
+
+async def test_signal_ledger_dedupes_recent_protected(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="cc", project_name="p", summary="fresh ship", tags=["SHIPPED"], ctx=ctx
+    )
+    signal = await fns["get_activity_signal"](limit=10, ctx=ctx)
+    matches = [e for e in signal if e["summary"] == "fresh ship"]
+    assert len(matches) == 1
+    assert matches[0]["kind"] == "ledger"
+
+
+async def test_signal_stays_flat_list(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    signal: list[dict[str, Any]] = await fns["get_activity_signal"](ctx=make_ctx(db))
+    assert isinstance(signal, list)
+    assert all(isinstance(e, dict) and "kind" in e for e in signal)
+
+
 async def test_get_shipped_events(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:

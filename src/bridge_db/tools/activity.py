@@ -15,6 +15,7 @@ from bridge_db.auth import clamp_source_trust, require_caller
 from bridge_db.db import (
     get_db,
     insert_activity_row,
+    protected_tags_predicate,
     reindex_activity_fts,
 )
 from bridge_db.instruction_boundary import instruction_boundary
@@ -492,11 +493,36 @@ def register(mcp: FastMCP) -> None:
         )
         substantive_rows = await substantive_cursor.fetchall()
 
+        protected_sql, protected_params = protected_tags_predicate()
+        ledger_conditions = [
+            *conditions,
+            protected_sql,
+            f"NOT {_LIFECYCLE_ACTIVITY_SQL}",
+        ]
+        ledger_where = "WHERE " + " AND ".join(ledger_conditions)
+        ledger_cursor = await db.execute(
+            f"""
+            SELECT id, source, timestamp, project_name, summary, branch, tags, created_at, canonical_key, source_trust
+            FROM activity_log
+            {ledger_where}
+            ORDER BY timestamp DESC, created_at DESC, id DESC
+            LIMIT ?
+            """,
+            [*params, *protected_params, config.LEDGER_SIGNAL_LIMIT],
+        )
+        ledger_rows = await ledger_cursor.fetchall()
+        ledger_ids = {r["id"] for r in ledger_rows}
+        ledger_entries = [_activity_payload(r, kind="ledger") for r in ledger_rows]
+
         entries = [
             *aggregates.values(),
-            *[_activity_payload(r, kind="activity") for r in substantive_rows],
+            *[
+                _activity_payload(r, kind="activity")
+                for r in substantive_rows
+                if r["id"] not in ledger_ids
+            ],
         ]
-        return _select_activity_signal_entries(entries, limit)
+        return [*ledger_entries, *_select_activity_signal_entries(entries, limit)]
 
     @mcp.tool()
     async def get_shipped_events(

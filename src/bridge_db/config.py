@@ -49,6 +49,10 @@ SNAPSHOT_RETENTION_PER_SYSTEM: int = 10
 # LEDGER is the universal opt-in for durable entries.
 LEDGER_PROTECTED_TAGS: frozenset[str] = frozenset({"SHIPPED", "LEDGER"})
 
+# Max pinned ledger entries returned by get_activity_signal (and mirrored by
+# cold-start surfacing). Small on purpose: recall covers the long tail.
+LEDGER_SIGNAL_LIMIT: int = 10
+
 # WAL file size at which `health` surfaces a soft warning. CLAUDE.md notes
 # that WAL over "a few MB" is worth a checkpoint. 10 MiB is a comfortable
 # default — high enough not to flap on normal workloads, low enough to catch
