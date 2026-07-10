@@ -15,3 +15,6 @@ cas-pingpong-enforce 2
 # checkpoint starved); control arm pins bounded-WAL liveness
 wal-starvation-red 0
 wal-starvation-control 0
+# trust-race: WC-8 — Phase-3 INV-8 fix pin (mid-window trust downgrade
+# makes the trust-bound CAS miss; claim refused, never stale-trust-active)
+trust-race 0

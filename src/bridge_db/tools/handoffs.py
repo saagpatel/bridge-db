@@ -292,15 +292,21 @@ def register(mcp: FastMCP) -> None:
                 }
             # cc + confirm=True → confirmed override; fall through to the transition.
 
+        # INV-8: trust is a second TOCTOU coordinate the status guard alone
+        # does not cover — the provenance gate above evaluated SELECT-time
+        # trust, so the CAS re-verifies that same value at commit time. A
+        # mid-window trust change (no tool writes one today; this is armor
+        # for the day an ingest/sync/admin path does) makes the CAS miss and
+        # the claim is refused instead of landing under stale trust.
         cursor = await db.execute(
             """
             UPDATE pending_handoffs
             SET status = 'active',
                 picked_up_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
                 claimed_by = ?
-            WHERE id = ? AND status = 'pending'
+            WHERE id = ? AND status = 'pending' AND source_trust = ?
             """,
-            (gate_identity, handoff_id),
+            (gate_identity, handoff_id, trust),
         )
         await always_tx(
             db,
