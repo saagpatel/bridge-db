@@ -197,7 +197,9 @@ def _status_attention(summary: dict[str, Any]) -> str | None:
     if signals["pending_handoffs"]:
         notes.append(f"pending_handoffs={signals['pending_handoffs']}")
     if signals["actionable_unprocessed_shipped"]:
-        notes.append(f"actionable_unprocessed_shipped={signals['actionable_unprocessed_shipped']}")
+        notes.append(
+            f"actionable_unprocessed_shipped={signals['actionable_unprocessed_shipped']}"
+        )
     if signals["processed_shipped_without_receipt"]:
         notes.append(
             f"processed_shipped_without_receipt={signals['processed_shipped_without_receipt']}"
@@ -222,7 +224,9 @@ def _has_detailed_mark_audit(rows: list[dict[str, Any]]) -> bool:
     if not rows:
         return True
     detail = str(rows[0].get("detail") or "")
-    return all(token in detail for token in ("activity_ids=", "updated_ids=", "missing_ids="))
+    return all(
+        token in detail for token in ("activity_ids=", "updated_ids=", "missing_ids=")
+    )
 
 
 def mark_audit_posture(
@@ -235,7 +239,9 @@ def mark_audit_posture(
         return "blocked shipped misuse observed"
     if "shipped_bypass_ids=" in detail:
         if processed_shipped_without_receipt == 0:
-            return "historical shipped bypass evidence only; no receiptless shipped rows"
+            return (
+                "historical shipped bypass evidence only; no receiptless shipped rows"
+            )
         return "legacy shipped bypass observed"
     if _has_detailed_mark_audit(rows):
         return "non-shipped compatibility detail current"
@@ -277,7 +283,9 @@ async def run_dogfood() -> bool:
         " processed_shipped_without_receipt="
         f"{summary['signals']['processed_shipped_without_receipt']}"
     )
-    print(f"  WAL: size_bytes={health['wal_size_bytes']}, warning={health['wal_warning']}")
+    print(
+        f"  WAL: size_bytes={health['wal_size_bytes']}, warning={health['wal_warning']}"
+    )
     print(f"  FTS: {_fts_detail(health['fts_index'])}")
     print(
         "  Recall:"
@@ -303,7 +311,11 @@ async def run_dogfood() -> bool:
 async def run_rebuild_content_index() -> bool:
     """Rebuild FTS content_index and verify it matches source tables."""
     from bridge_db import config
-    from bridge_db.db import collect_fts_index_metrics, open_db, repopulate_content_index
+    from bridge_db.db import (
+        collect_fts_index_metrics,
+        open_db,
+        repopulate_content_index,
+    )
 
     db = await open_db(config.DB_PATH)
     try:
@@ -376,7 +388,9 @@ async def run_checkpoint() -> bool:
         f"checkpointed={result['checkpointed']}"
     )
     ok = result["busy"] == 0
-    print(f"  Overall: {'truncated' if ok else 'partial (readers active — retry when idle)'}")
+    print(
+        f"  Overall: {'truncated' if ok else 'partial (readers active — retry when idle)'}"
+    )
     return ok
 
 
@@ -395,7 +409,7 @@ async def run_log_session_boundary(
 
     db = await open_db(config.DB_PATH)
     try:
-        activity_id = await insert_activity_row(
+        insert_result = await insert_activity_row(
             db,
             source="cc",
             timestamp=ts,
@@ -403,6 +417,7 @@ async def run_log_session_boundary(
             summary=summary,
             tags=["session-boundary"],
         )
+        activity_id = insert_result.activity_id
         await db.commit()
         metrics = await collect_fts_index_metrics(db)
     finally:
@@ -426,7 +441,9 @@ def _require_tty(action: str) -> bool:
     """Operator ceremonies require an interactive terminal. Agents run non-TTY."""
     if sys.stdin.isatty():
         return True
-    print(f"refused: --{action} is an operator ceremony and requires an interactive TTY")
+    print(
+        f"refused: --{action} is an operator ceremony and requires an interactive TTY"
+    )
     return False
 
 
@@ -439,7 +456,9 @@ def _read_principals_file() -> dict[str, Any]:
             if isinstance(data.get("principals"), dict):
                 return data
         except json.JSONDecodeError:
-            print(f"warning: malformed principals file at {config.PRINCIPALS_PATH}, rewriting")
+            print(
+                f"warning: malformed principals file at {config.PRINCIPALS_PATH}, rewriting"
+            )
     return {"version": 1, "principals": {}}
 
 
@@ -482,7 +501,9 @@ def run_enroll(caller: str) -> bool:
     _write_principals_file(data)
     log_audit("auth.enroll", caller, None, ok=True, detail=f"rotated={rotated}")
 
-    print(f"bridge-db enrollment — principal '{caller}' {'rotated' if rotated else 'enrolled'}")
+    print(
+        f"bridge-db enrollment — principal '{caller}' {'rotated' if rotated else 'enrolled'}"
+    )
     print("  Set this token in the client's MCP spawn env (shown once, not stored):")
     print(f"  token: {token}")
     print("  env:   BRIDGE_DB_PRINCIPAL_TOKEN")
@@ -527,7 +548,9 @@ async def run_promote_section(section_name: str) -> bool:
     from bridge_db.models import SECTION_OWNERS
 
     if section_name not in SECTION_OWNERS:
-        print(f"refused: unknown section '{section_name}'. Known: {sorted(SECTION_OWNERS)}")
+        print(
+            f"refused: unknown section '{section_name}'. Known: {sorted(SECTION_OWNERS)}"
+        )
         return False
     if not _require_tty("promote-section"):
         return False
@@ -566,8 +589,12 @@ async def run_promote_section(section_name: str) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="bridge-db")
-    parser.add_argument("--doctor", action="store_true", help="Run diagnostics and exit")
-    parser.add_argument("--status", action="store_true", help="Print a compact bridge summary")
+    parser.add_argument(
+        "--doctor", action="store_true", help="Run diagnostics and exit"
+    )
+    parser.add_argument(
+        "--status", action="store_true", help="Print a compact bridge summary"
+    )
     parser.add_argument(
         "--dogfood",
         action="store_true",
@@ -607,7 +634,9 @@ def main() -> None:
         metavar="CALLER",
         help="Remove a principal's enrollment (operator TTY only)",
     )
-    parser.add_argument("--list-principals", action="store_true", help="List enrolled principals")
+    parser.add_argument(
+        "--list-principals", action="store_true", help="List enrolled principals"
+    )
     parser.add_argument(
         "--promote-section",
         metavar="SECTION",
@@ -634,7 +663,9 @@ def main() -> None:
         ok = asyncio.run(run_checkpoint())
         sys.exit(0 if ok else 1)
     if args.log_session_boundary:
-        ok = asyncio.run(run_log_session_boundary(args.log_session_boundary, args.duration_minutes))
+        ok = asyncio.run(
+            run_log_session_boundary(args.log_session_boundary, args.duration_minutes)
+        )
         sys.exit(0 if ok else 1)
     if args.enroll:
         sys.exit(0 if run_enroll(args.enroll) else 1)

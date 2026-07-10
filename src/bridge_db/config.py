@@ -11,6 +11,7 @@ DB_PATH: Path = Path(
     )
 )
 
+
 # Bridge markdown file (export target for DB state and fallback read path for file-based clients).
 # The default path uses Claude Code's home-dir encoding convention: each `/` in the absolute home
 # path becomes `-` (e.g. /home/alice → -home-alice), producing a unique projects/ subdirectory.
@@ -19,7 +20,14 @@ def _default_bridge_file_path() -> Path:
     home = Path.home()
     # Encode the home path the same way Claude Code does: strip leading slash, replace / with -
     encoded_home = str(home).lstrip("/").replace("/", "-")
-    return home / ".claude" / "projects" / f"-{encoded_home}" / "memory" / "claude_ai_context.md"
+    return (
+        home
+        / ".claude"
+        / "projects"
+        / f"-{encoded_home}"
+        / "memory"
+        / "claude_ai_context.md"
+    )
 
 
 BRIDGE_FILE_PATH: Path = Path(
@@ -35,6 +43,11 @@ LOG_LEVEL: str = os.environ.get("BRIDGE_DB_LOG_LEVEL", "INFO").upper()
 # Retention limits
 ACTIVITY_RETENTION_PER_SOURCE: int = 50
 SNAPSHOT_RETENTION_PER_SYSTEM: int = 10
+
+# Tags whose rows are permanently exempt from activity retention (BD-INV-1).
+# Matched case-insensitively. Do not add other systems' tag names here —
+# LEDGER is the universal opt-in for durable entries.
+LEDGER_PROTECTED_TAGS: frozenset[str] = frozenset({"SHIPPED", "LEDGER"})
 
 # WAL file size at which `health` surfaces a soft warning. CLAUDE.md notes
 # that WAL over "a few MB" is worth a checkpoint. 10 MiB is a comfortable
@@ -56,7 +69,13 @@ AUDIT_LOG_PATH: Path = Path(
 PROJECT_REGISTRY_PATH: Path = Path(
     os.environ.get(
         "BRIDGE_DB_PROJECT_REGISTRY_PATH",
-        str(Path.home() / "Projects" / "GithubRepoAuditor" / "output" / "project-registry.json"),
+        str(
+            Path.home()
+            / "Projects"
+            / "GithubRepoAuditor"
+            / "output"
+            / "project-registry.json"
+        ),
     )
 )
 
@@ -65,7 +84,9 @@ PROJECT_REGISTRY_PATH: Path = Path(
 META_SHIPPED_EVENTS_PATH: Path = Path(
     os.environ.get(
         "BRIDGE_DB_META_SHIPPED_EVENTS_PATH",
-        str(Path(__file__).resolve().parents[2] / "config" / "meta-shipped-events.json"),
+        str(
+            Path(__file__).resolve().parents[2] / "config" / "meta-shipped-events.json"
+        ),
     )
 )
 

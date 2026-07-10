@@ -5,9 +5,11 @@ import json
 import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import aiosqlite
+
+from bridge_db import config
 
 logger = logging.getLogger("bridge_db.db")
 
@@ -414,7 +416,9 @@ CREATE INDEX IF NOT EXISTS idx_write_conflicts_surface_target
 # DBs already at v10 keep content_index rows built before tags were indexed and
 # tag/lifecycle searches (recall("SHIPPED"), DECISION, ...) miss historical rows.
 # The post-hook re-indexes activity rows so their tags become searchable.
-_MIGRATION_V10_TO_V11 = "-- v10 → v11: data-only; content_index rebuild runs in the post-hook.\n"
+_MIGRATION_V10_TO_V11 = (
+    "-- v10 → v11: data-only; content_index rebuild runs in the post-hook.\n"
+)
 
 
 # Migration v11 → v12: add heuristic session classification sidecar for
@@ -685,7 +689,9 @@ async def upsert_fts_entry(
     )
 
 
-async def delete_fts_entry(db: aiosqlite.Connection, source_type: str, source_id: str) -> None:
+async def delete_fts_entry(
+    db: aiosqlite.Connection, source_type: str, source_id: str
+) -> None:
     """Delete the content_index row for a given source key."""
     await db.execute(
         "DELETE FROM content_index WHERE source_type = ? AND source_id = ?",
@@ -719,6 +725,26 @@ async def gc_fts_orphans(db: aiosqlite.Connection, source_type: str) -> int:
     return cursor.rowcount or 0
 
 
+class InsertActivityResult(NamedTuple):
+    """Result of insert_activity_row: new row id + rows removed by retention."""
+
+    activity_id: int
+    pruned_rows: list[tuple[int, str]]  # (id, raw tags JSON) of pruned rows
+
+
+def protected_tags_predicate(column: str = "tags") -> tuple[str, list[str]]:
+    """SQL fragment matching rows whose tags include a retention-protected tag.
+
+    Case-insensitive by BD-INV-1: a lowercase 'ledger' from any writer must
+    still protect the row (every other tag matcher in this codebase is
+    exact-case; this one deliberately is not).
+    """
+    tags = sorted(config.LEDGER_PROTECTED_TAGS)
+    placeholders = ", ".join("?" for _ in tags)
+    sql = f"EXISTS (SELECT 1 FROM json_each({column}) WHERE upper(value) IN ({placeholders}))"
+    return sql, [t.upper() for t in tags]
+
+
 async def insert_activity_row(
     db: aiosqlite.Connection,
     *,
@@ -731,8 +757,8 @@ async def insert_activity_row(
     retention_limit: int | None = None,
     canonical_key: str | None = None,
     source_trust: str = "agent",
-) -> int:
-    """Insert an activity row and keep the FTS activity mirror in sync."""
+) -> InsertActivityResult:
+    """Insert an activity row, keep the FTS mirror in sync, and apply protected-aware retention."""
     cursor = await db.execute(
         """
         INSERT INTO activity_log
@@ -761,20 +787,27 @@ async def insert_activity_row(
         fts_text_for_activity(project_name, summary, branch, tags),
     )
 
+    pruned_rows: list[tuple[int, str]] = []
     if retention_limit is not None:
-        await db.execute(
-            """
+        protected_sql, protected_params = protected_tags_predicate()
+        cursor = await db.execute(
+            f"""
             DELETE FROM activity_log
             WHERE source = ? AND id NOT IN (
                 SELECT id FROM activity_log WHERE source = ?
                 ORDER BY created_at DESC, id DESC LIMIT ?
             )
-            """,
-            (source, source, retention_limit),
+            AND NOT {protected_sql}
+            RETURNING id, tags
+            """,  # noqa: S608 — predicate assembled from a closed literal set
+            (source, source, retention_limit, *protected_params),
         )
-        await gc_fts_orphans(db, "activity")
+        deleted = await cursor.fetchall()
+        if deleted:
+            pruned_rows = [(row["id"], row["tags"]) for row in deleted]
+            await gc_fts_orphans(db, "activity")
 
-    return int(activity_id)
+    return InsertActivityResult(activity_id=int(activity_id), pruned_rows=pruned_rows)
 
 
 _FTS_SOURCE_TABLES = {
@@ -866,7 +899,9 @@ async def reindex_all_activity_fts(db: aiosqlite.Connection) -> None:
     A DB already at v10 keeps tag-less activity rows until this runs.
     """
     await db.execute("DELETE FROM content_index WHERE source_type = 'activity'")
-    cursor = await db.execute("SELECT id, project_name, summary, branch, tags FROM activity_log")
+    cursor = await db.execute(
+        "SELECT id, project_name, summary, branch, tags FROM activity_log"
+    )
     for row in await cursor.fetchall():
         row_tags = _activity_tags_from_json(row["tags"])
         await db.execute(
@@ -874,7 +909,9 @@ async def reindex_all_activity_fts(db: aiosqlite.Connection) -> None:
             (
                 "activity",
                 str(row["id"]),
-                fts_text_for_activity(row["project_name"], row["summary"], row["branch"], row_tags),
+                fts_text_for_activity(
+                    row["project_name"], row["summary"], row["branch"], row_tags
+                ),
             ),
         )
 
