@@ -618,11 +618,6 @@ async def collect_status_summary(
             ),
             "open_write_conflicts": health["open_write_conflicts"],
         },
-        "open_write_conflicts_next_command": (
-            'get_write_conflicts(status="open")'
-            if health["open_write_conflicts"]
-            else None
-        ),
         "fts_index": health["fts_index"],
         "latest_snapshots": latest_snapshots,
         "latest_activity": latest_activity,

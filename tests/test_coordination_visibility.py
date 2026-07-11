@@ -82,19 +82,19 @@ async def test_health_open_conflicts_zero_on_clean_db(
     assert result["oldest_open_conflict_age_hours"] is None
 
 
-async def test_status_surfaces_open_conflicts_signal_and_next_command(
+async def test_status_surfaces_open_conflicts_signal(
     db: aiosqlite.Connection, health_fns: dict[str, Any]
 ) -> None:
+    # The count rides in signals exactly like its siblings — no special-cased
+    # next-command key (review finding: signal-with-remediation must follow
+    # the one existing convention, not grow a parallel key species).
     clean = await health_fns["status"](ctx=make_ctx(db))
     assert clean["signals"]["open_write_conflicts"] == 0
-    assert clean["open_write_conflicts_next_command"] is None
+    assert "open_write_conflicts_next_command" not in clean
 
     await _seed_open_conflict(db, "career")
     flagged = await health_fns["status"](ctx=make_ctx(db))
     assert flagged["signals"]["open_write_conflicts"] == 1
-    assert flagged["open_write_conflicts_next_command"] == (
-        'get_write_conflicts(status="open")'
-    )
 
 
 # ── get_pending_handoffs status filter ───────────────────────────────────────

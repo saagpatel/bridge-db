@@ -133,7 +133,8 @@ async def run_status(*, now: datetime | None = None) -> bool:
         " processed_shipped_without_receipt="
         f"{summary['signals']['processed_shipped_without_receipt']},"
         f" fts_missing={summary['signals']['fts_missing']},"
-        f" fts_orphaned={summary['signals']['fts_orphaned']}"
+        f" fts_orphaned={summary['signals']['fts_orphaned']},"
+        f" open_write_conflicts={summary['signals']['open_write_conflicts']}"
     )
     print(f"  FTS: {_fts_detail(summary['fts_index'])}")
     trust = summary["pending_handoffs_by_trust"]
@@ -295,15 +296,14 @@ async def run_dogfood() -> bool:
     # Informational, never a dogfood gate: open receipts are the conflict
     # machinery doing its job; the operator action is to read them, not to
     # treat the bridge as failing.
-    print(
-        f"  Write conflicts: open={health['open_write_conflicts']}"
-        + (
+    if health["open_write_conflicts"]:
+        print(
+            f"  Write conflicts: open={health['open_write_conflicts']},"
             f" oldest_age_hours={health['oldest_open_conflict_age_hours']}"
-            f' (inspect via get_write_conflicts(status="open"))'
-            if health["open_write_conflicts"]
-            else ""
+            ' (inspect via get_write_conflicts(status="open"))'
         )
-    )
+    else:
+        print("  Write conflicts: open=0")
     print(f"  FTS: {_fts_detail(health['fts_index'])}")
     print(
         "  Recall:"
