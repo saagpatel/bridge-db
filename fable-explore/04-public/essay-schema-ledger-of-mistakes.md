@@ -1,4 +1,4 @@
-# A schema is a ledger of your mistakes
+# An autobiography with no delete key
 
 *Draft for saagarpatel.dev. Third in the bridge-db series, after the simulation-testing piece and "Losing loudly."*
 
