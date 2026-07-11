@@ -18,7 +18,8 @@ code changes are drafts for review, live DB untouched.
    drafts with diff sketches + test plans, ranked. Headliner P1: two `date.today()`
    calls bypass the DST clock seam (verified; also a local-vs-UTC inconsistency).
    P2: health is blind to `write_conflicts`. P3: active handoff claims unreadable.
-   P4–P6 smaller. *Complete, awaiting review — no src/ changes made.*
+   P4–P6 smaller. *All six shipped: merged to main 2026-07-11, verifier green
+   (428 tests / pyright strict / ruff). See the outcome banner in the file.*
 
 ## Public material drafts (04-public/)
 
@@ -56,8 +57,9 @@ code changes are drafts for review, live DB untouched.
   code idiom).
 - Site integration: explorer palette is CSS-variable-scoped at the top of the file for
   easy reskin; SVG uses the same paper palette.
-- The DST essay's confession section depends on proposal P1 landing (or being openly
-  "in review") before publication, so the essay's claims and the repo agree.
+- The DST essay's publication gate is CLEAR as of 2026-07-11: P1 merged to main, so
+  the confession section's "that check is going in with the fix" now agrees with the
+  repo — the grep-guard lives in tests/test_clock_seam.py.
 - All three essays passed a corpus-rubrics review pass (2026-07-11): count fossils and
   cross-document consistency fixes applied; headline numbers re-verified against the
   repo (sim.py = 432 lines, config.py:114 cites 17/30). The title question is resolved:

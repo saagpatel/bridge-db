@@ -1,9 +1,17 @@
 # bridge-db improvement proposals (drafts for review)
 
-Session: 2026-07-10 Fable deep-dive. All proposals are drafts — no src/ edits made, no
-live DB touched. Ranked by (value ÷ risk). Each carries a concrete diff sketch and a
-test plan. Scope check: all six are coordination/memory/data-model side; none expand
-bridge-db toward a knowledge store; none change the MCP surface incompatibly.
+> **Outcome (2026-07-11): all six shipped.** Implemented on four branches during the
+> same session, operator-approved, and merged to main: P1 via `fix/clock-seam-leak`,
+> P2+P3 via `feat/coordination-visibility` (review-hardened by an 8-angle code review),
+> P4+P5 via `feat/observability-parity`, P6 via `fix/update-section-echo-note`.
+> Post-merge verifier: 428 tests passed, pyright 0 errors (strict), ruff clean.
+> The text below is preserved as written pre-implementation.
+
+Session: 2026-07-10 Fable deep-dive. All proposals were drafted as reviewable diffs —
+no src/ edits on this branch, no live DB touched. Ranked by (value ÷ risk). Each
+carries a concrete diff sketch and a test plan. Scope check: all six are
+coordination/memory/data-model side; none expand bridge-db toward a knowledge store;
+none change the MCP surface incompatibly.
 
 ---
 
