@@ -2,6 +2,12 @@
 # behavior-pinning seed is committed here and replays forever.
 # Format: <scenario> <seed>  — loader: tests/dst/test_regress_seeds.py
 claim-race 0
+# clear-race: WC-2 — the INV-3/INV-13 clear boundary. cc-clear races
+# codex-pickup on a pending handoff; at this seed the claim commits between
+# the clear's SELECT and its guarded UPDATE, so the post-update recheck
+# refuses the clear (clear_refused_race). 9/30 sweep seeds hit the race
+# branch; 12/30 refuse overall. First corpus scenario to drive clear_handoff.
+clear-race 0
 # receipt-crash: WC-6 — Phase-3 INV-2 fix pin (crash still lands; TWO
 # concurrent retries converge the ledger to one durable stale_claim
 # receipt via the statement-atomic dedupe). Re-pinned 11 → 5 → 20 across

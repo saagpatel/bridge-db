@@ -14,12 +14,11 @@ Coverage roster (label → cheapest pinned firing run):
 - stale_cas_rejection           → cas-pingpong warn @ STALE_CAS_SEED (CAS loses)
 - missing_cas_rejection         → cas-pingpong enforce @ LOST_UPDATE_SEED
 - wal_truncated                 → wal-starvation control @ PINNED_SEED
+- clear_refused_foreign_claim    → clear-race @ CLEAR_REFUSED_SEED
+- clear_refused_race             → clear-race @ CLEAR_REFUSED_SEED (race branch)
 
 Known-unreachable by the current corpus (Phase 2+ scenario debt, NOT
 asserted here — listing them keeps the gap loud instead of silent):
-- clear_refused_foreign_claim — needs the clear-time boundary scenario
-  (R4 WC-2 / the INV-3 clear race); no corpus scenario drives
-  clear_handoff yet.
 - attribution_divergence — needs AUTH_MODE=warn with a channel-bound
   principal diverging from the claimed caller (R4 RC-10); the DST suite
   runs auth off.
@@ -30,6 +29,7 @@ from pathlib import Path
 from bridge_db.invariants import sometimes_counts
 from dst.test_cas_pingpong import LOST_UPDATE_SEED, run_cas_pingpong
 from dst.test_claim_race import RACING_SEED, run_claim_race
+from dst.test_clear_race import CLEAR_REFUSED_SEED, run_clear_race
 from dst.test_receipt_crash import CRASHING_SEED, run_receipt_crash
 from dst.test_wal_starvation import PINNED_SEED, run_wal_starvation
 
@@ -49,6 +49,8 @@ EXPECTED_LABELS = frozenset(
         "stale_cas_rejection",
         "missing_cas_rejection",
         "wal_truncated",
+        "clear_refused_foreign_claim",
+        "clear_refused_race",
     }
 )
 
@@ -60,6 +62,7 @@ async def test_every_corpus_reachable_label_fires(tmp_path: Path) -> None:
     await run_cas_pingpong(tmp_path / "stale", STALE_CAS_SEED, mode="warn")
     await run_cas_pingpong(tmp_path / "enforce", LOST_UPDATE_SEED, mode="enforce")
     await run_wal_starvation(tmp_path / "wal", PINNED_SEED, leak=False)
+    await run_clear_race(tmp_path / "clear", CLEAR_REFUSED_SEED)
 
     counts = sometimes_counts()
     dead = sorted(label for label in EXPECTED_LABELS if not counts.get(label))
