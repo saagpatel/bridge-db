@@ -58,3 +58,8 @@ code changes are drafts for review, live DB untouched.
   easy reskin; SVG uses the same paper palette.
 - The DST essay's confession section depends on proposal P1 landing (or being openly
   "in review") before publication, so the essay's claims and the repo agree.
+- All three essays passed a corpus-rubrics review pass (2026-07-11): count fossils and
+  cross-document consistency fixes applied; headline numbers re-verified against the
+  repo (sim.py = 432 lines, config.py:114 cites 17/30). One open editorial call: the
+  schema-ledger essay's title says "schema" while its closing stands behind the
+  migration ladder — retitle or license the title early. Operator's decision.

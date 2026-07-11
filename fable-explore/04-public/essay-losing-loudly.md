@@ -16,7 +16,7 @@ Five situations mint one:
 
 1. A compare-and-swap write whose version token is stale. Someone else got there first; the receipt names both versions.
 2. A write that should have carried a version token and didn't. Rejected in the current default mode, receipted either way.
-3. A blind overwrite that was *accepted*, back when the permissive mode allowed it. This is the one I find philosophically interesting. The system let the write through, legally, by configuration. It still recorded a receipt carrying the hash of the content it destroyed. Permitted is not the same as anonymous.
+3. A blind overwrite that the old permissive mode *accepted*. This is the one I find philosophically interesting. The system let the write through, legally, by configuration, and still receipted the hash of the content it destroyed. Production never minted one of these; the simulator minted plenty, seventeen runs out of thirty in one sweep, which is a large part of why the mode is old. Permitted is not the same as anonymous.
 4. A handoff claim that lost a race. Two agents both saw a pending handoff and grabbed for it; the guarded UPDATE picks one winner, and the loser's refusal is receipted.
 5. A stale file import. The markdown fallback file tried to overwrite database state that had moved on since the file was exported. The export records its base version and hash precisely so this comparison has something to compare against.
 

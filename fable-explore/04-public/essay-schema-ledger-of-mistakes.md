@@ -30,11 +30,11 @@ Read in order, mine says more about how the system actually evolved than any doc
 
 **v12: keeping guesses out of the actuals.** Cost rows are measured facts. Then I wanted heuristic classification on top: what kind of session was this, which model dominated, how confident is the guess. v12 puts all of that in a sidecar table with a confidence column, keyed to the actuals but never mixed into them. There's a small data-modeling ethics in that separation. Facts and inferences can share a join key; they shouldn't share a table.
 
-**v13: a column ordered by a machine.** A deterministic simulator found that one agent could clear a handoff another agent was actively holding, because the schema never recorded who claimed it. The fix needed memory, and memory in a schema means a column: `claimed_by`, written at pickup, checked at clear. Twelve rungs of the ladder came from me noticing things. The thirteenth came from a test harness proving a race I hadn't imagined. I'd call that the ladder's trajectory in one sentence.
+**v13: a column ordered by a machine.** A deterministic simulator found that one agent could clear a handoff another agent was actively holding, because the schema never recorded who claimed it. The fix needed memory, and memory in a schema means a column: `claimed_by`, written at pickup, checked at clear. Twelve versions of this schema came from me noticing things. The thirteenth came from a test harness proving a race I hadn't imagined. I'd call that the ladder's trajectory in one sentence.
 
 ## What the ladder knows
 
-Put the thirteen rungs side by side and the arc is legible: widen who participates, add memory, then spend version after version on the same deepening theme, which is that claims need evidence. Receipts, identity, provenance, dispositions, conflict receipts, claimants. A coordination system for AI agents turns out to be mostly an evidence system, and I learned that one migration at a time.
+Put the thirteen versions side by side and the arc is legible: widen who participates, add memory, then spend version after version on the same deepening theme, which is that claims need evidence. Receipts, identity, provenance, dispositions, conflict receipts, claimants. A coordination system for AI agents turns out to be mostly an evidence system, and I learned that one migration at a time.
 
 Two guardrails frame the whole thing. Each rung commits independently, so a crash mid-migration strands you at a real version instead of between versions. And a database newer than the running code refuses to open at all, because a v13 binary guessing at v14 data is how autobiographies get rewritten by someone who wasn't there.
 
