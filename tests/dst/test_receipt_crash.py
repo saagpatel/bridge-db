@@ -13,6 +13,19 @@ residue of process death — but the caller's natural retry converges the
 ledger to exactly one durable, attributable receipt. The pinned seed
 asserts the RECOVERY, and the pre-fix silent-loss shape (zero rows after
 retry) would fail these assertions red.
+
+Subsumes WC-7 (self-race phantom, R4 corpus-acceptance): WC-7's hazard is a
+retry after an ambiguous durable-BUSY-on-commit emitting a phantom
+`raced_claim` receipt that names the caller as loser to a claim it holds.
+The Phase-3 INV-2 fix routes every non-'pending' retry through the pre-check
+-> `stale_claim` path (handoffs.py:204), so no retry can emit `raced_claim`;
+the recovery arm below already asserts `raced == 0` after retries observe an
+active row. WC-7's one distinct angle (the retrying caller IS the winner)
+takes that identical pre-check path — no new invariant behaviour — and its
+ambiguity arm ("commit durable but BUSY returned") is inexpressible without
+a post-commit fault mode the engine deliberately omits. Tracked as covered
+here rather than built as a redundant scenario that would need shared-harness
+surgery for zero marginal invariant coverage.
 """
 
 import asyncio

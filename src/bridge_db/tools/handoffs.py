@@ -496,6 +496,11 @@ def register(mcp: FastMCP) -> None:
                 clearable_ids,
             )
             race_refused_ids = [row["id"] for row in await cursor.fetchall()]
+            # INV-3/INV-13 clear-race counter: the guarded UPDATE matched 0 rows
+            # because a concurrent claim changed claimed_by between this call's
+            # SELECT and its UPDATE — distinct from a static foreign refusal
+            # decided in the loop above (both feed clear_refused_foreign_claim).
+            sometimes("clear_refused_race", bool(race_refused_ids))
             if race_refused_ids:
                 refused_ids.extend(race_refused_ids)
                 clearable_ids = [
