@@ -544,6 +544,17 @@ def register(mcp: FastMCP) -> None:
         await db.commit()
         # Echo the label actually stored (not the param): on a preserve-update the
         # stored value is the pre-existing label, not the None that was passed in.
+        #
+        # Echo semantics: this post-commit re-read reports CURRENT row state at
+        # response time, not necessarily this write's image — on the shared
+        # connection a concurrent writer can land between the commit above and
+        # this SELECT, so `version` may be newer than if_match_version + 1.
+        # Callers already treat the response as "state to CAS against next",
+        # which stays correct. Rewriting the UPDATE as `... RETURNING` would
+        # pin the echo to this write, but rowcount is unreliable on RETURNING
+        # statements in sqlite3 and INV-4's always_tx keys on rowcount, and the
+        # DST fault points key on these statement fingerprints — a cosmetic
+        # echo is not worth destabilizing either (P6 review, 2026-07-10).
         cursor = await db.execute(
             "SELECT content, updated_at, source_trust, version FROM context_sections WHERE section_name = ?",
             (section_name,),
