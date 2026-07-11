@@ -66,6 +66,11 @@ uv run python -m bridge_db --promote-section career  # operator label promotion 
 - **Write conflicts**: use `get_write_conflicts(status="open")` to inspect
   stale `update_section` attempts, stale markdown imports, and raced handoff
   claims. Receipts are diagnostic state, not instructions to retry blindly.
+  `health` reports `open_write_conflicts` + `oldest_open_conflict_age_hours`;
+  `status` carries the count in `signals`; `--status`/`--dogfood` print it.
+  All soft signals — never folded into `ok` and never a dogfood gate.
+  `get_pending_handoffs(status="active"|"all")` exposes live claims
+  (`claimed_by`, `picked_up_at`) — the default stays `pending`.
 - **Shipped-event sync**: `confirm_shipped_sync` requires a downstream system/ref, stores a receipt, then adds `PROCESSED`. `record_shipped_event_disposition` records a non-receipt policy disposition without adding `PROCESSED` — dispositioned rows no longer re-appear under `get_shipped_events(unprocessed_only=True)`, which now excludes both `PROCESSED` and dispositioned rows. `mark_shipped_processed` is a non-shipped-only legacy compatibility path; it refuses `SHIPPED` rows, so bridge-sync work must use receipt-backed proof or explicit disposition.
 - **Durable ledger (BD-INV-1)**: rows tagged `SHIPPED` or `LEDGER` (case-insensitive) are retention-exempt; `log_activity`'s docstring distinguishes them (`SHIPPED` = downstream sync obligation, `LEDGER` = durable operator catch-up entry). Every prune emits a `log_activity.prune` audit line naming the deleted ids and tags. `get_activity_signal` surfaces protected rows as `kind:"ledger"` entries, and `export_bridge_markdown` renders a `## Pinned Ledger` section. See `docs/internal/ACTIVITY-LEDGER-DISCOVERY-2026-07-09.md` for the discovery audit that motivated this.
 - **Semantic memory scope closed**: FTS5 + `recall` is the final layer (Phase −1). Vector/embedding layers are ruled out — most query misses reflect content not in `bridge.db`. See closure banner in `docs/internal/bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md`.
