@@ -15,6 +15,7 @@ from bridge_db import clock, config
 from bridge_db.audit import iter_jsonl
 from bridge_db.db import get_db
 from bridge_db.instruction_boundary import instruction_boundary
+from bridge_db.models import CallerID
 
 logger = logging.getLogger("bridge_db.tools.recall")
 
@@ -130,6 +131,8 @@ def collect_recall_stats(days: int = 7) -> dict[str, Any]:
     scope_counter: Counter[str] = Counter()
     query_counts: Counter[str] = Counter()
     query_result_sums: dict[str, int] = defaultdict(int)
+    caller_counts: Counter[str] = Counter()
+    caller_misses: Counter[str] = Counter()
 
     for record in iter_jsonl(RECALL_LOG_PATH):
         ts = record.get("ts")
@@ -150,6 +153,13 @@ def collect_recall_stats(days: int = 7) -> dict[str, Any]:
         scope = record.get("scope")
         if isinstance(scope, str):
             scope_counter[scope] += 1
+        # Per-caller attribution: pre-attribution log lines carry caller=None
+        # and land in the 'unattributed' bucket rather than being dropped.
+        raw_caller = record.get("caller")
+        caller = raw_caller if isinstance(raw_caller, str) else "unattributed"
+        caller_counts[caller] += 1
+        if n_results == 0:
+            caller_misses[caller] += 1
 
     top_queries = [
         {
@@ -162,6 +172,14 @@ def collect_recall_stats(days: int = 7) -> dict[str, Any]:
 
     miss_rate = round(misses / total, 4) if total else 0.0
 
+    caller_breakdown = {
+        caller: {
+            "count": count,
+            "miss_rate": round(caller_misses[caller] / count, 4),
+        }
+        for caller, count in sorted(caller_counts.items())
+    }
+
     return {
         "window_days": days,
         "total_queries": total,
@@ -169,6 +187,7 @@ def collect_recall_stats(days: int = 7) -> dict[str, Any]:
         "empty_query_count": empty,
         "top_queries": top_queries,
         "scope_breakdown": dict(scope_counter),
+        "caller_breakdown": caller_breakdown,
     }
 
 
@@ -234,6 +253,15 @@ def register(mcp: FastMCP) -> None:
             Literal["all", "section", "activity", "snapshot", "handoff"],
             Field(description="Limit results to one source type, or 'all'"),
         ] = "all",
+        caller: Annotated[
+            CallerID | None,
+            Field(
+                description="Optional requesting system, recorded in the query log "
+                "for per-caller usage analytics (recall_stats caller_breakdown). "
+                "Telemetry only — recall is read-only and the value is not "
+                "authenticated or enforced."
+            ),
+        ] = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> list[dict[str, Any]]:
         """Lexical search over sections, activity, snapshots, and handoffs via FTS5.
@@ -256,7 +284,7 @@ def register(mcp: FastMCP) -> None:
         tokens = _tokens_for_match(query)
 
         if not tokens:
-            _log_recall(query, scope, clamped_limit, 0, None)
+            _log_recall(query, scope, clamped_limit, 0, caller)
             return []
 
         db = get_db(ctx)
@@ -307,7 +335,7 @@ def register(mcp: FastMCP) -> None:
                 }
             )
 
-        _log_recall(query, scope, clamped_limit, len(results), None)
+        _log_recall(query, scope, clamped_limit, len(results), caller)
         return results
 
     @mcp.tool()

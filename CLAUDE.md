@@ -37,7 +37,7 @@ uv run python -m bridge_db --promote-section career  # operator label promotion 
 
 - `caller` parameter on write tools enforces ownership (`CallerID = Literal["cc","codex","claude_ai","notion_os","personal_ops"]`)
 - `source`/`system` DB columns map 1:1 from `caller`
-- Activity retention: unprotected rows keep the newest 50 per source; rows tagged `SHIPPED` or `LEDGER` (case-insensitive) are permanently retained — **BD-INV-1: retention never deletes a protected row, its receipt, or its disposition.** Enforced by the prune predicate, the `log_activity.prune` audit line, and health's `ledger_protected_count`/`receipt_orphan_count`/`disposition_orphan_count` metrics. Snapshot retention: 10 per system family (Codex operating and consulted-node snapshots are retained independently)
+- Activity retention: unprotected rows keep the newest 50 per source; rows tagged `SHIPPED` or `LEDGER` (case-insensitive) are permanently retained — **BD-INV-1: retention never deletes a protected row, its receipt, or its disposition.** Enforced by the prune predicate, the `log_activity.prune` audit line, and health's `ledger_protected_count`/`receipt_orphan_count`/`disposition_orphan_count` metrics. Snapshot retention: 10 per system family (Codex operating and consulted-node snapshots are retained independently); snapshot prunes emit a `save_snapshot.prune` audit line and `save_snapshot` returns `pruned_count`
 - Export trigger: consumers call `export_bridge_markdown` explicitly after writes
 - Startup sync trigger: Claude Code `/start` calls `sync_from_file` before bridge reads so Claude.ai-owned file edits are imported into SQLite first
 - Context CAS: consumers must pass `if_match_version` from `get_section` to
