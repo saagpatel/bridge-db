@@ -2,14 +2,13 @@
 
 import json
 import logging
-from datetime import date
 from typing import Annotated, Any, cast
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from bridge_db import config
+from bridge_db import clock, config
 from bridge_db.audit import log_audit
 from bridge_db.auth import clamp_source_trust, get_principal, require_caller
 from bridge_db.db import (
@@ -279,7 +278,10 @@ def register(mcp: FastMCP) -> None:
             source_trust, caller=caller, tool="log_activity"
         )
         db = get_db(ctx)
-        ts = timestamp or str(date.today())
+        # UTC via the clock seam: the old local-time default here both leaked
+        # real time into DST runs and disagreed with snapshots' UTC date near
+        # midnight.
+        ts = timestamp or clock.now().date().isoformat()
         resolution = resolve_project(project_name)
         insert_result = await insert_activity_row(
             db,
