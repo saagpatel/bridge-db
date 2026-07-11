@@ -40,9 +40,12 @@ uv run python -m bridge_db --promote-section career  # operator label promotion 
 - Activity retention: unprotected rows keep the newest 50 per source; rows tagged `SHIPPED` or `LEDGER` (case-insensitive) are permanently retained — **BD-INV-1: retention never deletes a protected row, its receipt, or its disposition.** Enforced by the prune predicate, the `log_activity.prune` audit line, and health's `ledger_protected_count`/`receipt_orphan_count`/`disposition_orphan_count` metrics. Snapshot retention: 10 per system family (Codex operating and consulted-node snapshots are retained independently)
 - Export trigger: consumers call `export_bridge_markdown` explicitly after writes
 - Startup sync trigger: Claude Code `/start` calls `sync_from_file` before bridge reads so Claude.ai-owned file edits are imported into SQLite first
-- Context CAS: consumers should pass `if_match_version` from `get_section` to
-  `update_section`; stale writes return conflict receipts. Existing-row blind
-  writes are canary-compatible unless `BRIDGE_DB_CONTEXT_CAS_MODE=enforce`.
+- Context CAS: consumers must pass `if_match_version` from `get_section` to
+  `update_section`; stale writes return conflict receipts. The default is
+  `BRIDGE_DB_CONTEXT_CAS_MODE=enforce` (flipped 2026-07-10 on the DST INV-4
+  evidence seed): existing-row blind writes are rejected with a durable
+  receipt. `warn` is the rollback lever — blind writes accepted, flagged,
+  and receipted with the displaced content's version + sha.
 - Export-state CAS: `export_bridge_markdown` records context section
   version/hash; `sync_from_file` refuses stale fallback-file imports and records
   `write_conflicts` receipts.

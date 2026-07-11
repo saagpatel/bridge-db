@@ -13,9 +13,12 @@ from bridge_db.db import (
     fts_text_for_handoff,
     get_db,
     record_write_conflict,
+    record_write_conflict_once,
+    rollback_on_error,
     upsert_fts_entry,
 )
 from bridge_db.instruction_boundary import instruction_boundary
+from bridge_db.invariants import always, always_tx, sometimes
 from bridge_db.models import CallerID, SourceTrust
 from bridge_db.project_resolver import resolve as resolve_project
 
@@ -191,7 +194,7 @@ def register(mcp: FastMCP) -> None:
 
         db = get_db(ctx)
         cursor = await db.execute(
-            "SELECT id, project_name, status, source_trust, canonical_key "
+            "SELECT id, project_name, status, source_trust, canonical_key, claimed_by "
             "FROM pending_handoffs WHERE id = ?",
             (handoff_id,),
         )
@@ -199,8 +202,44 @@ def register(mcp: FastMCP) -> None:
         if row is None:
             raise ToolError(f"No handoff found with id {handoff_id}")
         if row["status"] != "pending":
+            # INV-2 recovery half: a refused re-attempt is the loser's only
+            # durable trace when its raced_claim receipt died with a crashed
+            # process — record it, idempotently, before raising. The distinct
+            # reason keeps the raced_claim ledger phantom-free: a late or
+            # retried arrival is not itself a race. The insert-if-absent is
+            # atomic at statement level, so concurrent retries converge to
+            # one row instead of both passing a separate find.
+            async with rollback_on_error(db):
+                receipt_id = await record_write_conflict_once(
+                    db,
+                    surface="handoff",
+                    target_key=str(handoff_id),
+                    operation="pick_up_handoff",
+                    attempted_by=caller,
+                    principal=get_principal(ctx),
+                    reason="stale_claim",
+                    current_source_trust=row["source_trust"],
+                    detail={
+                        "project_name": row["project_name"],
+                        "current_status": row["status"],
+                        "claimed_by": row["claimed_by"],
+                    },
+                )
+                await db.commit()
+            sometimes("stale_claim_receipt_written")
+            log_audit(
+                "pick_up_handoff",
+                caller,
+                row["project_name"],
+                ok=False,
+                detail=(
+                    f"decision=stale_claim status={row['status']} "
+                    f"receipt_id={receipt_id}"
+                ),
+            )
             raise ToolError(
-                f"Handoff {handoff_id} is not pending (status: {row['status']})"
+                f"Handoff {handoff_id} is not pending (status: {row['status']}). "
+                f"Conflict receipt: {receipt_id}."
             )
 
         trust = row["source_trust"]
@@ -248,44 +287,65 @@ def register(mcp: FastMCP) -> None:
                 }
             # cc + confirm=True → confirmed override; fall through to the transition.
 
+        # INV-8: trust is a second TOCTOU coordinate the status guard alone
+        # does not cover — the provenance gate above evaluated SELECT-time
+        # trust, so the CAS re-verifies that same value at commit time. A
+        # mid-window trust change (no tool writes one today; this is armor
+        # for the day an ingest/sync/admin path does) makes the CAS miss and
+        # the claim is refused instead of landing under stale trust.
         cursor = await db.execute(
             """
             UPDATE pending_handoffs
             SET status = 'active',
                 picked_up_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
                 claimed_by = ?
-            WHERE id = ? AND status = 'pending'
+            WHERE id = ? AND status = 'pending' AND source_trust = ?
             """,
-            (gate_identity, handoff_id),
+            (gate_identity, handoff_id, trust),
+        )
+        await always_tx(
+            db,
+            cursor.rowcount <= 1,
+            "INV-1: handoff claim CAS must commit at most one winner",
+            handoff_id=handoff_id,
+            rowcount=cursor.rowcount,
         )
         if cursor.rowcount == 0:
             # CAS guard: another 'cc'/'codex' caller transitioned this handoff out
             # of 'pending' between our SELECT above and this UPDATE (the TOCTOU
             # window). The status-guarded UPDATE — not the earlier SELECT — is the
             # real, single-winner claim.
-            await db.rollback()
-            status_cursor = await db.execute(
-                "SELECT status FROM pending_handoffs WHERE id = ?",
-                (handoff_id,),
-            )
-            current_status = await status_cursor.fetchone()
-            receipt_id = await record_write_conflict(
-                db,
-                surface="handoff",
-                target_key=str(handoff_id),
-                operation="pick_up_handoff",
-                attempted_by=caller,
-                principal=get_principal(ctx),
-                reason="raced_claim",
-                current_source_trust=trust,
-                detail={
-                    "project_name": project,
-                    "current_status": current_status["status"]
-                    if current_status is not None
-                    else None,
-                },
-            )
-            await db.commit()
+            #
+            # INV-2: the receipt stays in the claim attempt's own transaction.
+            # The zero-change UPDATE already holds it open; the re-read and
+            # receipt INSERT stage into it and the single commit below makes
+            # the loss durable atomically. The old rollback→separate-receipt-
+            # commit shape left a two-op crash window that silently dropped
+            # the receipt (DST corpus: receipt-crash seed 11).
+            async with rollback_on_error(db):
+                status_cursor = await db.execute(
+                    "SELECT status FROM pending_handoffs WHERE id = ?",
+                    (handoff_id,),
+                )
+                current_status = await status_cursor.fetchone()
+                receipt_id = await record_write_conflict(
+                    db,
+                    surface="handoff",
+                    target_key=str(handoff_id),
+                    operation="pick_up_handoff",
+                    attempted_by=caller,
+                    principal=get_principal(ctx),
+                    reason="raced_claim",
+                    current_source_trust=trust,
+                    detail={
+                        "project_name": project,
+                        "current_status": current_status["status"]
+                        if current_status is not None
+                        else None,
+                    },
+                )
+                await db.commit()
+            sometimes("raced_claim_receipt_written")
             log_audit(
                 "pick_up_handoff",
                 caller,
@@ -395,6 +455,12 @@ def register(mcp: FastMCP) -> None:
         clearable_ids: list[int] = []
         refused_ids: list[int] = []
         for row in rows:
+            always(
+                row["status"] in ("pending", "active"),
+                "INV-3: only pending|active handoffs may move toward cleared",
+                handoff_id=row["id"],
+                status=row["status"],
+            )
             claimant = row["claimed_by"]
             if (
                 row["status"] == "active"
@@ -438,6 +504,7 @@ def register(mcp: FastMCP) -> None:
                     if handoff_id not in race_refused_ids
                 ]
         await db.commit()
+        sometimes("clear_refused_foreign_claim", bool(refused_ids))
 
         if refused_ids:
             log_audit(

@@ -7,13 +7,14 @@ import os
 import secrets
 import sys
 import tempfile
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, cast
+
+from bridge_db import clock
 
 
 async def _run_doctor() -> bool:
     """Run diagnostics and print pass/fail for each check. Returns True if all pass."""
-    from datetime import datetime
 
     from bridge_db import config
     from bridge_db.db import SCHEMA_VERSION, open_db
@@ -56,7 +57,7 @@ async def _run_doctor() -> bool:
     bridge_detail = str(config.BRIDGE_FILE_PATH)
     if bridge_exists:
         mtime = config.BRIDGE_FILE_PATH.stat().st_mtime
-        age_h = (datetime.now(UTC).timestamp() - mtime) / 3600
+        age_h = (clock.now().timestamp() - mtime) / 3600
         bridge_detail += f" ({age_h:.1f}h old)"
     checks.append(("Bridge file exists", bridge_exists, bridge_detail))
 
@@ -409,7 +410,7 @@ async def run_log_session_boundary(
     from bridge_db.audit import log_audit
     from bridge_db.db import collect_fts_index_metrics, insert_activity_row, open_db
 
-    ts = timestamp or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts = timestamp or clock.now().strftime("%Y-%m-%dT%H:%M:%SZ")
     summary = "CC session ended"
     if duration_minutes:
         summary = f"CC session ended ({duration_minutes}min)"
@@ -503,7 +504,7 @@ def run_enroll(caller: str) -> bool:
     rotated = caller in data["principals"]
     data["principals"][caller] = {
         "token_sha256": hash_token(token),
-        "enrolled_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "enrolled_at": clock.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     _write_principals_file(data)
     log_audit("auth.enroll", caller, None, ok=True, detail=f"rotated={rotated}")

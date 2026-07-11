@@ -7,7 +7,7 @@ from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from bridge_db import config
+from bridge_db import clock, config
 from bridge_db.auth import auth_mode, load_principals
 from bridge_db.db import (
     SCHEMA_VERSION,
@@ -44,7 +44,7 @@ ACTIVE_HANDOFF_STALE_AFTER_HOURS = 72.0
 
 
 def _utc_now() -> datetime:
-    return datetime.now(UTC)
+    return clock.now()
 
 
 def _parse_utc_timestamp(value: str | None) -> datetime | None:
@@ -219,7 +219,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     bridge_file_age_seconds: float | None = None
     if bridge_file_exists:
         mtime = bridge_path.stat().st_mtime
-        bridge_file_age_seconds = datetime.now(UTC).timestamp() - mtime
+        bridge_file_age_seconds = _utc_now().timestamp() - mtime
 
     fts_index = await collect_fts_index_metrics(db)
     claude_ai_section_drift = await collect_claude_ai_section_drift(db)

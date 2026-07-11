@@ -11,6 +11,7 @@ from conftest import CaptureMCP, make_ctx
 from mcp.server.fastmcp.exceptions import ToolError
 
 from bridge_db import config
+from bridge_db.invariants import sometimes_counts
 from bridge_db.tools import handoffs as mod
 from bridge_db.tools.health import collect_status_summary
 
@@ -569,6 +570,8 @@ async def test_clear_refuses_other_roles_active_claim(
     assert result["refused_count"] == 1
     assert result["refused_ids"] == [created["handoff_id"]]
     assert "reason" in result
+    # INV-13 reachability: the refusal path reports itself as reached.
+    assert sometimes_counts().get("clear_refused_foreign_claim") == 1
 
     cursor = await db.execute(
         "SELECT status FROM pending_handoffs WHERE id = ?", (created["handoff_id"],)

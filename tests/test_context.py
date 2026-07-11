@@ -108,9 +108,15 @@ async def test_update_section_preserves_existing_trust_on_content_update(
         source_trust="operator",
         ctx=ctx,
     )
-    # Routine content re-sync with no trust assertion.
+    # Routine content re-sync with no trust assertion (CAS token per the
+    # enforce-default contract).
+    seeded = await fns["get_section"](section_name="career", ctx=ctx)
     result = await fns["update_section"](
-        caller="claude_ai", section_name="career", content="v2 refreshed", ctx=ctx
+        caller="claude_ai",
+        section_name="career",
+        content="v2 refreshed",
+        if_match_version=seeded["version"],
+        ctx=ctx,
     )
     assert result["source_trust"] == "operator"  # preserved, not demoted to 'agent'
 
@@ -137,11 +143,13 @@ async def test_update_section_explicit_trust_overrides_existing(
         ctx=ctx,
     )
     # Explicit 'agent' on an existing 'operator' row deliberately relabels it.
+    seeded = await fns["get_section"](section_name="career", ctx=ctx)
     result = await fns["update_section"](
         caller="claude_ai",
         section_name="career",
         content="v2",
         source_trust="agent",
+        if_match_version=seeded["version"],
         ctx=ctx,
     )
     assert result["source_trust"] == "agent"
@@ -170,8 +178,13 @@ async def test_update_section_is_upsert(
     await fns["update_section"](
         caller="claude_ai", section_name="career", content="v1", ctx=ctx
     )
+    seeded = await fns["get_section"](section_name="career", ctx=ctx)
     await fns["update_section"](
-        caller="claude_ai", section_name="career", content="v2", ctx=ctx
+        caller="claude_ai",
+        section_name="career",
+        content="v2",
+        if_match_version=seeded["version"],
+        ctx=ctx,
     )
 
     cursor = await db.execute(
@@ -522,6 +535,8 @@ async def test_sync_demotes_changed_section_to_ingested(
         owner="claude_ai",
         content="original content",
         source_trust="operator",
+        attempted_by="claude_ai",
+        operation="update_section",
     )
     await db.commit()
 
@@ -557,6 +572,8 @@ async def test_sync_preserves_label_when_content_unchanged(
         owner="claude_ai",
         content=parsed["career"],
         source_trust="operator",
+        attempted_by="claude_ai",
+        operation="update_section",
     )
     await db.commit()
 
@@ -588,6 +605,8 @@ async def test_sync_off_mode_keeps_legacy_label_preservation(
         owner="claude_ai",
         content="original",
         source_trust="operator",
+        attempted_by="claude_ai",
+        operation="update_section",
     )
     await db.commit()
 
@@ -625,6 +644,8 @@ async def test_sync_unchanged_despite_trailing_newline_variance(
         owner="claude_ai",
         content=parsed["career"] + "\n",
         source_trust="operator",
+        attempted_by="claude_ai",
+        operation="update_section",
     )
     await db.commit()
 

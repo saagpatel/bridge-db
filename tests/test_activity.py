@@ -12,6 +12,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 from bridge_db import config
 from bridge_db.db import collect_fts_index_metrics, insert_activity_row
+from bridge_db.invariants import sometimes_counts
 from bridge_db.tools import activity as mod
 
 
@@ -43,6 +44,22 @@ async def test_log_activity_inserts_row(
     assert rows[0]["source"] == "cc"
     assert rows[0]["project_name"] == "TestProject"
     assert json.loads(rows[0]["tags"]) == ["SHIPPED"]
+
+
+async def test_log_activity_counts_attribution_divergence(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    """INV-9 reachability: a row whose claimed source diverges from the
+    channel-bound principal is legal outside enforce mode but must count."""
+    diverged = make_ctx(db, principal="cc")
+    await fns["log_activity"](
+        caller="codex", project_name="P", summary="s", ctx=diverged
+    )
+    assert sometimes_counts().get("attribution_divergence") == 1
+
+    matching = make_ctx(db, principal="cc")
+    await fns["log_activity"](caller="cc", project_name="P", summary="s", ctx=matching)
+    assert sometimes_counts().get("attribution_divergence") == 1  # unchanged
 
 
 async def test_log_activity_persists_and_echoes_source_trust(

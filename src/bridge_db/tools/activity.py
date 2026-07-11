@@ -11,7 +11,7 @@ from pydantic import Field
 
 from bridge_db import config
 from bridge_db.audit import log_audit
-from bridge_db.auth import clamp_source_trust, require_caller
+from bridge_db.auth import clamp_source_trust, get_principal, require_caller
 from bridge_db.db import (
     get_db,
     insert_activity_row,
@@ -19,6 +19,7 @@ from bridge_db.db import (
     reindex_activity_fts,
 )
 from bridge_db.instruction_boundary import instruction_boundary
+from bridge_db.invariants import sometimes
 from bridge_db.models import (
     ACTIVITY_SOURCES,
     CallerID,
@@ -266,6 +267,14 @@ def register(mcp: FastMCP) -> None:
         - Anything else: free-form, searchable, prunable.
         """
         require_caller(ctx, caller, tool="log_activity")
+        # INV-9 reachability: a row whose claimed source diverges from the
+        # channel-bound principal is legal in auth 'warn' mode but must be
+        # observable — attribution is the forensic record every other
+        # invariant's diagnosis depends on.
+        principal = get_principal(ctx)
+        sometimes(
+            "attribution_divergence", principal is not None and principal != caller
+        )
         source_trust, source_trust_clamped = clamp_source_trust(
             source_trust, caller=caller, tool="log_activity"
         )

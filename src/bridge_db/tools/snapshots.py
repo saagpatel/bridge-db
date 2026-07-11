@@ -2,14 +2,13 @@
 
 import json
 import logging
-from datetime import UTC, datetime
 from typing import Annotated, Any, cast
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from bridge_db import config
+from bridge_db import clock, config
 from bridge_db.auth import clamp_source_trust, require_caller
 from bridge_db.db import (
     fts_text_for_snapshot,
@@ -18,13 +17,18 @@ from bridge_db.db import (
     upsert_fts_entry,
 )
 from bridge_db.instruction_boundary import instruction_boundary
-from bridge_db.models import SNAPSHOT_SYSTEM_MAP, CallerID, SourceTrust, snapshot_ownership_error
+from bridge_db.models import (
+    SNAPSHOT_SYSTEM_MAP,
+    CallerID,
+    SourceTrust,
+    snapshot_ownership_error,
+)
 
 logger = logging.getLogger("bridge_db.tools.snapshots")
 
 
 def _utc_snapshot_date() -> str:
-    return datetime.now(UTC).date().isoformat()
+    return clock.now().date().isoformat()
 
 
 def _snapshot_family(system: str, data: dict[str, Any]) -> str:
@@ -58,7 +62,10 @@ async def _prune_snapshots(db: Any, *, system: str) -> None:
             parsed_data = {}
         data: dict[str, Any] = {}
         if isinstance(parsed_data, dict):
-            data = {str(key): value for key, value in cast(dict[object, Any], parsed_data).items()}
+            data = {
+                str(key): value
+                for key, value in cast(dict[object, Any], parsed_data).items()
+            }
         family = _snapshot_family(system, data)
         seen_by_family[family] = seen_by_family.get(family, 0) + 1
         if seen_by_family[family] > config.SNAPSHOT_RETENTION_PER_SYSTEM:
@@ -84,7 +91,9 @@ def register(mcp: FastMCP) -> None:
         ],
         snapshot_date: Annotated[
             str | None,
-            Field(description="Date in YYYY-MM-DD format; defaults to the UTC calendar date"),
+            Field(
+                description="Date in YYYY-MM-DD format; defaults to the UTC calendar date"
+            ),
         ] = None,
         source_trust: Annotated[
             SourceTrust,
@@ -127,7 +136,9 @@ def register(mcp: FastMCP) -> None:
         await gc_fts_orphans(db, "snapshot")
         await db.commit()
 
-        logger.info("snapshot saved: system=%s id=%d date=%s", system, snapshot_id, snap_date)
+        logger.info(
+            "snapshot saved: system=%s id=%d date=%s", system, snapshot_id, snap_date
+        )
         return {
             "ok": True,
             "snapshot_id": snapshot_id,

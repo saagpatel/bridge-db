@@ -14,6 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from bridge_db import config
 from bridge_db.db import open_db
+from bridge_db.invariants import reset_sometimes_counts
 from bridge_db.tools import recall as recall_tool
 
 
@@ -28,8 +29,21 @@ def isolate_jsonl_logs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     so those overrides do not bleed into other tests.
     """
     monkeypatch.setattr(config, "AUDIT_LOG_PATH", tmp_path / "audit.jsonl")
-    monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", tmp_path / "recall_query_log.jsonl")
+    monkeypatch.setattr(
+        recall_tool, "RECALL_LOG_PATH", tmp_path / "recall_query_log.jsonl"
+    )
     monkeypatch.setattr(config, "AUTH_MODE", "off")
+
+
+@pytest.fixture(autouse=True)
+def reset_invariant_counters() -> None:
+    """Clear the module-global sometimes() counters between every test.
+
+    Any test that drives _upsert_section, pick_up_handoff, clear_handoff, or
+    log_activity increments them; without a suite-wide reset, counter
+    assertions become order-dependent.
+    """
+    reset_sometimes_counts()
 
 
 @pytest.fixture

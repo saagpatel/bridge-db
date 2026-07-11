@@ -1,0 +1,20 @@
+# DST regression-seed corpus (R3 §2): every bug-finding or
+# behavior-pinning seed is committed here and replays forever.
+# Format: <scenario> <seed>  — loader: tests/dst/test_regress_seeds.py
+claim-race 0
+# receipt-crash: WC-6 — Phase-3 INV-2 fix pin (crash still lands; TWO
+# concurrent retries converge the ledger to one durable stale_claim
+# receipt via the statement-atomic dedupe). Re-pinned 11 → 5 → 20 across
+# the fix rounds (declared window changes as loser-path ops shifted).
+receipt-crash 20
+# cas-pingpong: RC-3 — warn arm is the INV-4 lost-update evidence seed,
+# enforce arm is the CONTROL on the identical interleaving
+cas-pingpong-warn 2
+cas-pingpong-enforce 2
+# wal-starvation: WC-9 — red arm pins the leaked-tx wall (INV-10 fires,
+# checkpoint starved); control arm pins bounded-WAL liveness
+wal-starvation-red 0
+wal-starvation-control 0
+# trust-race: WC-8 — Phase-3 INV-8 fix pin (mid-window trust downgrade
+# makes the trust-bound CAS miss; claim refused, never stale-trust-active)
+trust-race 0

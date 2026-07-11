@@ -4,21 +4,23 @@ import json
 import logging
 import re
 from collections import Counter, defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Annotated, Any, Literal, cast
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from bridge_db import config
+from bridge_db import clock, config
 from bridge_db.audit import iter_jsonl
 from bridge_db.db import get_db
 from bridge_db.instruction_boundary import instruction_boundary
 
 logger = logging.getLogger("bridge_db.tools.recall")
 
-_VALID_SCOPES: frozenset[str] = frozenset({"all", "section", "activity", "snapshot", "handoff"})
+_VALID_SCOPES: frozenset[str] = frozenset(
+    {"all", "section", "activity", "snapshot", "handoff"}
+)
 
 # Append-only JSONL log of recall queries, co-located with the audit log.
 # Used during the Phase -1 dogfood week to decide whether the vector layer
@@ -31,9 +33,36 @@ RECALL_LOG_PATH = config.AUDIT_LOG_PATH.parent / "recall_query_log.jsonl"
 # small; over-filtering hurts recall more than it helps precision.
 _STOPWORDS: frozenset[str] = frozenset(
     {
-        "a", "an", "and", "are", "as", "at", "be", "by", "did", "do", "for",
-        "from", "had", "has", "have", "how", "in", "is", "it", "of", "on", "or",
-        "over", "the", "to", "was", "we", "what", "why", "with",
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "did",
+        "do",
+        "for",
+        "from",
+        "had",
+        "has",
+        "have",
+        "how",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "over",
+        "the",
+        "to",
+        "was",
+        "we",
+        "what",
+        "why",
+        "with",
     }
 )
 
@@ -71,11 +100,13 @@ def _match_candidates(tokens: list[str]) -> list[str]:
     return [" ".join(quoted), " OR ".join(quoted)]
 
 
-def _log_recall(query: str, scope: str, limit: int, n_results: int, caller: str | None) -> None:
+def _log_recall(
+    query: str, scope: str, limit: int, n_results: int, caller: str | None
+) -> None:
     """Append one line to the recall query log. Never raises."""
     try:
         event: dict[str, Any] = {
-            "ts": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "ts": clock.now().isoformat().replace("+00:00", "Z"),
             "query": query,
             "scope": scope,
             "limit": limit,
@@ -91,7 +122,7 @@ def _log_recall(query: str, scope: str, limit: int, n_results: int, caller: str 
 
 def collect_recall_stats(days: int = 7) -> dict[str, Any]:
     """Roll up recall query log usage over the last `days` days."""
-    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
+    cutoff = (clock.now() - timedelta(days=days)).isoformat().replace("+00:00", "Z")
 
     total = 0
     misses = 0
@@ -141,7 +172,9 @@ def collect_recall_stats(days: int = 7) -> dict[str, Any]:
     }
 
 
-async def _preview_and_trust(db: Any, source_type: str, source_id: str) -> tuple[str, str | None]:
+async def _preview_and_trust(
+    db: Any, source_type: str, source_id: str
+) -> tuple[str, str | None]:
     """Return (preview, source_trust) for a result, joined from the source row.
 
     Returns ("", None) if the source row is missing (orphan FTS entry) — this is
@@ -168,7 +201,8 @@ async def _preview_and_trust(db: Any, source_type: str, source_id: str) -> tuple
         return f"{row['project_name']}: {row['summary']}"[:200], row["source_trust"]
     if source_type == "snapshot":
         cursor = await db.execute(
-            "SELECT data, source_trust FROM system_snapshots WHERE id = ?", (int(source_id),)
+            "SELECT data, source_trust FROM system_snapshots WHERE id = ?",
+            (int(source_id),),
         )
         row = await cursor.fetchone()
         if row is None:
@@ -193,7 +227,9 @@ def register(mcp: FastMCP) -> None:
         query: Annotated[
             str, Field(description="Free-form text to match against bridge-db content")
         ],
-        limit: Annotated[int, Field(description="Max results to return", ge=1, le=50)] = 10,
+        limit: Annotated[
+            int, Field(description="Max results to return", ge=1, le=50)
+        ] = 10,
         scope: Annotated[
             Literal["all", "section", "activity", "snapshot", "handoff"],
             Field(description="Limit results to one source type, or 'all'"),
@@ -212,7 +248,9 @@ def register(mcp: FastMCP) -> None:
         recency and lifecycle, which a content search cannot.
         """
         if scope not in _VALID_SCOPES:
-            raise ToolError(f"Invalid scope '{scope}'. Allowed: {sorted(_VALID_SCOPES)}")
+            raise ToolError(
+                f"Invalid scope '{scope}'. Allowed: {sorted(_VALID_SCOPES)}"
+            )
 
         clamped_limit = max(1, min(limit, 50))
         tokens = _tokens_for_match(query)
@@ -254,7 +292,9 @@ def register(mcp: FastMCP) -> None:
 
         results: list[dict[str, Any]] = []
         for r in rows:
-            preview, source_trust = await _preview_and_trust(db, r["source_type"], r["source_id"])
+            preview, source_trust = await _preview_and_trust(
+                db, r["source_type"], r["source_id"]
+            )
             results.append(
                 {
                     "source_type": r["source_type"],
@@ -273,7 +313,8 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool()
     async def recall_stats(
         days: Annotated[
-            int, Field(description="Window in days (counting back from now)", ge=1, le=365)
+            int,
+            Field(description="Window in days (counting back from now)", ge=1, le=365),
         ] = 7,
     ) -> dict[str, Any]:
         """Roll-up analytics over recall_query_log.jsonl for the last `days` days.
