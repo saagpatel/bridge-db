@@ -3,7 +3,8 @@
 import hashlib
 import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, NamedTuple, cast
 
@@ -637,6 +638,87 @@ async def find_write_conflict(
     )
     row = await cursor.fetchone()
     return int(row["id"]) if row is not None else None
+
+
+async def record_write_conflict_once(
+    db: aiosqlite.Connection,
+    *,
+    surface: str,
+    target_key: str,
+    operation: str,
+    attempted_by: str | None,
+    reason: str,
+    principal: str | None = None,
+    current_source_trust: str | None = None,
+    detail: dict[str, Any] | None = None,
+) -> int:
+    """Stage an insert-if-absent receipt on the dedupe key; return its id.
+
+    The existence check lives INSIDE the INSERT statement (WHERE NOT
+    EXISTS), so it is atomic at statement level — two concurrent retries
+    cannot both pass a separate SELECT and double-insert the way a
+    find-then-insert sequence could. First writer wins; the loser's call
+    resolves to the existing row's id. Caller owns commit/rollback.
+    """
+    await db.execute(
+        """
+        INSERT INTO write_conflicts (
+            surface, target_key, operation, attempted_by, principal,
+            current_source_trust, reason, detail_json
+        )
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE NOT EXISTS (
+            SELECT 1 FROM write_conflicts
+            WHERE surface = ? AND target_key = ? AND operation = ?
+              AND attempted_by IS ? AND reason = ?
+        )
+        """,
+        (
+            surface,
+            target_key,
+            operation,
+            attempted_by,
+            principal,
+            current_source_trust,
+            reason,
+            json.dumps(detail or {}, sort_keys=True),
+            surface,
+            target_key,
+            operation,
+            attempted_by,
+            reason,
+        ),
+    )
+    receipt_id = await find_write_conflict(
+        db,
+        surface=surface,
+        target_key=target_key,
+        operation=operation,
+        attempted_by=attempted_by,
+        reason=reason,
+    )
+    if receipt_id is None:
+        raise RuntimeError("write_conflicts insert-if-absent left no row")
+    return receipt_id
+
+
+@asynccontextmanager
+async def rollback_on_error(db: aiosqlite.Connection) -> AsyncGenerator[None, None]:
+    """Roll back the connection's open transaction if the block raises.
+
+    INV-10 armor for staged-write blocks on the shared connection: an
+    exception mid-staging (receipt insert, follow-on write) must not leave
+    an open transaction behind for an unrelated later caller's commit to
+    flush silently. The exception always re-raises.
+    """
+    try:
+        yield
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            logger.exception("rollback after staging failure itself failed")
+        raise
 
 
 # ── FTS5 content index helpers ───────────────────────────────────────────────

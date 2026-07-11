@@ -40,11 +40,12 @@ from dst.sim import (
 )
 from dst.test_claim_race import handoff_fns
 
-# Re-pinned 2026-07-10 with the Phase-3 INV-2 fix: removing the loser
-# path's rollback op shifted the RNG draw alignment, so the pre-fix seed
-# (11) no longer lands the fault — a declared window change, not lost
-# determinism. Post-fix sweep: 6/40 seeds land it (5, 18, 20, 21, 28, 34).
-CRASHING_SEED = 5
+# Re-pinned twice on 2026-07-10, each a declared window change from a fix
+# shifting the RNG draw alignment (not lost determinism): 11 → 5 when the
+# INV-2 fix removed the loser path's rollback op; 5 → 20 when the review
+# round made the stale_claim dedupe statement-atomic and the recovery arm
+# concurrent. Current sweep: 3/40 seeds land it (20, 21, 34).
+CRASHING_SEED = 20
 SEED_SWEEP = range(0, 40)
 
 _WINDOW_LABEL = "fault_fired_in_receipt_window"
@@ -105,35 +106,34 @@ async def _recovery_retry(
     scheduler: SimScheduler,
     handoff_id: int,
     caller: str,
-) -> dict[str, Any]:
-    """The crashed loser's caller retries on fresh connections (fresh
-    process, no faults — the declared crash was a one-time event). The
-    pre-check refusal writes the idempotent stale_claim receipt that makes
-    the crashed loss durable; the second retry proves the dedupe converges
-    to one row instead of growing per attempt."""
-    outcomes: list[str] = []
-    for _attempt in range(2):
-        # writer_id must equal the task key handed to scheduler.run — the
-        # grant loop matches parked entries by that id; a mismatched id
-        # parks forever and deadlocks the drain.
-        sim = SimConnection(
-            db_path,
-            sim_clock,
-            rng,
-            trace,
-            scheduler=scheduler,
-            writer_id="recovery",
-        )
-        fns = handoff_fns()
-        ctx = make_ctx(cast(aiosqlite.Connection, sim))
-        try:
-            await fns["pick_up_handoff"](caller=caller, handoff_id=handoff_id, ctx=ctx)
-            outcomes.append("won")
-        except ToolError as exc:
-            outcomes.append("refused" if "not pending" in str(exc) else "error")
-        finally:
-            await sim.close()
-    return {"outcomes": outcomes}
+    writer_id: str,
+) -> str:
+    """One retry by the crashed loser's caller on a fresh connection
+    (fresh process, no faults — the declared crash was a one-time event).
+    The pre-check refusal writes the idempotent stale_claim receipt that
+    makes the crashed loss durable. The scenario runs TWO of these
+    concurrently under the scheduler: the insert-if-absent dedupe must
+    converge to one row even when both retries interleave inside the
+    receipt window — the hostile case a sequential double-retry never
+    exercises. writer_id must equal the task key handed to scheduler.run
+    (the grant loop matches parked entries by that id)."""
+    sim = SimConnection(
+        db_path,
+        sim_clock,
+        rng,
+        trace,
+        scheduler=scheduler,
+        writer_id=writer_id,
+    )
+    fns = handoff_fns()
+    ctx = make_ctx(cast(aiosqlite.Connection, sim))
+    try:
+        await fns["pick_up_handoff"](caller=caller, handoff_id=handoff_id, ctx=ctx)
+        return "won"
+    except ToolError as exc:
+        return "refused" if "not pending" in str(exc) else "error"
+    finally:
+        await sim.close()
 
 
 async def run_receipt_crash(base: Path, seed: int) -> dict[str, Any]:
@@ -188,11 +188,11 @@ async def run_receipt_crash(base: Path, seed: int) -> dict[str, Any]:
             results = await scheduler.run(writers)
 
         crashed = [w for w, r in results.items() if r["outcome"] == "crashed"]
-        recovery: dict[str, Any] | None = None
+        recovery: list[str] | None = None
         if crashed:
             recovered = await scheduler.run(
                 {
-                    "recovery": _recovery_retry(
+                    writer_id: _recovery_retry(
                         db_path,
                         sim_clock,
                         rng,
@@ -200,10 +200,12 @@ async def run_receipt_crash(base: Path, seed: int) -> dict[str, Any]:
                         scheduler,
                         handoff_id,
                         crashed[0],
+                        writer_id,
                     )
+                    for writer_id in ("recovery-a", "recovery-b")
                 }
             )
-            recovery = recovered["recovery"]
+            recovery = sorted(recovered.values())
     finally:
         clock.reset()
 
@@ -230,12 +232,12 @@ async def run_receipt_crash(base: Path, seed: int) -> dict[str, Any]:
     if fired:
         # Post-fix INV-2: the in-flight raced_claim receipt died with the
         # crashed process (at-most-once residue), but the caller's retry
-        # made the loss durable — exactly one stale_claim receipt,
-        # converged across a double retry.
+        # made the loss durable — exactly one stale_claim receipt, even
+        # with TWO retries racing concurrently through the receipt window
+        # (the insert-if-absent dedupe is statement-atomic).
         assert outcomes.count("crashed") == 1, f"seed {seed}"
         assert raced == 0, f"seed {seed}: raced={raced}"
-        assert recovery is not None
-        assert recovery["outcomes"] == ["refused", "refused"], f"seed {seed}"
+        assert recovery == ["refused", "refused"], f"seed {seed}: {recovery}"
         assert stale == 1, f"seed {seed}: stale={stale}"
     else:
         # Fault stayed out of the window: INV-2 exact counts must hold on

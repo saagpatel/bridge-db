@@ -166,3 +166,66 @@ async def test_always_tx_violation_rolls_back_before_raising(
     row = await cursor.fetchone()
     assert row is not None
     assert row["n"] == 0  # the open write was rolled back, not left dangling
+
+
+async def test_rollback_on_error_discards_staged_writes_and_reraises(
+    db: aiosqlite.Connection,
+) -> None:
+    """INV-10 armor: an exception inside a staged-write block must roll the
+    open transaction back and re-raise — a later unrelated commit must not
+    flush the staged receipt."""
+    from bridge_db.db import record_write_conflict, rollback_on_error
+
+    with pytest.raises(RuntimeError, match="boom"):
+        async with rollback_on_error(db):
+            await record_write_conflict(
+                db,
+                surface="handoff",
+                target_key="1",
+                operation="pick_up_handoff",
+                reason="raced_claim",
+            )
+            raise RuntimeError("boom")
+
+    await db.commit()  # the unrelated later commit
+    cursor = await db.execute("SELECT COUNT(*) AS n FROM write_conflicts")
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["n"] == 0  # staged receipt was rolled back, not flushed
+
+
+async def test_record_write_conflict_once_converges_to_one_row(
+    db: aiosqlite.Connection,
+) -> None:
+    """The insert-if-absent dedupe: repeated calls on one identity return
+    the same receipt id and leave exactly one row (the statement-atomic
+    guard behind idempotent stale_claim receipts)."""
+    from bridge_db.db import record_write_conflict_once
+
+    first = await record_write_conflict_once(
+        db,
+        surface="handoff",
+        target_key="7",
+        operation="pick_up_handoff",
+        attempted_by="cc",
+        reason="stale_claim",
+        detail={"current_status": "active"},
+    )
+    second = await record_write_conflict_once(
+        db,
+        surface="handoff",
+        target_key="7",
+        operation="pick_up_handoff",
+        attempted_by="cc",
+        reason="stale_claim",
+        detail={"current_status": "cleared"},  # first writer's detail wins
+    )
+    await db.commit()
+
+    assert first == second
+    cursor = await db.execute(
+        "SELECT COUNT(*) AS n FROM write_conflicts WHERE reason = 'stale_claim'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["n"] == 1

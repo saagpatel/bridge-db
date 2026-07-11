@@ -188,6 +188,7 @@ class SimConnection:
         self._faults = faults
         self._last_fingerprint = ""
         self._closed = False
+        self._close_called = False
         self._step = 0
         # timeout=0: SQLITE_BUSY surfaces immediately instead of blocking in
         # the C-layer busy handler — the retry becomes a scheduler-owned,
@@ -305,6 +306,14 @@ class SimConnection:
         self._last_fingerprint = ""
 
     async def close(self) -> None:
+        # Idempotence is keyed on close() CALLS, not on the underlying
+        # connection state: a crashed connection's finally-close must still
+        # take its scheduled yield (pinned-seed grant alignment depends on
+        # it), but a second close() call must not park a writer that has
+        # nothing left to grant it.
+        if self._close_called:
+            return
+        self._close_called = True
         await self._yield_and_trace("close", "")
         if not self._closed:
             self._conn.close()

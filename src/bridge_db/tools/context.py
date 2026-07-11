@@ -16,6 +16,7 @@ from bridge_db.db import (
     fts_text_for_section,
     get_db,
     record_write_conflict,
+    rollback_on_error,
     upsert_fts_entry,
 )
 from bridge_db.instruction_boundary import instruction_boundary
@@ -128,19 +129,20 @@ async def _upsert_section(
             # The zero-change UPDATE holds the transaction open; the receipt
             # (and its diagnostic re-read) stage into it — no separate
             # receipt transaction to crash out of.
-            receipt_id, current = await _record_section_conflict(
-                db,
-                section_name=section_name,
-                caller=attempted_by,
-                operation=operation,
-                reason="stale_cas",
-                attempted_content=content,
-                attempted_source_trust=source_trust,
-                principal=principal,
-                stale_version=if_match_version,
-                stale_updated_at=if_match_updated_at,
-                surface=receipt_surface,
-            )
+            async with rollback_on_error(db):
+                receipt_id, current = await _record_section_conflict(
+                    db,
+                    section_name=section_name,
+                    caller=attempted_by,
+                    operation=operation,
+                    reason="stale_cas",
+                    attempted_content=content,
+                    attempted_source_trust=source_trust,
+                    principal=principal,
+                    stale_version=if_match_version,
+                    stale_updated_at=if_match_updated_at,
+                    surface=receipt_surface,
+                )
             return {
                 "written": False,
                 "reason": "stale_cas",
@@ -160,17 +162,18 @@ async def _upsert_section(
     legacy_blind_write = existing is not None
     if legacy_blind_write and _context_cas_mode() == "enforce":
         sometimes("missing_cas_rejection")
-        receipt_id, current = await _record_section_conflict(
-            db,
-            section_name=section_name,
-            caller=attempted_by,
-            operation=operation,
-            reason="missing_cas",
-            attempted_content=content,
-            attempted_source_trust=source_trust,
-            principal=principal,
-            surface=receipt_surface,
-        )
+        async with rollback_on_error(db):
+            receipt_id, current = await _record_section_conflict(
+                db,
+                section_name=section_name,
+                caller=attempted_by,
+                operation=operation,
+                reason="missing_cas",
+                attempted_content=content,
+                attempted_source_trust=source_trust,
+                principal=principal,
+                surface=receipt_surface,
+            )
         return {
             "written": False,
             "reason": "missing_cas",
@@ -192,28 +195,29 @@ async def _upsert_section(
         # — that is INV-4's separate, config-level question — but it is
         # never trace-free. Staged BEFORE the UPDATE so the receipt's
         # current_* fields capture the displaced version and content sha.
-        receipt_id, _ = await _record_section_conflict(
-            db,
-            section_name=section_name,
-            caller=attempted_by,
-            operation=operation,
-            reason="legacy_blind_write",
-            attempted_content=content,
-            attempted_source_trust=source_trust,
-            principal=principal,
-            surface=receipt_surface,
-        )
-        await db.execute(
-            """
-            UPDATE context_sections SET
-                content = ?,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-                source_trust = COALESCE(?, source_trust),
-                version = version + 1
-            WHERE section_name = ?
-            """,
-            (content, source_trust, section_name),
-        )
+        async with rollback_on_error(db):
+            receipt_id, _ = await _record_section_conflict(
+                db,
+                section_name=section_name,
+                caller=attempted_by,
+                operation=operation,
+                reason="legacy_blind_write",
+                attempted_content=content,
+                attempted_source_trust=source_trust,
+                principal=principal,
+                surface=receipt_surface,
+            )
+            await db.execute(
+                """
+                UPDATE context_sections SET
+                    content = ?,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                    source_trust = COALESCE(?, source_trust),
+                    version = version + 1
+                WHERE section_name = ?
+                """,
+                (content, source_trust, section_name),
+            )
     await upsert_fts_entry(
         db, "section", section_name, fts_text_for_section(section_name, content)
     )

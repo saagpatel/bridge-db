@@ -10,10 +10,11 @@ from pydantic import Field
 from bridge_db.audit import log_audit
 from bridge_db.auth import clamp_source_trust, get_principal, require_caller
 from bridge_db.db import (
-    find_write_conflict,
     fts_text_for_handoff,
     get_db,
     record_write_conflict,
+    record_write_conflict_once,
+    rollback_on_error,
     upsert_fts_entry,
 )
 from bridge_db.instruction_boundary import instruction_boundary
@@ -205,17 +206,11 @@ def register(mcp: FastMCP) -> None:
             # durable trace when its raced_claim receipt died with a crashed
             # process — record it, idempotently, before raising. The distinct
             # reason keeps the raced_claim ledger phantom-free: a late or
-            # retried arrival is not itself a race.
-            receipt_id = await find_write_conflict(
-                db,
-                surface="handoff",
-                target_key=str(handoff_id),
-                operation="pick_up_handoff",
-                attempted_by=caller,
-                reason="stale_claim",
-            )
-            if receipt_id is None:
-                receipt_id = await record_write_conflict(
+            # retried arrival is not itself a race. The insert-if-absent is
+            # atomic at statement level, so concurrent retries converge to
+            # one row instead of both passing a separate find.
+            async with rollback_on_error(db):
+                receipt_id = await record_write_conflict_once(
                     db,
                     surface="handoff",
                     target_key=str(handoff_id),
@@ -327,28 +322,29 @@ def register(mcp: FastMCP) -> None:
             # the loss durable atomically. The old rollback→separate-receipt-
             # commit shape left a two-op crash window that silently dropped
             # the receipt (DST corpus: receipt-crash seed 11).
-            status_cursor = await db.execute(
-                "SELECT status FROM pending_handoffs WHERE id = ?",
-                (handoff_id,),
-            )
-            current_status = await status_cursor.fetchone()
-            receipt_id = await record_write_conflict(
-                db,
-                surface="handoff",
-                target_key=str(handoff_id),
-                operation="pick_up_handoff",
-                attempted_by=caller,
-                principal=get_principal(ctx),
-                reason="raced_claim",
-                current_source_trust=trust,
-                detail={
-                    "project_name": project,
-                    "current_status": current_status["status"]
-                    if current_status is not None
-                    else None,
-                },
-            )
-            await db.commit()
+            async with rollback_on_error(db):
+                status_cursor = await db.execute(
+                    "SELECT status FROM pending_handoffs WHERE id = ?",
+                    (handoff_id,),
+                )
+                current_status = await status_cursor.fetchone()
+                receipt_id = await record_write_conflict(
+                    db,
+                    surface="handoff",
+                    target_key=str(handoff_id),
+                    operation="pick_up_handoff",
+                    attempted_by=caller,
+                    principal=get_principal(ctx),
+                    reason="raced_claim",
+                    current_source_trust=trust,
+                    detail={
+                        "project_name": project,
+                        "current_status": current_status["status"]
+                        if current_status is not None
+                        else None,
+                    },
+                )
+                await db.commit()
             sometimes("raced_claim_receipt_written")
             log_audit(
                 "pick_up_handoff",
