@@ -4,13 +4,12 @@ import json
 import logging
 import os
 import tempfile
-from datetime import date
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from bridge_db import config
+from bridge_db import clock, config
 from bridge_db.db import content_sha256, get_db, protected_tags_predicate
 
 logger = logging.getLogger("bridge_db.tools.export")
@@ -126,7 +125,7 @@ async def _latest_codex_operating_snapshot(
 
 async def build_markdown(db: Any) -> str:
     """Assemble the full bridge markdown from all tables."""
-    today = str(date.today())
+    today = clock.now().date().isoformat()
 
     # --- Context sections (Claude.ai-owned) ---
     cursor = await db.execute(

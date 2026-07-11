@@ -108,14 +108,17 @@ async def test_insert_activity_row_defaults_source_trust_agent(
 async def test_log_activity_defaults_timestamp_to_today(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
-    from datetime import date
+    # UTC date via the clock seam, not the host-local calendar date: this test
+    # failed live at 10pm PT (local July 10, UTC July 11) under the old
+    # local-time default — the exact straddle the seam fix removes.
+    from bridge_db import clock
 
     ctx = make_ctx(db)
     await fns["log_activity"](caller="cc", project_name="P", summary="s", ctx=ctx)
     cursor = await db.execute("SELECT timestamp FROM activity_log")
     row = await cursor.fetchone()
     assert row is not None
-    assert row["timestamp"] == str(date.today())
+    assert row["timestamp"] == clock.now().date().isoformat()
 
 
 async def test_get_recent_activity_filters_by_source(
