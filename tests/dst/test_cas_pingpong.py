@@ -2,15 +2,17 @@
 
 Two writers both read section S at the same version. B writes with the CAS
 token and commits; A writes BLIND (legacy path, no token) and displaces
-B's committed content. Under the shipped default ``CONTEXT_CAS_MODE=warn``
-the blind write is accepted with only a flag — two writers who read one
-version both get ok:True and B's work is silently gone. Under ``enforce``
-the same interleaving rejects A's blind write with a durable receipt.
+B's committed content. Under ``CONTEXT_CAS_MODE=warn`` the blind write is
+accepted — two writers who read one version both get ok:True and B's work
+is displaced (with a legacy_blind_write receipt naming the displaced sha,
+post-INV-5). Under ``enforce`` the same interleaving rejects A's blind
+write with a durable receipt.
 
-GAP LEDGER (INV-4, "PARTIAL — violated by design in the default config"):
-the pinned warn-mode seed IS R3's named deliverable — the evidence case
-for flipping the default to enforce. The enforce arm on the same seed is
-the CONTROL showing the invariant holds when the config does its job.
+GAP FLIPPED (INV-4): the pinned warn-mode seed was R3's named deliverable
+— the evidence case that got the default flipped to enforce on
+2026-07-10 (config.py CONTEXT_CAS_MODE; live-audit check found zero blind
+writers). The warn arm survives as the archived evidence + the rollback
+lever's regression; the enforce arm is the shipped default's CONTROL.
 """
 
 import asyncio

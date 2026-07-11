@@ -46,7 +46,9 @@ async def test_update_section_if_match_success(
 ) -> None:
     """A write whose if_match equals the current updated_at succeeds."""
     ctx = make_ctx(db)
-    await c_fns["update_section"](caller="claude_ai", section_name="career", content="v1", ctx=ctx)
+    await c_fns["update_section"](
+        caller="claude_ai", section_name="career", content="v1", ctx=ctx
+    )
     current = await c_fns["get_section"](section_name="career", ctx=ctx)
 
     result = await c_fns["update_section"](
@@ -65,7 +67,9 @@ async def test_update_section_if_match_version_success_increments_version(
     db: aiosqlite.Connection, c_fns: dict[str, Any]
 ) -> None:
     ctx = make_ctx(db)
-    await c_fns["update_section"](caller="claude_ai", section_name="career", content="v1", ctx=ctx)
+    await c_fns["update_section"](
+        caller="claude_ai", section_name="career", content="v1", ctx=ctx
+    )
     current = await c_fns["get_section"](section_name="career", ctx=ctx)
 
     result = await c_fns["update_section"](
@@ -90,7 +94,9 @@ async def test_update_section_if_match_conflict_preserves_concurrent_write(
     lost-update is converted into an explicit conflict, and the concurrent
     writer's content survives."""
     ctx = make_ctx(db)
-    await c_fns["update_section"](caller="claude_ai", section_name="career", content="v1", ctx=ctx)
+    await c_fns["update_section"](
+        caller="claude_ai", section_name="career", content="v1", ctx=ctx
+    )
     stale = await c_fns["get_section"](section_name="career", ctx=ctx)
     stale_updated_at = stale["updated_at"]
 
@@ -122,7 +128,9 @@ async def test_update_section_version_cas_catches_same_second_conflict(
     db: aiosqlite.Connection, c_fns: dict[str, Any]
 ) -> None:
     ctx = make_ctx(db)
-    await c_fns["update_section"](caller="claude_ai", section_name="career", content="v1", ctx=ctx)
+    await c_fns["update_section"](
+        caller="claude_ai", section_name="career", content="v1", ctx=ctx
+    )
     await db.execute(
         "UPDATE context_sections SET updated_at = '2026-01-01T00:00:00Z', version = 1 "
         "WHERE section_name = 'career'"
@@ -153,12 +161,16 @@ async def test_update_section_version_cas_catches_same_second_conflict(
     assert survivor["content"] == "concurrent same-second edit"
 
 
-async def test_update_section_without_if_match_is_blind_backcompat(
-    db: aiosqlite.Connection, c_fns: dict[str, Any]
+async def test_update_section_blind_backcompat_in_warn_mode(
+    db: aiosqlite.Connection, c_fns: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Omitting if_match preserves the historical blind-upsert behavior."""
+    """The 'warn' rollback lever preserves the historical blind-upsert
+    behavior (accepted, flagged, receipted) — no longer the default."""
+    monkeypatch.setattr(config, "CONTEXT_CAS_MODE", "warn")
     ctx = make_ctx(db)
-    await c_fns["update_section"](caller="claude_ai", section_name="career", content="v1", ctx=ctx)
+    await c_fns["update_section"](
+        caller="claude_ai", section_name="career", content="v1", ctx=ctx
+    )
     result = await c_fns["update_section"](
         caller="claude_ai", section_name="career", content="v2", ctx=ctx
     )
@@ -168,12 +180,17 @@ async def test_update_section_without_if_match_is_blind_backcompat(
     assert section["content"] == "v2"
 
 
-async def test_update_section_without_if_match_can_be_enforced(
-    db: aiosqlite.Connection, c_fns: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+async def test_update_section_without_if_match_rejected_by_default(
+    db: aiosqlite.Connection, c_fns: dict[str, Any]
 ) -> None:
+    """The shipped default is 'enforce' (INV-4, flipped 2026-07-10 on the
+    DST evidence seed): an existing-row blind write is rejected with a
+    durable receipt instead of silently displacing committed work."""
+    assert config.CONTEXT_CAS_MODE == "enforce"  # the shipped default
     ctx = make_ctx(db)
-    await c_fns["update_section"](caller="claude_ai", section_name="career", content="v1", ctx=ctx)
-    monkeypatch.setattr(config, "CONTEXT_CAS_MODE", "enforce")
+    await c_fns["update_section"](
+        caller="claude_ai", section_name="career", content="v1", ctx=ctx
+    )
 
     result = await c_fns["update_section"](
         caller="claude_ai", section_name="career", content="blind v2", ctx=ctx
@@ -190,7 +207,9 @@ async def test_get_write_conflicts_reads_section_conflict_receipts(
     db: aiosqlite.Connection, c_fns: dict[str, Any]
 ) -> None:
     ctx = make_ctx(db)
-    await c_fns["update_section"](caller="claude_ai", section_name="career", content="v1", ctx=ctx)
+    await c_fns["update_section"](
+        caller="claude_ai", section_name="career", content="v1", ctx=ctx
+    )
     stale = await c_fns["get_section"](section_name="career", ctx=ctx)
     await c_fns["update_section"](
         caller="claude_ai",
@@ -234,7 +253,9 @@ class _RaceOnPickupSelect:
 
     async def execute(self, sql: str, parameters: Any = ()) -> Any:
         cursor = await self._real.execute(sql, parameters)
-        if not self.injected and sql.lstrip().startswith("SELECT id, project_name, status"):
+        if not self.injected and sql.lstrip().startswith(
+            "SELECT id, project_name, status"
+        ):
             self.injected = True
             await self._real.execute(
                 "UPDATE pending_handoffs SET status = 'active', "
@@ -268,7 +289,9 @@ async def test_pick_up_handoff_rejects_concurrent_claim(
     racer = _RaceOnPickupSelect(db, handoff_id)
     racing_ctx = make_ctx(cast(aiosqlite.Connection, racer))
     with pytest.raises(ToolError, match="another caller"):
-        await h_fns["pick_up_handoff"](caller="cc", handoff_id=handoff_id, ctx=racing_ctx)
+        await h_fns["pick_up_handoff"](
+            caller="cc", handoff_id=handoff_id, ctx=racing_ctx
+        )
     # False-green guard: the race must actually have fired at the SELECT→UPDATE window.
     # If the pickup SELECT is reformatted so the proxy's prefix match misses, this
     # assertion fails loudly instead of the test silently passing.
@@ -276,7 +299,9 @@ async def test_pick_up_handoff_rejects_concurrent_claim(
 
     # The row was claimed exactly once (by the injected racer); the losing call
     # did not re-transition it.
-    cursor = await db.execute("SELECT status FROM pending_handoffs WHERE id = ?", (handoff_id,))
+    cursor = await db.execute(
+        "SELECT status FROM pending_handoffs WHERE id = ?", (handoff_id,)
+    )
     row = await cursor.fetchone()
     assert row is not None
     assert row["status"] == "active"
