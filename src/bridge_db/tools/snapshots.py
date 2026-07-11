@@ -9,6 +9,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db import clock, config
+from bridge_db.audit import log_audit
 from bridge_db.auth import clamp_source_trust, require_caller
 from bridge_db.db import (
     fts_text_for_snapshot,
@@ -41,7 +42,13 @@ def _snapshot_family(system: str, data: dict[str, Any]) -> str:
     return "other"
 
 
-async def _prune_snapshots(db: Any, *, system: str) -> None:
+async def _prune_snapshots(db: Any, *, system: str) -> list[tuple[int, str]]:
+    """Delete over-retention snapshots; return (id, family) of each pruned row.
+
+    Returned so save_snapshot can emit a prune audit line — snapshots are
+    instruction-bearing rows, and BD-INV-1's philosophy is that no prune is
+    silent (activity prunes have audited since the durable-ledger work).
+    """
     cursor = await db.execute(
         """
         SELECT id, data
@@ -54,7 +61,7 @@ async def _prune_snapshots(db: Any, *, system: str) -> None:
     rows = await cursor.fetchall()
 
     seen_by_family: dict[str, int] = {}
-    delete_ids: list[int] = []
+    pruned: list[tuple[int, str]] = []
     for row in rows:
         try:
             parsed_data = cast(object, json.loads(row["data"]))
@@ -69,14 +76,15 @@ async def _prune_snapshots(db: Any, *, system: str) -> None:
         family = _snapshot_family(system, data)
         seen_by_family[family] = seen_by_family.get(family, 0) + 1
         if seen_by_family[family] > config.SNAPSHOT_RETENTION_PER_SYSTEM:
-            delete_ids.append(row["id"])
+            pruned.append((row["id"], family))
 
-    if delete_ids:
-        placeholders = ",".join("?" for _ in delete_ids)
+    if pruned:
+        placeholders = ",".join("?" for _ in pruned)
         await db.execute(
             f"DELETE FROM system_snapshots WHERE id IN ({placeholders})",
-            delete_ids,
+            [row_id for row_id, _ in pruned],
         )
+    return pruned
 
 
 def register(mcp: FastMCP) -> None:
@@ -132,10 +140,23 @@ def register(mcp: FastMCP) -> None:
                 db, "snapshot", str(snapshot_id), fts_text_for_snapshot(snapshot_json)
             )
 
-        await _prune_snapshots(db, system=system)
+        pruned = await _prune_snapshots(db, system=system)
         await gc_fts_orphans(db, "snapshot")
         await db.commit()
 
+        if pruned:
+            pruned_ids = [row_id for row_id, _ in pruned]
+            pruned_families = sorted({family for _, family in pruned})
+            log_audit(
+                "save_snapshot.prune",
+                caller,
+                None,
+                ok=True,
+                detail=(
+                    f"pruned={len(pruned)} ids={pruned_ids} "
+                    f"families={pruned_families} system={system}"
+                ),
+            )
         logger.info(
             "snapshot saved: system=%s id=%d date=%s", system, snapshot_id, snap_date
         )
@@ -146,6 +167,7 @@ def register(mcp: FastMCP) -> None:
             "snapshot_date": snap_date,
             "source_trust": source_trust,
             "source_trust_clamped": source_trust_clamped,
+            "pruned_count": len(pruned),
         }
 
     @mcp.tool()
