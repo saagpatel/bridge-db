@@ -207,6 +207,20 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         disposition_orphan_row[0] if disposition_orphan_row else 0
     )
 
+    # Open write-conflict receipts. Soft signal like WAL size — a receipt is
+    # evidence the conflict machinery worked, not that the bridge is broken,
+    # so it must not fold into `ok`. Surfacing the count here is what turns
+    # the receipts ledger into a feedback loop instead of a table only
+    # deliberate get_write_conflicts callers ever see.
+    cursor = await db.execute(
+        "SELECT COUNT(*), MIN(created_at) FROM write_conflicts WHERE status = 'open'"
+    )
+    open_conflict_row = await cursor.fetchone()
+    open_write_conflicts: int = open_conflict_row[0] if open_conflict_row else 0
+    oldest_open_conflict_age_hours: float | None = _age_hours(
+        open_conflict_row[1] if open_conflict_row else None, _utc_now()
+    )
+
     db_path = config.DB_PATH
     db_exists = db_path.exists()
 
@@ -248,6 +262,8 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "ledger_protected_count": ledger_protected_count,
         "receipt_orphan_count": receipt_orphan_count,
         "disposition_orphan_count": disposition_orphan_count,
+        "open_write_conflicts": open_write_conflicts,
+        "oldest_open_conflict_age_hours": oldest_open_conflict_age_hours,
         "wal_size_bytes": wal_size_bytes,
         "wal_warning": wal_warning,
         "fts_index": fts_index,
@@ -600,7 +616,13 @@ async def collect_status_summary(
             "claude_ai_unsynced_sections": len(
                 health["claude_ai_section_drift"]["drifted_sections"]
             ),
+            "open_write_conflicts": health["open_write_conflicts"],
         },
+        "open_write_conflicts_next_command": (
+            'get_write_conflicts(status="open")'
+            if health["open_write_conflicts"]
+            else None
+        ),
         "fts_index": health["fts_index"],
         "latest_snapshots": latest_snapshots,
         "latest_activity": latest_activity,

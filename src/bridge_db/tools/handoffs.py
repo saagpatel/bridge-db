@@ -1,7 +1,7 @@
 """Handoff queue tools: create_handoff, get_pending_handoffs, pick_up_handoff, clear_handoff."""
 
 import logging
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
@@ -132,18 +132,36 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     async def get_pending_handoffs(
+        status: Annotated[
+            Literal["pending", "active", "all"],
+            Field(
+                description="Filter: 'pending' (default, unclaimed work), 'active' "
+                "(claimed and in progress; shows who holds it), or 'all' (both). "
+                "Cleared rows are history and stay excluded — recall covers them."
+            ),
+        ] = "pending",
         ctx: Context = None,  # type: ignore[assignment]
     ) -> list[dict[str, Any]]:
-        """Return all pending handoffs, newest first. Used by /start to surface priority work."""
+        """Return open handoffs, newest first. Used by /start to surface priority work.
+
+        The default status='pending' preserves the original contract exactly.
+        'active' and 'all' expose live claims: v13 records claimed_by on pickup
+        and the INV-13 clear gate keys on it, so the claim ledger deserves a
+        read surface — who holds what, since when — without raw SQL.
+        """
         db = get_db(ctx)
+        statuses = ("pending", "active") if status == "all" else (status,)
+        placeholders = ", ".join("?" for _ in statuses)
         cursor = await db.execute(
-            """
+            f"""
             SELECT id, project_name, project_path, roadmap_file, phase,
-                   dispatched_from, dispatched_at, status, canonical_key, source_trust
+                   dispatched_from, dispatched_at, picked_up_at, status,
+                   canonical_key, source_trust, claimed_by
             FROM pending_handoffs
-            WHERE status = 'pending'
+            WHERE status IN ({placeholders})
             ORDER BY dispatched_at DESC, id DESC
-            """
+            """,  # noqa: S608 — placeholders count a closed literal tuple
+            statuses,
         )
         rows = await cursor.fetchall()
         return [
@@ -155,9 +173,11 @@ def register(mcp: FastMCP) -> None:
                 "phase": r["phase"],
                 "dispatched_from": r["dispatched_from"],
                 "dispatched_at": r["dispatched_at"],
+                "picked_up_at": r["picked_up_at"],
                 "status": r["status"],
                 "canonical_key": r["canonical_key"],
                 "source_trust": r["source_trust"],
+                "claimed_by": r["claimed_by"],
                 "instruction_boundary": instruction_boundary(r["source_trust"]),
             }
             for r in rows

@@ -292,6 +292,18 @@ async def run_dogfood() -> bool:
         f"receipt_orphans={health['receipt_orphan_count']} "
         f"disposition_orphans={health['disposition_orphan_count']}"
     )
+    # Informational, never a dogfood gate: open receipts are the conflict
+    # machinery doing its job; the operator action is to read them, not to
+    # treat the bridge as failing.
+    print(
+        f"  Write conflicts: open={health['open_write_conflicts']}"
+        + (
+            f" oldest_age_hours={health['oldest_open_conflict_age_hours']}"
+            f' (inspect via get_write_conflicts(status="open"))'
+            if health["open_write_conflicts"]
+            else ""
+        )
+    )
     print(f"  FTS: {_fts_detail(health['fts_index'])}")
     print(
         "  Recall:"
