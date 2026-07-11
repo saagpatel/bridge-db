@@ -40,10 +40,13 @@ code changes are drafts for review, live DB untouched.
 7. **[bridge-db-four-planes.svg](04-public/bridge-db-four-planes.svg)** — architecture
    diagram: five callers → tool surface → four planes (coordination / memory /
    accountability / verification) → one SQLite file. Structure only, no data.
+8. **[essay-schema-ledger-of-mistakes.md](04-public/essay-schema-ledger-of-mistakes.md)** —
+   the migration ladder v1→v13 read as autobiography: the twice-made canonical-key
+   mistake, the v11 confession (comment-only DDL), facts-vs-inferences in v12, and
+   v13 as the column a simulator ordered. Every rung verified against db.py.
 
 ## Angles deliberately left on the shelf (from 01, if wanted later)
 
-- "A schema is a ledger of your mistakes" (migration ladder v1→v13 as autobiography)
 - "sometimes(): asserting your guards actually fire" (reachability counters)
 - "The claim is not the SELECT" (largely absorbed by the explorer + DST essay)
 
