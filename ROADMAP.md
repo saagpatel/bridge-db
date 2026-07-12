@@ -4,7 +4,7 @@ This roadmap captures the current scope-closed state of bridge-db. All originall
 
 ## Current Position
 
-- Core MCP server is stable, typed, and test-backed. Schema at v13 (adds FTS5 `content_index`, shipped-event sync receipts/dispositions, project provenance, session-cost attribution, context-section CAS, export-state CAS, durable write-conflict receipts, session-cost classification, and `pending_handoffs.claimed_by`) — see CLAUDE.md's Architecture section for the full per-version history.
+- Core MCP server is stable, typed, and test-backed. Schema at v14 (adds FTS5 `content_index`, project provenance, session-cost attribution, context-section CAS, export-state CAS, durable write-conflict receipts, session-cost classification, `pending_handoffs.claimed_by`, and — at v14 — the collapse of the shipped-sync receipt/disposition tables into `activity_log` `sync_*` columns) — see CLAUDE.md's Architecture section for the full per-version history.
 - SQLite schema and migration path are in place; step-wise migrations proven through v1→current.
 - MCP tools across 10 modules: activity, handoffs, context, snapshots, cost, export, health, recall, audit, conflicts. Verify the current decorator count with `rg '@mcp\.tool' src/bridge_db -c`.
 - Markdown export works as a compatibility layer for file-based clients.
@@ -15,7 +15,7 @@ This roadmap captures the current scope-closed state of bridge-db. All originall
 - Audit hardening closed the correctness gaps around handoff clearing, future-schema detection, degraded health reporting, and latent v1→v2 migration gaps.
 - Phase −1 of the semantic memory arc (FTS5 + `recall`) shipped; subsequent phases closed (see below).
 - Phase 6 observability shipped: `recall_stats`, `audit_tail`, and WAL-size health metric (see below).
-- Shipped-event sync hardening shipped: `confirm_shipped_sync` records downstream proof before marking shipped activity as processed; `record_shipped_event_disposition` records non-receipt policy decisions separately.
+- Shipped-event sync hardening shipped, then collapsed at v14 into one verb: `record_disposition` writes a SHIPPED row's terminal sync state onto the activity row — `disposition='synced'` records downstream proof and marks the row processed, a policy disposition records a non-receipt decision with a reason.
 - FTS index health hardening shipped: `health`, `status`, and `--dogfood` now treat missing/orphaned `content_index` rows as hard recall-health drift, with CLI-only repair through `--rebuild-content-index`.
 - Repo verification should be refreshed with `uv run pytest`, `uv run pyright`, and `uv run ruff check` before claiming a current green state or test count.
 
@@ -214,7 +214,7 @@ Scope note
 
 Future work is maintenance-only:
 - Keep docs and tool contracts aligned when MCP surfaces change.
-- Do not use `mark_shipped_processed` for `SHIPPED` rows; shipped rows require `confirm_shipped_sync` with proof or `record_shipped_event_disposition` with an explicit policy reason.
+- Resolve a `SHIPPED` row with `record_disposition`: `disposition='synced'` with downstream proof, or a policy disposition with an explicit `reason`. (The v14 collapse retired the `confirm_shipped_sync` / `record_shipped_event_disposition` / `mark_shipped_processed` trio.)
 - Watch for WAL bloat via `health.wal_warning` (>10 MiB). Run `PRAGMA wal_checkpoint(TRUNCATE)` if needed.
 - Watch for FTS drift via `status.signals.fts_missing` and `status.signals.fts_orphaned`. Run `uv run python -m bridge_db --rebuild-content-index` if drift appears, then rerun `--status` and `--dogfood`.
 - Keep local hooks and external writers on bridge-db CLI/MCP write paths. Do not reintroduce direct `sqlite3` inserts into `activity_log`.

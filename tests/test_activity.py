@@ -682,7 +682,7 @@ async def test_get_shipped_events_marks_policy_backed_meta_events(
                 "projects": {
                     "operator-os-coherence": {
                         "reason": "machine-level receipt",
-                        "record_outcome_in": "bridge-db shipped_sync_receipts",
+                        "record_outcome_in": "bridge-db activity sync disposition",
                     }
                 }
             }
@@ -715,12 +715,12 @@ async def test_get_shipped_events_marks_policy_backed_meta_events(
     assert meta_sync["state"] == "meta_no_target"
     assert meta_sync["reason"] == "machine-level receipt"
     assert meta_sync["notion_page_id"] is None
-    assert meta_sync["record_outcome_in"] == "bridge-db shipped_sync_receipts"
+    assert meta_sync["record_outcome_in"] == "bridge-db activity sync disposition"
     assert meta_sync["policy_ref"] == str(policy)
     assert by_name["missing-project"]["notion_sync"]["state"] == "unmatched"
 
 
-async def test_record_shipped_event_disposition_is_non_receipt(
+async def test_record_disposition_policy_is_non_receipt(
     db: aiosqlite.Connection,
     fns: dict[str, Any],
 ) -> None:
@@ -737,10 +737,10 @@ async def test_record_shipped_event_disposition_is_non_receipt(
     assert row is not None
     activity_id = row["id"]
 
-    result = await fns["record_shipped_event_disposition"](
+    result = await fns["record_disposition"](
         caller="codex",
         activity_id=activity_id,
-        disposition_type="unsynced_by_policy",
+        disposition="unsynced_by_policy",
         reason="experimental local artifact with no durable downstream target",
         policy_ref="/home/user/Documents/Codex/operating-system-audits/example.md",
         notes="leave pending without receipt",
@@ -749,36 +749,30 @@ async def test_record_shipped_event_disposition_is_non_receipt(
 
     assert result["ok"] is True
     assert result["activity_id"] == activity_id
-    assert result["disposition_type"] == "unsynced_by_policy"
+    assert result["disposition"] == "unsynced_by_policy"
+    assert result["processed_added"] is False
 
+    # A policy disposition writes the sync_* columns and does NOT add PROCESSED.
     cursor = await db.execute(
-        """
-        SELECT a.tags, d.disposition_type, d.policy_ref, d.reason, d.decided_by, d.notes
-        FROM activity_log AS a
-        JOIN shipped_event_dispositions AS d ON d.activity_id = a.id
-        WHERE a.id = ?
-        """,
+        "SELECT tags, sync_disposition, sync_disposition_by, sync_policy_ref, "
+        "sync_reason, sync_note, sync_downstream_ref FROM activity_log WHERE id = ?",
         (activity_id,),
     )
-    disposition = await cursor.fetchone()
-    assert disposition is not None
-    assert json.loads(disposition["tags"]) == ["SHIPPED"]
-    assert disposition["disposition_type"] == "unsynced_by_policy"
+    stored = await cursor.fetchone()
+    assert stored is not None
+    assert json.loads(stored["tags"]) == ["SHIPPED"]
+    assert stored["sync_disposition"] == "unsynced_by_policy"
+    assert stored["sync_disposition_by"] == "codex"
     assert (
-        disposition["policy_ref"]
+        stored["sync_policy_ref"]
         == "/home/user/Documents/Codex/operating-system-audits/example.md"
     )
     assert (
-        disposition["reason"]
+        stored["sync_reason"]
         == "experimental local artifact with no durable downstream target"
     )
-    assert disposition["decided_by"] == "codex"
-    assert disposition["notes"] == "leave pending without receipt"
-
-    cursor = await db.execute("SELECT COUNT(*) FROM shipped_sync_receipts")
-    count_row = await cursor.fetchone()
-    assert count_row is not None
-    assert count_row[0] == 0
+    assert stored["sync_note"] == "leave pending without receipt"
+    assert stored["sync_downstream_ref"] is None
 
     shipped = await fns["get_shipped_events"](ctx=ctx)
     assert shipped[0]["sync_receipt"] is None
@@ -786,9 +780,13 @@ async def test_record_shipped_event_disposition_is_non_receipt(
     assert shipped[0]["policy_disposition"]["reason"] == (
         "experimental local artifact with no durable downstream target"
     )
+    assert shipped[0]["policy_disposition"]["policy_ref"] == (
+        "/home/user/Documents/Codex/operating-system-audits/example.md"
+    )
+    assert shipped[0]["policy_disposition"]["decided_by"] == "codex"
 
 
-async def test_record_shipped_event_disposition_rejects_receipted_event(
+async def test_record_disposition_synced_refuses_policy_downgrade(
     db: aiosqlite.Connection,
     fns: dict[str, Any],
 ) -> None:
@@ -805,182 +803,127 @@ async def test_record_shipped_event_disposition_rejects_receipted_event(
     assert row is not None
     activity_id = row["id"]
 
-    await fns["confirm_shipped_sync"](
+    await fns["record_disposition"](
         caller="codex",
         activity_id=activity_id,
+        disposition="synced",
         downstream_system="github",
         downstream_ref="https://github.com/example/repo/pull/1",
         ctx=ctx,
     )
 
-    with pytest.raises(ToolError, match="already has a shipped_sync_receipts row"):
-        await fns["record_shipped_event_disposition"](
+    with pytest.raises(ToolError, match="cannot be downgraded to a policy disposition"):
+        await fns["record_disposition"](
             caller="codex",
             activity_id=activity_id,
-            disposition_type="unsynced_by_policy",
+            disposition="unsynced_by_policy",
             reason="too late",
             ctx=ctx,
         )
 
 
-async def test_mark_shipped_processed_idempotent(
+async def test_record_disposition_synced_over_policy_preserves_reasoning(
     db: aiosqlite.Connection,
     fns: dict[str, Any],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The allowed policy→synced transition must not silently erase the prior
+    policy reason/ref: it is folded into the synced note (and thus surfaces on
+    get_shipped_events' sync_receipt.notes), preserving the audit trail."""
     monkeypatch.setattr(config, "BRIDGE_FILE_PATH", tmp_path / "bridge.md")
     ctx = make_ctx(db)
     await fns["log_activity"](
-        caller="cc", project_name="A", summary="s", tags=["TASK_DONE"], ctx=ctx
+        caller="cc", project_name="A", summary="s", tags=["SHIPPED"], ctx=ctx
     )
     cursor = await db.execute("SELECT id FROM activity_log")
     row = await cursor.fetchone()
     assert row is not None
     activity_id = row["id"]
 
-    result1 = await fns["mark_shipped_processed"](activity_ids=[activity_id], ctx=ctx)
-    assert result1["updated"] == 1
-    assert result1["activity_ids"] == [activity_id]
-    assert result1["updated_ids"] == [activity_id]
-    assert result1["missing_ids"] == []
-
-    result2 = await fns["mark_shipped_processed"](activity_ids=[activity_id], ctx=ctx)
-    assert result2["updated"] == 0
-    assert result2["activity_ids"] == [activity_id]
-    assert result2["updated_ids"] == []
-    assert result2["missing_ids"] == []
-
-    cursor2 = await db.execute(
-        "SELECT tags FROM activity_log WHERE id = ?", (activity_id,)
+    await fns["record_disposition"](
+        caller="codex",
+        activity_id=activity_id,
+        disposition="unsynced_by_policy",
+        reason="no downstream target yet",
+        policy_ref="/policy.md",
+        ctx=ctx,
     )
-    row2 = await cursor2.fetchone()
-    assert row2 is not None
-    assert json.loads(row2["tags"]).count("PROCESSED") == 1
+    # Later actually synced — the change-of-mind flow is allowed.
+    await fns["record_disposition"](
+        caller="codex",
+        activity_id=activity_id,
+        disposition="synced",
+        downstream_system="notion",
+        downstream_ref="page-9",
+        notes="synced after all",
+        ctx=ctx,
+    )
+
+    cursor = await db.execute(
+        "SELECT sync_disposition, sync_downstream_ref, sync_policy_ref, sync_reason, "
+        "sync_note FROM activity_log WHERE id = ?",
+        (activity_id,),
+    )
+    stored = await cursor.fetchone()
+    assert stored is not None
+    assert stored["sync_disposition"] == "synced"
+    assert stored["sync_downstream_ref"] == "page-9"
+    # The prior policy reasoning is preserved in the note, not silently dropped.
+    assert "synced after all" in stored["sync_note"]
+    assert "unsynced_by_policy" in stored["sync_note"]
+    assert "no downstream target yet" in stored["sync_note"]
+    assert "/policy.md" in stored["sync_note"]
+
+    shipped = await fns["get_shipped_events"](ctx=ctx)
+    assert shipped[0]["sync_receipt"]["downstream_ref"] == "page-9"
+    assert "no downstream target yet" in shipped[0]["sync_receipt"]["notes"]
+    assert shipped[0]["policy_disposition"] is None
 
 
-async def test_mark_shipped_processed_audit_names_activity_ids(
-    db: aiosqlite.Connection,
-    fns: dict[str, Any],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_record_disposition_rejects_invalid_disposition(
+    db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
-    """Compatibility processing audit rows should be enough to review what was touched."""
-    audit_path = tmp_path / "audit.jsonl"
-    monkeypatch.setattr(config, "AUDIT_LOG_PATH", audit_path)
-    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", tmp_path / "bridge.md")
-
     ctx = make_ctx(db)
     await fns["log_activity"](
-        caller="cc", project_name="A", summary="s", tags=["TASK_DONE"], ctx=ctx
+        caller="cc", project_name="A", summary="s", tags=["SHIPPED"], ctx=ctx
     )
     cursor = await db.execute("SELECT id FROM activity_log")
     row = await cursor.fetchone()
     assert row is not None
-    activity_id = row["id"]
-    missing_id = activity_id + 999
 
-    result = await fns["mark_shipped_processed"](
-        activity_ids=[activity_id, missing_id], ctx=ctx
-    )
-
-    assert result["updated"] == 1
-    assert result["activity_ids"] == [activity_id, missing_id]
-    assert result["updated_ids"] == [activity_id]
-    assert result["missing_ids"] == [missing_id]
-    audit_lines = audit_path.read_text(encoding="utf-8").splitlines()
-    audit_record = json.loads(audit_lines[-1])
-    assert audit_record["tool"] == "mark_shipped_processed"
-    assert f"activity_ids=[{activity_id}, {missing_id}]" in audit_record["detail"]
-    assert f"updated_ids=[{activity_id}]" in audit_record["detail"]
-    assert f"missing_ids=[{missing_id}]" in audit_record["detail"]
+    with pytest.raises(ToolError, match="disposition must be one of"):
+        await fns["record_disposition"](
+            caller="codex",
+            activity_id=row["id"],
+            disposition="not_a_real_disposition",
+            reason="x",
+            ctx=ctx,
+        )
 
 
-async def test_mark_shipped_processed_empty_raises(
-    db: aiosqlite.Connection, fns: dict[str, Any]
-) -> None:
-    ctx = make_ctx(db)
-    with pytest.raises(ToolError):
-        await fns["mark_shipped_processed"](activity_ids=[], ctx=ctx)
-
-
-async def test_mark_shipped_processed_rejects_shipped_rows(
-    db: aiosqlite.Connection,
-    fns: dict[str, Any],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """F7: SHIPPED rows require proof or disposition, while non-shipped operational
-    events still pass through the compatibility path."""
-    audit_path = tmp_path / "audit.jsonl"
-    monkeypatch.setattr(config, "AUDIT_LOG_PATH", audit_path)
-    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", tmp_path / "bridge.md")
-    ctx = make_ctx(db)
-
-    # operational (non-shipped) event — legitimate use, no receipt lifecycle
-    await fns["log_activity"](
-        caller="personal_ops",
-        project_name="Ops",
-        summary="s",
-        tags=["TASK_DONE"],
-        ctx=ctx,
-    )
-    # genuine shipped artifact — should go through confirm_shipped_sync instead
-    await fns["log_activity"](
-        caller="cc", project_name="Ship", summary="s", tags=["SHIPPED"], ctx=ctx
-    )
-    cursor = await db.execute("SELECT id, tags FROM activity_log ORDER BY id")
-    rows: list[aiosqlite.Row] = await cursor.fetchall()  # type: ignore[assignment]
-    ops_id, shipped_id = rows[0]["id"], rows[1]["id"]
-
-    ops_result = await fns["mark_shipped_processed"](activity_ids=[ops_id], ctx=ctx)
-    assert ops_result["shipped_bypass_ids"] == []
-
-    with pytest.raises(ToolError, match="confirm_shipped_sync"):
-        await fns["mark_shipped_processed"](activity_ids=[shipped_id], ctx=ctx)
-
-    last = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
-    assert last["tool"] == "mark_shipped_processed"
-    assert last["ok"] is False
-    assert f"blocked_shipped_ids=[{shipped_id}]" in last["detail"]
-
-    cursor2 = await db.execute(
-        "SELECT tags FROM activity_log WHERE id = ?", (shipped_id,)
-    )
-    row2 = await cursor2.fetchone()
-    assert row2 is not None
-    assert "PROCESSED" not in json.loads(row2["tags"])
-
-
-async def test_mark_shipped_processed_refuses_mixed_batch_with_shipped_id(
+async def test_record_disposition_policy_requires_reason(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
     ctx = make_ctx(db)
     await fns["log_activity"](
-        caller="personal_ops",
-        project_name="Ops",
-        summary="done",
-        tags=["TASK_DONE"],
-        ctx=ctx,
+        caller="cc", project_name="A", summary="s", tags=["SHIPPED"], ctx=ctx
     )
-    await fns["log_activity"](
-        caller="cc", project_name="Ship", summary="shipped", tags=["SHIPPED"], ctx=ctx
-    )
-    cursor = await db.execute("SELECT id, tags FROM activity_log ORDER BY id")
-    rows: list[aiosqlite.Row] = await cursor.fetchall()  # type: ignore[assignment]
-    ops_id, shipped_id = rows[0]["id"], rows[1]["id"]
-    before_tags = {row["id"]: json.loads(row["tags"]) for row in rows}
+    cursor = await db.execute("SELECT id FROM activity_log")
+    row = await cursor.fetchone()
+    assert row is not None
 
-    with pytest.raises(ToolError, match="refuses SHIPPED activity ids"):
-        await fns["mark_shipped_processed"](activity_ids=[ops_id, shipped_id], ctx=ctx)
-
-    cursor = await db.execute("SELECT id, tags FROM activity_log ORDER BY id")
-    after_rows = await cursor.fetchall()
-    after_tags = {row["id"]: json.loads(row["tags"]) for row in after_rows}
-    assert after_tags == before_tags
+    with pytest.raises(ToolError, match="reason must not be empty"):
+        await fns["record_disposition"](
+            caller="codex",
+            activity_id=row["id"],
+            disposition="no_durable_target",
+            reason="   ",
+            ctx=ctx,
+        )
 
 
-async def test_confirm_shipped_sync_requires_downstream_proof(
+async def test_record_disposition_synced_requires_downstream_proof(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
     ctx = make_ctx(db)
@@ -992,16 +935,17 @@ async def test_confirm_shipped_sync_requires_downstream_proof(
     assert row is not None
 
     with pytest.raises(ToolError, match="downstream_ref"):
-        await fns["confirm_shipped_sync"](
+        await fns["record_disposition"](
             caller="codex",
             activity_id=row["id"],
+            disposition="synced",
             downstream_system="notion",
             downstream_ref=" ",
             ctx=ctx,
         )
 
 
-async def test_confirm_shipped_sync_rejects_non_shipped_event(
+async def test_record_disposition_rejects_non_shipped_event(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
     ctx = make_ctx(db)
@@ -1011,16 +955,17 @@ async def test_confirm_shipped_sync_rejects_non_shipped_event(
     assert row is not None
 
     with pytest.raises(ToolError, match="not tagged SHIPPED"):
-        await fns["confirm_shipped_sync"](
+        await fns["record_disposition"](
             caller="codex",
             activity_id=row["id"],
+            disposition="synced",
             downstream_system="notion",
             downstream_ref="page-123",
             ctx=ctx,
         )
 
 
-async def test_confirm_shipped_sync_records_receipt_and_marks_processed(
+async def test_record_disposition_synced_records_proof_and_marks_processed(
     db: aiosqlite.Connection,
     fns: dict[str, Any],
     tmp_path: Path,
@@ -1042,9 +987,10 @@ async def test_confirm_shipped_sync_records_receipt_and_marks_processed(
     assert row is not None
     activity_id = row["id"]
 
-    result = await fns["confirm_shipped_sync"](
+    result = await fns["record_disposition"](
         caller="codex",
         activity_id=activity_id,
+        disposition="synced",
         downstream_system="notion",
         downstream_ref="35bc21f1-caf0-81cb-9426-dd264ef668b2",
         notes="Updated personal-ops portfolio row",
@@ -1056,30 +1002,29 @@ async def test_confirm_shipped_sync_records_receipt_and_marks_processed(
     assert result["downstream_system"] == "notion"
 
     cursor = await db.execute(
-        """
-        SELECT a.tags, r.downstream_system, r.downstream_ref, r.synced_by, r.notes
-        FROM activity_log AS a
-        JOIN shipped_sync_receipts AS r ON r.activity_id = a.id
-        WHERE a.id = ?
-        """,
+        "SELECT tags, sync_disposition, sync_downstream_system, sync_downstream_ref, "
+        "sync_disposition_by, sync_note FROM activity_log WHERE id = ?",
         (activity_id,),
     )
-    receipt = await cursor.fetchone()
-    assert receipt is not None
-    assert json.loads(receipt["tags"]) == ["SHIPPED", "PROCESSED"]
-    assert receipt["downstream_system"] == "notion"
-    assert receipt["downstream_ref"] == "35bc21f1-caf0-81cb-9426-dd264ef668b2"
-    assert receipt["synced_by"] == "codex"
-    assert receipt["notes"] == "Updated personal-ops portfolio row"
+    stored = await cursor.fetchone()
+    assert stored is not None
+    assert json.loads(stored["tags"]) == ["SHIPPED", "PROCESSED"]
+    assert stored["sync_disposition"] == "synced"
+    assert stored["sync_downstream_system"] == "notion"
+    assert stored["sync_downstream_ref"] == "35bc21f1-caf0-81cb-9426-dd264ef668b2"
+    assert stored["sync_disposition_by"] == "codex"
+    assert stored["sync_note"] == "Updated personal-ops portfolio row"
 
     shipped = await fns["get_shipped_events"](ctx=ctx)
     assert shipped[0]["sync_receipt"]["downstream_ref"] == (
         "35bc21f1-caf0-81cb-9426-dd264ef668b2"
     )
+    assert shipped[0]["sync_receipt"]["synced_by"] == "codex"
+    assert shipped[0]["policy_disposition"] is None
     assert bridge_path.exists()
 
 
-async def test_confirm_shipped_sync_auto_export_records_context_export_state(
+async def test_record_disposition_synced_auto_export_records_context_export_state(
     db: aiosqlite.Connection,
     fns: dict[str, Any],
     tmp_path: Path,
@@ -1104,9 +1049,10 @@ async def test_confirm_shipped_sync_auto_export_records_context_export_state(
     row = await cursor.fetchone()
     assert row is not None
 
-    await fns["confirm_shipped_sync"](
+    await fns["record_disposition"](
         caller="codex",
         activity_id=row["id"],
+        disposition="synced",
         downstream_system="policy",
         downstream_ref="/tmp/policy.md",
         ctx=ctx,
@@ -1125,7 +1071,7 @@ async def test_confirm_shipped_sync_auto_export_records_context_export_state(
     assert export_state["exported_content_sha256"]
 
 
-async def test_confirm_shipped_sync_is_idempotent_and_can_refresh_receipt(
+async def test_record_disposition_synced_is_idempotent_and_refreshes_proof(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
     ctx = make_ctx(db)
@@ -1137,16 +1083,18 @@ async def test_confirm_shipped_sync_is_idempotent_and_can_refresh_receipt(
     assert row is not None
     activity_id = row["id"]
 
-    first = await fns["confirm_shipped_sync"](
+    first = await fns["record_disposition"](
         caller="codex",
         activity_id=activity_id,
+        disposition="synced",
         downstream_system="notion",
         downstream_ref="page-1",
         ctx=ctx,
     )
-    second = await fns["confirm_shipped_sync"](
+    second = await fns["record_disposition"](
         caller="codex",
         activity_id=activity_id,
+        disposition="synced",
         downstream_system="notion",
         downstream_ref="page-2",
         ctx=ctx,
@@ -1155,15 +1103,22 @@ async def test_confirm_shipped_sync_is_idempotent_and_can_refresh_receipt(
     assert first["processed_added"] is True
     assert second["processed_added"] is False
 
-    cursor = await db.execute("SELECT COUNT(*) FROM shipped_sync_receipts")
-    count_row = await cursor.fetchone()
-    assert count_row is not None
-    assert count_row[0] == 1
+    cursor = await db.execute(
+        "SELECT sync_downstream_ref, sync_disposition FROM activity_log WHERE id = ?",
+        (activity_id,),
+    )
+    stored = await cursor.fetchone()
+    assert stored is not None
+    assert stored["sync_disposition"] == "synced"
+    assert stored["sync_downstream_ref"] == "page-2"
 
-    cursor = await db.execute("SELECT downstream_ref FROM shipped_sync_receipts")
-    receipt = await cursor.fetchone()
-    assert receipt is not None
-    assert receipt["downstream_ref"] == "page-2"
+    # The second synced call must not append a duplicate PROCESSED tag.
+    cursor = await db.execute(
+        "SELECT tags FROM activity_log WHERE id = ?", (activity_id,)
+    )
+    tag_row = await cursor.fetchone()
+    assert tag_row is not None
+    assert json.loads(tag_row["tags"]).count("PROCESSED") == 1
 
 
 async def test_log_activity_prunes_to_retention_limit(
@@ -1453,38 +1408,6 @@ async def test_log_activity_warn_allows_mismatch(
     assert result["ok"] is True
 
 
-async def test_mark_shipped_processed_triggers_auto_export(
-    db: aiosqlite.Connection,
-    fns: dict[str, Any],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """After mark_shipped_processed, the bridge markdown file should be written."""
-    bridge_path = tmp_path / "bridge.md"
-    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge_path)
-
-    ctx = make_ctx(db)
-    await fns["log_activity"](
-        caller="cc",
-        project_name="TestProject",
-        summary="operational v1",
-        tags=["TASK_DONE"],
-        ctx=ctx,
-    )
-    cursor = await db.execute("SELECT id FROM activity_log")
-    row = await cursor.fetchone()
-    assert row is not None
-    activity_id = row["id"]
-
-    await fns["mark_shipped_processed"](activity_ids=[activity_id], ctx=ctx)
-
-    assert bridge_path.exists(), (
-        "bridge markdown file should be written after mark_shipped_processed"
-    )
-    content = bridge_path.read_text()
-    assert "TestProject" in content
-
-
 async def test_log_activity_clamps_operator_label_in_db(
     db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1520,16 +1443,13 @@ async def test_unprocessed_only_excludes_dispositioned_rows(
     cursor = await db.execute("SELECT id FROM activity_log")
     row = await cursor.fetchone()
     assert row is not None
-    await db.execute(
-        """
-        INSERT INTO shipped_event_dispositions (
-            activity_id, disposition_type, reason, decided_by
-        )
-        VALUES (?, 'unsynced_by_policy', 'experimental artifact', 'codex')
-        """,
-        (row["id"],),
+    await fns["record_disposition"](
+        caller="codex",
+        activity_id=row["id"],
+        disposition="unsynced_by_policy",
+        reason="experimental artifact",
+        ctx=ctx,
     )
-    await db.commit()
 
     unprocessed = await fns["get_shipped_events"](unprocessed_only=True, ctx=ctx)
     assert unprocessed == []

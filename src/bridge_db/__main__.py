@@ -121,7 +121,7 @@ async def run_status(*, now: datetime | None = None) -> bool:
         f" handoffs={summary['row_counts']['pending_handoffs']},"
         f" snapshots={summary['row_counts']['system_snapshots']},"
         f" costs={summary['row_counts']['cost_records']},"
-        f" shipped_receipts={summary['row_counts']['shipped_sync_receipts']}"
+        f" synced_shipped={summary['signals']['synced_shipped']}"
     )
     print(
         "  Signals:"
@@ -177,7 +177,7 @@ def _status_freshness_lines(summary: dict[str, Any]) -> list[str]:
             continue
         action_block = cast(dict[str, Any], action)
         action_name = action_block.get("action")
-        if not isinstance(action_name, str) or action_name == "mark_shipped_processed":
+        if not isinstance(action_name, str):
             continue
         owner = action_block.get("owner")
         if isinstance(owner, str) and owner:
@@ -222,34 +222,6 @@ def _latest_detail(rows: list[dict[str, Any]]) -> str:
     return str(detail) if detail is not None else "none"
 
 
-def _has_detailed_mark_audit(rows: list[dict[str, Any]]) -> bool:
-    if not rows:
-        return True
-    detail = str(rows[0].get("detail") or "")
-    return all(
-        token in detail for token in ("activity_ids=", "updated_ids=", "missing_ids=")
-    )
-
-
-def mark_audit_posture(
-    rows: list[dict[str, Any]], processed_shipped_without_receipt: int = 0
-) -> str:
-    if not rows:
-        return "none observed"
-    detail = str(rows[0].get("detail") or "")
-    if "blocked_shipped_ids=" in detail:
-        return "blocked shipped misuse observed"
-    if "shipped_bypass_ids=" in detail:
-        if processed_shipped_without_receipt == 0:
-            return (
-                "historical shipped bypass evidence only; no receiptless shipped rows"
-            )
-        return "legacy shipped bypass observed"
-    if _has_detailed_mark_audit(rows):
-        return "non-shipped compatibility detail current"
-    return "legacy terse detail observed"
-
-
 async def run_dogfood() -> bool:
     """Run the read-only bridge observability dogfood checklist."""
     from bridge_db import config
@@ -266,12 +238,8 @@ async def run_dogfood() -> bool:
         await db.close()
 
     recent_audit = collect_audit_tail(limit=10)
-    recent_confirm = collect_audit_tail(tool="confirm_shipped_sync", limit=10)
-    recent_mark = collect_audit_tail(tool="mark_shipped_processed", limit=10)
+    recent_disposition = collect_audit_tail(tool="record_disposition", limit=10)
     recall = collect_recall_stats(days=7)
-    mark_posture = mark_audit_posture(
-        recent_mark, int(summary["signals"]["processed_shipped_without_receipt"])
-    )
 
     print("bridge-db dogfood")
     print(f"  Overall: {summary['overall']}")
@@ -312,9 +280,7 @@ async def run_dogfood() -> bool:
         f" scopes={recall['scope_breakdown']}"
     )
     print(f"  Recent audit rows checked: {len(recent_audit)}")
-    print(f"  Latest confirm_shipped_sync: {_latest_detail(recent_confirm)}")
-    print(f"  Latest mark_shipped_processed: {_latest_detail(recent_mark)}")
-    print(f"  Compatibility audit posture: {mark_posture}")
+    print(f"  Latest record_disposition: {_latest_detail(recent_disposition)}")
 
     return bool(
         summary["ok"]

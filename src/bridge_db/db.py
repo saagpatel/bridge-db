@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import shutil
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,7 +16,7 @@ from bridge_db import config
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # A migration post-hook runs after its DDL, before the version bump+commit
 # (e.g. FTS repopulation). Its return value is ignored.
@@ -76,7 +77,15 @@ CREATE TABLE IF NOT EXISTS activity_log (
     tags TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     canonical_key TEXT,
-    source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested'))
+    source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested')),
+    sync_disposition TEXT CHECK(sync_disposition IS NULL OR sync_disposition IN ('synced', 'unsynced_by_policy', 'no_durable_target', 'superseded_without_receipt', 'declined_mapping')),
+    sync_disposition_by TEXT CHECK(sync_disposition_by IS NULL OR sync_disposition_by IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+    synced_at TEXT,
+    sync_downstream_system TEXT,
+    sync_downstream_ref TEXT,
+    sync_policy_ref TEXT,
+    sync_reason TEXT,
+    sync_note TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_activity_source ON activity_log(source);
@@ -121,40 +130,10 @@ CREATE TABLE IF NOT EXISTS cost_records (
     UNIQUE(system, month)
 );
 
-CREATE TABLE IF NOT EXISTS shipped_sync_receipts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    activity_id INTEGER NOT NULL UNIQUE,
-    downstream_system TEXT NOT NULL,
-    downstream_ref TEXT NOT NULL,
-    synced_by TEXT NOT NULL CHECK(synced_by IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
-    synced_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    notes TEXT,
-    FOREIGN KEY(activity_id) REFERENCES activity_log(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_shipped_sync_downstream
-    ON shipped_sync_receipts(downstream_system, downstream_ref);
-
-CREATE TABLE IF NOT EXISTS shipped_event_dispositions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    activity_id INTEGER NOT NULL UNIQUE,
-    disposition_type TEXT NOT NULL CHECK(disposition_type IN (
-        'unsynced_by_policy',
-        'no_durable_target',
-        'superseded_without_receipt',
-        'declined_mapping'
-    )),
-    policy_ref TEXT,
-    reason TEXT NOT NULL,
-    decided_by TEXT NOT NULL CHECK(decided_by IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
-    decided_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    notes TEXT,
-    FOREIGN KEY(activity_id) REFERENCES activity_log(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_shipped_disposition_type
-    ON shipped_event_dispositions(disposition_type);
-
+-- Shipped-event sync state (receipts + policy dispositions) lives on the
+-- activity row itself in the sync_* columns above (schema v14). The former
+-- shipped_sync_receipts and shipped_event_dispositions child tables were
+-- collapsed away — see _MIGRATION_V13_TO_V14.
 
 CREATE TABLE IF NOT EXISTS session_costs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -447,6 +426,68 @@ ALTER TABLE pending_handoffs ADD COLUMN claimed_by TEXT;
 """
 
 
+# Migration v13 → v14: collapse the shipped-sync trio into activity-row columns.
+# shipped_sync_receipts + shipped_event_dispositions were a normalized subsystem
+# for ~36 lifetime rows of a per-row yes/no/why. Shipped events ARE activity
+# rows, so their sync disposition now lives on the row in sync_* columns and the
+# two FK-CASCADE child tables are dropped after a lossless copy.
+#
+# The single sync_disposition column is the discriminator: 'synced' means a
+# receipt-backed downstream proof (carries downstream_system/ref); the four
+# policy values mean a non-receipt policy decision (carries reason/policy_ref).
+# synced_at holds the receipt's synced_at or the disposition's decided_at;
+# sync_note holds either notes field. The receipt copy runs first and the
+# disposition copy skips any row that already has a receipt, so on the
+# (structurally near-impossible) both-state row 'synced' wins — the collapse
+# cannot represent contradictory receipt+disposition simultaneously, which the
+# old two-table model technically could via disposition-then-confirm.
+#
+# Dropping the child tables also removes the documented BD-INV-1 cascade
+# time-bomb outright: a disposition can no longer outlive or be separated from
+# its row because it IS the row.
+#
+# The step DDL is intentionally empty: EVERY v14 change (the guarded ADD COLUMNs,
+# the lossless copy, and the DROP of the child tables) runs in the
+# _migrate_shipped_state_to_columns post-hook so the whole step is idempotent and
+# crash-safe. `executescript` commits each ADD COLUMN at the engine level
+# regardless of the ladder's later commit, so an ADD-COLUMN-in-the-DDL approach
+# is NOT crash-safe: a kill between the ALTERs and the user_version bump would
+# leave the columns durably present at v13 and brick the next boot with a
+# duplicate-column error on re-run. Guarding each ADD on the live column set (and
+# each copy/DROP on table existence) makes a re-run after any interrupted attempt
+# a clean no-op that still converges to v14.
+_MIGRATION_V13_TO_V14 = "-- v13 → v14: all changes run in the _migrate_shipped_state_to_columns post-hook.\n"
+
+# Column definitions for the v14 ADD COLUMN step. Kept character-identical to the
+# activity_log block in _SCHEMA_DDL so a fresh install and a migrated DB converge
+# (see tests/test_schema_convergence_concurrency.py). NOTE: the synced/policy
+# field requirements the old NOT NULL child-table columns enforced (a 'synced'
+# row has downstream_system+ref, a policy row has a reason) are NOT expressed as
+# CHECK constraints here — SQLite cannot ADD a column with a CHECK that
+# references OTHER columns, and a table-level cross-column CHECK would require a
+# full activity_log rebuild (the FTS-mirrored core table). record_disposition is
+# the sole writer and validates those requirements; the health
+# receipt_orphan_count / disposition_orphan_count metrics are the compensating
+# detection control (they flag a 'synced' row missing downstream proof or a
+# policy row missing its reason, and must always read 0).
+_V14_SYNC_COLUMNS: tuple[tuple[str, str], ...] = (
+    (
+        "sync_disposition",
+        "TEXT CHECK(sync_disposition IS NULL OR sync_disposition IN ('synced', 'unsynced_by_policy', 'no_durable_target', 'superseded_without_receipt', 'declined_mapping'))",
+    ),
+    (
+        "sync_disposition_by",
+        "TEXT CHECK(sync_disposition_by IS NULL OR sync_disposition_by IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops'))",
+    ),
+    ("synced_at", "TEXT"),
+    ("sync_downstream_system", "TEXT"),
+    ("sync_downstream_ref", "TEXT"),
+    ("sync_policy_ref", "TEXT"),
+    ("sync_reason", "TEXT"),
+    ("sync_note", "TEXT"),
+)
+
+
 async def apply_pragmas(db: aiosqlite.Connection) -> None:
     """Apply all required PRAGMAs. Safe to call on every connection open."""
     await db.execute("PRAGMA journal_mode=WAL")
@@ -472,6 +513,115 @@ async def checkpoint_wal(db: aiosqlite.Connection) -> dict[str, int]:
     if row is None:
         return {"busy": 1, "log_frames": -1, "checkpointed": -1}
     return {"busy": int(row[0]), "log_frames": int(row[1]), "checkpointed": int(row[2])}
+
+
+async def _table_exists(db: aiosqlite.Connection, name: str) -> bool:
+    cursor = await db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+    )
+    return await cursor.fetchone() is not None
+
+
+async def _backup_db_file(db: aiosqlite.Connection, label: str) -> None:
+    """Write a one-time consistent file copy of the main DB before a destructive
+    migration step, so a botched or interrupted migration is repairable.
+
+    No-op for an in-memory DB (no file path). Idempotent: if the backup already
+    exists (e.g. from a prior interrupted attempt) the pristine copy is kept
+    rather than overwritten with partially-migrated state. Commits and TRUNCATE-
+    checkpoints first so the copied main file is self-contained (WAL flushed in).
+    """
+    cursor = await db.execute("PRAGMA database_list")
+    main_path = next(
+        (row[2] for row in await cursor.fetchall() if row[1] == "main" and row[2]),
+        None,
+    )
+    if not main_path:
+        return
+    backup = Path(f"{main_path}.{label}.bak")
+    if backup.exists():
+        logger.info("migration backup already present at %s; keeping it", backup)
+        return
+    await db.commit()
+    await checkpoint_wal(db)
+    shutil.copy2(main_path, backup)
+    logger.info("migration backup written to %s", backup)
+
+
+async def _migrate_shipped_state_to_columns(db: aiosqlite.Connection) -> None:
+    """v13→v14 post-hook: add the sync_* columns, copy the shipped_sync_receipts +
+    shipped_event_dispositions child tables onto them, then drop the child tables.
+
+    Idempotent and crash-safe. Each ADD COLUMN is guarded on the live column set
+    (PRAGMA table_info) and each copy/DROP on table existence, so re-running this
+    step after an interrupted migration (columns present but user_version still
+    13) is a clean no-op that still converges to v14 instead of raising
+    duplicate-column. Before touching a DB that still holds legacy child-table
+    state, a one-time file backup is taken so the irreversible DROP is repairable.
+
+    A complete v13 DB carries both tables (created at v4 and v8). A receipt maps
+    to the 'synced' disposition; a policy row keeps its disposition_type. The
+    receipt copy runs first and the disposition copy skips any row that already
+    has a receipt, so a (structurally near-impossible) both-state row resolves to
+    'synced' — the single column cannot hold contradictory receipt+disposition
+    state.
+    """
+    receipts_exist = await _table_exists(db, "shipped_sync_receipts")
+    dispositions_exist = await _table_exists(db, "shipped_event_dispositions")
+
+    # Back up before the destructive collapse when legacy child-table state that
+    # the DROP would otherwise make unrecoverable is present.
+    if receipts_exist or dispositions_exist:
+        await _backup_db_file(db, "pre-v14")
+
+    # Idempotent ADD COLUMN: skip any column already present so a crash between
+    # the ALTERs and the user_version bump cannot brick the next boot.
+    cursor = await db.execute("PRAGMA table_info(activity_log)")
+    existing_columns = {row[1] for row in await cursor.fetchall()}
+    for name, decl in _V14_SYNC_COLUMNS:
+        if name not in existing_columns:
+            await db.execute(
+                f"ALTER TABLE activity_log ADD COLUMN {name} {decl}"  # noqa: S608 — name/decl from the closed _V14_SYNC_COLUMNS literal
+            )
+
+    if receipts_exist:
+        await db.execute(
+            """
+            UPDATE activity_log SET
+                sync_disposition = 'synced',
+                sync_downstream_system = (SELECT r.downstream_system FROM shipped_sync_receipts AS r WHERE r.activity_id = activity_log.id),
+                sync_downstream_ref = (SELECT r.downstream_ref FROM shipped_sync_receipts AS r WHERE r.activity_id = activity_log.id),
+                sync_disposition_by = (SELECT r.synced_by FROM shipped_sync_receipts AS r WHERE r.activity_id = activity_log.id),
+                synced_at = (SELECT r.synced_at FROM shipped_sync_receipts AS r WHERE r.activity_id = activity_log.id),
+                sync_note = (SELECT r.notes FROM shipped_sync_receipts AS r WHERE r.activity_id = activity_log.id)
+            WHERE EXISTS (SELECT 1 FROM shipped_sync_receipts AS r WHERE r.activity_id = activity_log.id)
+            """  # noqa: S608 — closed literal SQL, no interpolated values
+        )
+
+    if dispositions_exist:
+        # Only exclude receipt-backed rows when the receipts table is present;
+        # if it is absent there is no receipt to lose the tie to.
+        receipt_guard = (
+            " AND NOT EXISTS (SELECT 1 FROM shipped_sync_receipts AS r "
+            "WHERE r.activity_id = activity_log.id)"
+            if receipts_exist
+            else ""
+        )
+        await db.execute(
+            f"""
+            UPDATE activity_log SET
+                sync_disposition = (SELECT d.disposition_type FROM shipped_event_dispositions AS d WHERE d.activity_id = activity_log.id),
+                sync_policy_ref = (SELECT d.policy_ref FROM shipped_event_dispositions AS d WHERE d.activity_id = activity_log.id),
+                sync_reason = (SELECT d.reason FROM shipped_event_dispositions AS d WHERE d.activity_id = activity_log.id),
+                sync_disposition_by = (SELECT d.decided_by FROM shipped_event_dispositions AS d WHERE d.activity_id = activity_log.id),
+                synced_at = (SELECT d.decided_at FROM shipped_event_dispositions AS d WHERE d.activity_id = activity_log.id),
+                sync_note = (SELECT d.notes FROM shipped_event_dispositions AS d WHERE d.activity_id = activity_log.id)
+            WHERE EXISTS (SELECT 1 FROM shipped_event_dispositions AS d WHERE d.activity_id = activity_log.id){receipt_guard}
+            """  # noqa: S608 — receipt_guard is a closed literal, not user input
+        )
+
+    await db.execute("DROP TABLE IF EXISTS shipped_sync_receipts")
+    await db.execute("DROP TABLE IF EXISTS shipped_event_dispositions")
 
 
 async def ensure_schema(db: aiosqlite.Connection) -> None:
@@ -515,6 +665,7 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         (11, _MIGRATION_V10_TO_V11, reindex_all_activity_fts),
         (12, _MIGRATION_V11_TO_V12, None),
         (13, _MIGRATION_V12_TO_V13, None),
+        (14, _MIGRATION_V13_TO_V14, _migrate_shipped_state_to_columns),
     ]
     for target, ddl, post_hook in migrations:
         if current_version >= target:

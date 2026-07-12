@@ -25,8 +25,6 @@ _ROW_COUNT_TABLES = (
     "pending_handoffs",
     "system_snapshots",
     "cost_records",
-    "shipped_sync_receipts",
-    "shipped_event_dispositions",
 )
 _ACTIVITY_SOURCES = ("cc", "codex", "claude_ai", "notion_os", "personal_ops")
 _SNAPSHOT_SYSTEMS = ("cc", "codex")
@@ -136,7 +134,17 @@ async def collect_claude_ai_section_drift(db: Any) -> dict[str, Any]:
 
 
 async def collect_health_metrics(db: Any) -> dict[str, Any]:
-    """Collect raw bridge health metrics from the current DB plus filesystem state."""
+    """Collect raw bridge health metrics from the current DB plus filesystem state.
+
+    Note (v14 boundary): `receipt_orphan_count` and `disposition_orphan_count`
+    keep their names but changed meaning. Pre-v14 they counted FK-orphaned
+    shipped_sync_receipts / shipped_event_dispositions rows; those child tables
+    were collapsed into activity_log `sync_*` columns, so the metrics now measure
+    disposition MALFORMATION on the row (a 'synced' row missing downstream proof;
+    a disposition on a non-SHIPPED row or a policy disposition missing its
+    reason). Both must always read 0 and are the compensating detection control
+    for the field requirements the old NOT NULL columns enforced.
+    """
     cursor = await db.execute("PRAGMA user_version")
     row = await cursor.fetchone()
     schema_version: int = row[0] if row else 0
@@ -155,28 +163,28 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     unprocessed_row = await cursor.fetchone()
     unprocessed_shipped_count: int = unprocessed_row[0] if unprocessed_row else 0
 
+    # Actionable = SHIPPED, not PROCESSED, and no terminal sync disposition yet
+    # (sync_disposition IS NULL). A policy-dispositioned row is resolved and
+    # drops out here just as it did under the old dispositions subquery.
     cursor = await db.execute(
         "SELECT COUNT(*) FROM activity_log AS activity "
         "WHERE EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE value = 'SHIPPED') "
         "AND NOT EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE value = 'PROCESSED') "
-        "AND NOT EXISTS ("
-        "  SELECT 1 FROM shipped_event_dispositions AS disposition "
-        "  WHERE disposition.activity_id = activity.id"
-        ")"
+        "AND activity.sync_disposition IS NULL"
     )
     actionable_row = await cursor.fetchone()
     actionable_unprocessed_shipped_count: int = (
         actionable_row[0] if actionable_row else 0
     )
 
+    # Receiptless-processed = SHIPPED, PROCESSED-tagged, but no 'synced' proof
+    # disposition. 'synced' is the column-model receipt; anything else (NULL or a
+    # policy value) counts as lacking downstream proof.
     cursor = await db.execute(
         "SELECT COUNT(*) FROM activity_log AS activity "
         "WHERE EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE value = 'SHIPPED') "
         "AND EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE value = 'PROCESSED') "
-        "AND NOT EXISTS ("
-        "  SELECT 1 FROM shipped_sync_receipts AS receipt "
-        "  WHERE receipt.activity_id = activity.id"
-        ")"
+        "AND (activity.sync_disposition IS NULL OR activity.sync_disposition <> 'synced')"
     )
     receiptless_row = await cursor.fetchone()
     processed_shipped_without_receipt_count: int = (
@@ -191,16 +199,44 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     ledger_row = await cursor.fetchone()
     ledger_protected_count: int = ledger_row[0] if ledger_row else 0
 
+    # Rows carrying a 'synced' proof disposition — the column-model analog of the
+    # old shipped_sync_receipts row count (surfaced in --status).
     cursor = await db.execute(
-        "SELECT COUNT(*) FROM shipped_sync_receipts AS r "
-        "WHERE NOT EXISTS (SELECT 1 FROM activity_log AS a WHERE a.id = r.activity_id)"
+        "SELECT COUNT(*) FROM activity_log WHERE sync_disposition = 'synced'"
+    )
+    synced_row = await cursor.fetchone()
+    synced_shipped_count: int = synced_row[0] if synced_row else 0
+
+    # BD-INV-1 integrity checks, reframed for the v14 column model. Pre-v14 these
+    # counted FK-orphans (a receipt/disposition whose activity row was pruned);
+    # that is structurally impossible now — the state IS the row — so the same
+    # two metric names now measure disposition MALFORMATION and MUST stay zero.
+    # They are the compensating detection control for the field requirements the
+    # old NOT NULL child-table columns enforced but the nullable sync_* columns
+    # cannot (see db.py _V14_SYNC_COLUMNS):
+    #   receipt_orphan_count      — a 'synced' row missing downstream_system/ref
+    #                               (a receipt without its proof).
+    #   disposition_orphan_count  — a disposition on a non-SHIPPED row, OR a
+    #                               policy disposition missing its reason.
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM activity_log "
+        "WHERE sync_disposition = 'synced' "
+        "AND (sync_downstream_system IS NULL OR sync_downstream_ref IS NULL)"
     )
     receipt_orphan_row = await cursor.fetchone()
     receipt_orphan_count: int = receipt_orphan_row[0] if receipt_orphan_row else 0
 
     cursor = await db.execute(
-        "SELECT COUNT(*) FROM shipped_event_dispositions AS d "
-        "WHERE NOT EXISTS (SELECT 1 FROM activity_log AS a WHERE a.id = d.activity_id)"
+        "SELECT COUNT(*) FROM activity_log AS activity "
+        "WHERE ("
+        "  activity.sync_disposition IS NOT NULL "
+        "  AND NOT EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE value = 'SHIPPED')"
+        ") OR ("
+        "  activity.sync_disposition IN ("
+        "    'unsynced_by_policy', 'no_durable_target', "
+        "    'superseded_without_receipt', 'declined_mapping'"
+        "  ) AND (activity.sync_reason IS NULL OR trim(activity.sync_reason) = '')"
+        ")"
     )
     disposition_orphan_row = await cursor.fetchone()
     disposition_orphan_count: int = (
@@ -260,6 +296,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "actionable_unprocessed_shipped_count": actionable_unprocessed_shipped_count,
         "processed_shipped_without_receipt_count": processed_shipped_without_receipt_count,
         "ledger_protected_count": ledger_protected_count,
+        "synced_shipped_count": synced_shipped_count,
         "receipt_orphan_count": receipt_orphan_count,
         "disposition_orphan_count": disposition_orphan_count,
         "open_write_conflicts": open_write_conflicts,
@@ -396,7 +433,7 @@ def _shipped_event_freshness(health: dict[str, Any]) -> dict[str, Any]:
     if processed_without_receipt > 0:
         next_action = "inspect_receiptless_processed"
     elif actionable_unprocessed > 0:
-        next_action = "confirm_shipped_sync_or_record_disposition"
+        next_action = "record_disposition"
     else:
         next_action = "none"
     return {
@@ -444,7 +481,7 @@ def _freshness_next_actions(
     if shipped_events["actionable_unprocessed"] > 0:
         actions.append(
             {
-                "action": "confirm_shipped_sync_or_record_disposition",
+                "action": "record_disposition",
                 "owner": "operator",
                 "reason": "Actionable SHIPPED rows need receipt-backed sync or disposition.",
             }
@@ -611,6 +648,7 @@ async def collect_status_summary(
             "processed_shipped_without_receipt": health[
                 "processed_shipped_without_receipt_count"
             ],
+            "synced_shipped": health["synced_shipped_count"],
             "fts_missing": health["fts_index"]["missing"],
             "fts_orphaned": health["fts_index"]["orphaned"],
             "claude_ai_unsynced_sections": len(

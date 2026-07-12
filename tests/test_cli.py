@@ -14,7 +14,6 @@ import bridge_db.config as cfg
 import bridge_db.tools.recall as recall_tool
 from bridge_db import auth, config
 from bridge_db.__main__ import (
-    mark_audit_posture,
     run_dogfood,
     run_enroll,
     run_list_principals,
@@ -82,40 +81,6 @@ async def _seed_cli_activity(
         "activity",
         str(activity_id),
         fts_text_for_activity("bridge-db", "checked operator status", None),
-    )
-
-
-def test_mark_audit_posture_classifies_legacy_and_blocked_rows() -> None:
-    assert (
-        mark_audit_posture(
-            [
-                {
-                    "detail": (
-                        "activity_ids=[1] updated_ids=[1] missing_ids=[] "
-                        "updated=1/1 shipped_bypass_ids=[1]"
-                    )
-                }
-            ]
-        )
-        == "historical shipped bypass evidence only; no receiptless shipped rows"
-    )
-    assert (
-        mark_audit_posture(
-            [
-                {
-                    "detail": (
-                        "activity_ids=[1] updated_ids=[1] missing_ids=[] "
-                        "updated=1/1 shipped_bypass_ids=[1]"
-                    )
-                }
-            ],
-            processed_shipped_without_receipt=1,
-        )
-        == "legacy shipped bypass observed"
-    )
-    assert (
-        mark_audit_posture([{"detail": "activity_ids=[1] blocked_shipped_ids=[1]"}])
-        == "blocked shipped misuse observed"
     )
 
 
@@ -216,12 +181,10 @@ async def test_run_status_clarifies_dispositioned_unprocessed_shipped(
             ),
         )
         await db.execute(
-            """
-            INSERT INTO shipped_event_dispositions (
-                activity_id, disposition_type, reason, decided_by
-            )
-            VALUES (?, 'declined_mapping', 'no canonical downstream row', 'codex')
-            """,
+            "UPDATE activity_log SET sync_disposition = 'declined_mapping', "
+            "sync_reason = 'no canonical downstream row', "
+            "sync_disposition_by = 'codex', "
+            "synced_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
             (activity_id,),
         )
         await db.commit()
@@ -236,7 +199,7 @@ async def test_run_status_clarifies_dispositioned_unprocessed_shipped(
     assert "actionable_unprocessed_shipped=0" in captured
     assert "dispositioned_unprocessed_shipped=1" in captured
     assert "Attention:" not in captured
-    assert "confirm_shipped_sync_or_record_disposition" not in captured
+    assert "record_disposition" not in captured
 
 
 @pytest.mark.asyncio
@@ -337,7 +300,7 @@ async def test_run_status_freshness_actions_use_safe_operator_names(
 
     assert ok is True
     assert "Freshness: attention" in captured
-    assert "confirm_shipped_sync_or_record_disposition (operator)" in captured
+    assert "record_disposition (operator)" in captured
     assert "mark_shipped_processed" not in captured
 
 
@@ -351,31 +314,15 @@ async def test_run_dogfood_reports_read_only_observability(
     recall_log_path = tmp_path / "recall_query_log.jsonl"
     bridge_path.write_text("# bridge\n", encoding="utf-8")
     audit_log_path.write_text(
-        "\n".join(
-            [
-                json.dumps(
-                    {
-                        "ts": "2026-04-17T00:00:00Z",
-                        "tool": "confirm_shipped_sync",
-                        "caller": "codex",
-                        "project": "bridge-db",
-                        "ok": True,
-                        "detail": "activity_id=1 downstream=notion:abc",
-                    }
-                ),
-                json.dumps(
-                    {
-                        "ts": "2026-04-17T00:01:00Z",
-                        "tool": "mark_shipped_processed",
-                        "caller": None,
-                        "project": None,
-                        "ok": True,
-                        "detail": (
-                            "activity_ids=[1] updated_ids=[1] missing_ids=[] updated=1/1"
-                        ),
-                    }
-                ),
-            ]
+        json.dumps(
+            {
+                "ts": "2026-04-17T00:00:00Z",
+                "tool": "record_disposition",
+                "caller": "codex",
+                "project": "bridge-db",
+                "ok": True,
+                "detail": "activity_id=1 disposition=synced downstream=notion:abc",
+            }
         )
         + "\n",
         encoding="utf-8",
@@ -412,10 +359,7 @@ async def test_run_dogfood_reports_read_only_observability(
     assert "processed_shipped_without_receipt=0" in captured
     assert "FTS: expected=0, indexed=0, missing=0, orphaned=0" in captured
     assert (
-        "Latest confirm_shipped_sync: activity_id=1 downstream=notion:abc" in captured
-    )
-    assert (
-        "Compatibility audit posture: non-shipped compatibility detail current"
+        "Latest record_disposition: activity_id=1 disposition=synced downstream=notion:abc"
         in captured
     )
 
