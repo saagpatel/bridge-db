@@ -142,6 +142,44 @@ def _normalize_policy_key(value: str) -> str:
     return value.strip().lower()
 
 
+def _delivery_state(
+    *,
+    notion_sync_state: str,
+    sync_disposition: str | None,
+    downstream_system: str | None,
+    downstream_ref: str | None,
+) -> dict[str, Any]:
+    """Expose receipt-backed delivery facts without inferring Git or deploy state."""
+    dimensions = {
+        "local_complete": "unknown",
+        "committed": "unknown",
+        "pushed": "unknown",
+        "merged": "unknown",
+        "default_branch_contains": "unknown",
+        "deployed": "unknown",
+        "production_readback_verified": "unknown",
+        "downstream_sync_pending": notion_sync_state == "ready" and sync_disposition is None,
+        "downstream_synced": sync_disposition == _SYNCED_DISPOSITION,
+        "policy_dispositioned": sync_disposition in _POLICY_DISPOSITION_TYPES,
+    }
+    if sync_disposition == _SYNCED_DISPOSITION:
+        state = "downstream_synced"
+        evidence = {
+            "downstream_system": downstream_system,
+            "downstream_ref": downstream_ref,
+        }
+    elif sync_disposition in _POLICY_DISPOSITION_TYPES:
+        state = "policy_dispositioned"
+        evidence = {"disposition": sync_disposition}
+    elif notion_sync_state == "ready":
+        state = "downstream_sync_pending"
+        evidence = None
+    else:
+        state = "unknown"
+        evidence = None
+    return {"state": state, "dimensions": dimensions, "evidence": evidence}
+
+
 _META_POLICY_CACHE: tuple[float, dict[str, Any]] | None = None
 
 
@@ -682,6 +720,12 @@ def register(mcp: FastMCP) -> None:
                     "project_name": r["project_name"],
                     "canonical_key": canonical_key,
                     "notion_sync": notion_sync,
+                    "delivery_state": _delivery_state(
+                        notion_sync_state=str(notion_sync["state"]),
+                        sync_disposition=r["sync_disposition"],
+                        downstream_system=r["sync_downstream_system"],
+                        downstream_ref=r["sync_downstream_ref"],
+                    ),
                     "summary": r["summary"],
                     "branch": r["branch"],
                     "tags": json.loads(r["tags"]),

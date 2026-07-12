@@ -103,7 +103,8 @@ async def run_status(*, now: datetime | None = None) -> bool:
         await db.close()
 
     print("bridge-db status")
-    print(f"  Overall: {summary['overall']}")
+    print(f"  Storage health: {summary['storage_health']}")
+    print(f"  Operating state: {summary['operating_state']}")
     print(
         "  DB:"
         f" exists={summary['db']['exists']},"
@@ -242,7 +243,8 @@ async def run_dogfood() -> bool:
     recall = collect_recall_stats(days=7)
 
     print("bridge-db dogfood")
-    print(f"  Overall: {summary['overall']}")
+    print(f"  Storage health: {summary['storage_health']}")
+    print(f"  Operating state: {summary['operating_state']}")
     print(
         "  Signals:"
         f" pending_handoffs={summary['signals']['pending_handoffs']},"

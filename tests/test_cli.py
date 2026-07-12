@@ -140,7 +140,8 @@ async def test_run_status_reports_healthy_summary(
     captured = capsys.readouterr().out
 
     assert ok is True
-    assert "Overall: healthy" in captured
+    assert "Storage health: healthy" in captured
+    assert "Operating state: attention" in captured
     assert "contexts=1" in captured
     assert "pending_handoffs=0" in captured
     assert "unprocessed_shipped=1" in captured
@@ -217,7 +218,8 @@ async def test_run_status_reports_degraded_when_bridge_file_missing(
     captured = capsys.readouterr().out
 
     assert ok is False
-    assert "Overall: degraded" in captured
+    assert "Storage health: degraded" in captured
+    assert "Operating state: attention" in captured
     assert "exists=False, age=missing" in captured
     assert "Attention: bridge health is degraded" in captured
 
@@ -245,7 +247,8 @@ async def test_run_status_reports_freshness_attention_without_degrading_health(
     captured = capsys.readouterr().out
 
     assert ok is True
-    assert "Overall: healthy" in captured
+    assert "Storage health: healthy" in captured
+    assert "Operating state: stale" in captured
     assert "Freshness: stale" in captured
     assert "Next actions: cc_refresh_snapshot (cc)" in captured
 
@@ -271,7 +274,8 @@ async def test_run_status_degraded_exit_code_stays_tied_to_bridge_health(
     captured = capsys.readouterr().out
 
     assert ok is False
-    assert "Overall: degraded" in captured
+    assert "Storage health: degraded" in captured
+    assert "Operating state: attention" in captured
     assert "Freshness: attention" in captured
 
 
