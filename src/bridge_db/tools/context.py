@@ -25,8 +25,6 @@ from bridge_db.models import SECTION_OWNERS, CallerID, SourceTrust
 
 logger = logging.getLogger("bridge_db.tools.context")
 
-_CAS_MODES = frozenset({"warn", "enforce"})
-
 _SECTION_HEADING_MAP: dict[str, str] = {
     "Career & Professional Target": "career",
     "Speaking Engagements": "speaking",
@@ -61,11 +59,6 @@ def _normalized_section_content(content: str) -> str:
     return content.strip("\n")
 
 
-def _context_cas_mode() -> str:
-    mode = config.CONTEXT_CAS_MODE.strip().lower()
-    return mode if mode in _CAS_MODES else "enforce"
-
-
 async def _upsert_section(
     db: Any,
     section_name: str,
@@ -88,10 +81,10 @@ async def _upsert_section(
     # compatibility guard for existing callers and is enforced when supplied.
     #
     # INV-5: conflict receipts are not caller-optional. Every rejection
-    # (stale_cas, missing_cas) and every accepted blind overwrite of an
-    # existing row stages its receipt HERE, in the same transaction as the
-    # write decision, so the caller's single commit makes both durable
-    # atomically — attempted_by/operation are required for that reason.
+    # (stale_cas, missing_cas) stages its receipt HERE, in the same
+    # transaction as the write decision, so the caller's single commit makes
+    # both durable atomically — attempted_by/operation are required for that
+    # reason.
     if if_match_version is not None or if_match_updated_at is not None:
         conditions = ["section_name = ?"]
         params: list[Any] = [content, source_trust, section_name]
@@ -152,15 +145,17 @@ async def _upsert_section(
         await upsert_fts_entry(
             db, "section", section_name, fts_text_for_section(section_name, content)
         )
-        return {"written": True, "legacy_blind_write": False, "receipt_id": None}
+        return {"written": True, "receipt_id": None}
 
+    # No CAS token supplied. A new section has nothing to CAS against, so
+    # the insert proceeds; a write against an existing row is rejected
+    # unconditionally — there is no blind-write path for existing sections.
     cursor = await db.execute(
         "SELECT version FROM context_sections WHERE section_name = ?",
         (section_name,),
     )
     existing = await cursor.fetchone()
-    legacy_blind_write = existing is not None
-    if legacy_blind_write and _context_cas_mode() == "enforce":
+    if existing is not None:
         sometimes("missing_cas_rejection")
         async with rollback_on_error(db):
             receipt_id, current = await _record_section_conflict(
@@ -181,52 +176,17 @@ async def _upsert_section(
             "current": current,
         }
 
-    receipt_id = None
-    if existing is None:
-        await db.execute(
-            """
-            INSERT INTO context_sections (section_name, owner, content, source_trust, updated_at)
-            VALUES (?, ?, ?, COALESCE(?, 'agent'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-            """,
-            (section_name, owner, content, source_trust),
-        )
-    else:
-        # Accepted blind overwrite (warn mode): the displacement stays legal
-        # — that is INV-4's separate, config-level question — but it is
-        # never trace-free. Staged BEFORE the UPDATE so the receipt's
-        # current_* fields capture the displaced version and content sha.
-        async with rollback_on_error(db):
-            receipt_id, _ = await _record_section_conflict(
-                db,
-                section_name=section_name,
-                caller=attempted_by,
-                operation=operation,
-                reason="legacy_blind_write",
-                attempted_content=content,
-                attempted_source_trust=source_trust,
-                principal=principal,
-                surface=receipt_surface,
-            )
-            await db.execute(
-                """
-                UPDATE context_sections SET
-                    content = ?,
-                    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-                    source_trust = COALESCE(?, source_trust),
-                    version = version + 1
-                WHERE section_name = ?
-                """,
-                (content, source_trust, section_name),
-            )
+    await db.execute(
+        """
+        INSERT INTO context_sections (section_name, owner, content, source_trust, updated_at)
+        VALUES (?, ?, ?, COALESCE(?, 'agent'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        """,
+        (section_name, owner, content, source_trust),
+    )
     await upsert_fts_entry(
         db, "section", section_name, fts_text_for_section(section_name, content)
     )
-    sometimes("legacy_blind_write_accepted", legacy_blind_write)
-    return {
-        "written": True,
-        "legacy_blind_write": legacy_blind_write,
-        "receipt_id": receipt_id,
-    }
+    return {"written": True, "receipt_id": None}
 
 
 async def _section_row(db: Any, section_name: str) -> Any | None:
@@ -454,29 +414,35 @@ def register(mcp: FastMCP) -> None:
         if_match_updated_at: Annotated[
             str | None,
             Field(
-                description="Optional optimistic-concurrency guard. Pass the `updated_at` "
-                "value you got from get_section; the write applies only if the section has "
-                "not changed since then. On a mismatch the call returns ok=False with "
-                "conflict=True instead of clobbering a concurrent update. Note: updated_at "
-                "has 1-second resolution, so two writes within the same wall-clock second "
-                "cannot be distinguished by this guard. Omit for a blind upsert (legacy "
-                "behavior)."
+                description="Optimistic-concurrency guard (legacy compatibility; prefer "
+                "if_match_version). Pass the `updated_at` value you got from get_section; "
+                "the write applies only if the section has not changed since then. On a "
+                "mismatch the call returns ok=False with conflict=True instead of "
+                "clobbering a concurrent update. Note: updated_at has 1-second resolution, "
+                "so two writes within the same wall-clock second cannot be distinguished by "
+                "this guard. Required (with if_match_version) for any write to a section "
+                "that already exists — omitting it only succeeds when creating a brand-new "
+                "section, where there is nothing to CAS against."
             ),
         ] = None,
         if_match_version: Annotated[
             int | None,
             Field(
-                description="Preferred optimistic-concurrency guard. Pass the `version` "
-                "from get_section; the write applies only if the section has not changed. "
-                "On mismatch the call returns ok=False with conflict=True and a durable "
-                "receipt_id. Omit only for legacy blind-write compatibility."
+                description="Required optimistic-concurrency guard for any write to a "
+                "section that already exists. Pass the `version` from get_section; the "
+                "write applies only if the section has not changed. On mismatch the call "
+                "returns ok=False with conflict=True and a durable receipt_id. Omitting it "
+                "on an existing section is rejected unconditionally with "
+                "reason_code='missing_cas' and a durable receipt. Omit only when creating a "
+                "brand-new section."
             ),
         ] = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Upsert a context section. Open to every caller; SECTION_OWNERS records the
-        section's steward (returned as `owner` for display). Clobbering is guarded by
-        the optimistic-concurrency check (if_match_version) + write-conflict receipts."""
+        section's steward (returned as `owner` for display). New sections need no CAS
+        token; a write to an existing section without if_match_version (or
+        if_match_updated_at) is rejected unconditionally with a missing_cas receipt."""
         require_caller(ctx, caller, tool="update_section")
         # source_trust may be None here; None passes through the clamp and
         # preserves the stored label via COALESCE in _upsert_section.
@@ -561,17 +527,6 @@ def register(mcp: FastMCP) -> None:
         )
         row = await cursor.fetchone()
         stored_trust = row["source_trust"] if row is not None else source_trust
-        legacy_blind_write = bool(result.get("legacy_blind_write"))
-        if legacy_blind_write:
-            log_audit(
-                "update_section.legacy_blind_write",
-                caller,
-                section_name,
-                ok=True,
-                detail=(
-                    f"mode={_context_cas_mode()} receipt_id={result.get('receipt_id')}"
-                ),
-            )
         logger.info("section updated: %s by %s", section_name, caller)
         return {
             "ok": True,
@@ -584,7 +539,6 @@ def register(mcp: FastMCP) -> None:
             else None,
             "source_trust": stored_trust,
             "source_trust_clamped": source_trust_clamped,
-            "legacy_blind_write": legacy_blind_write,
         }
 
     @mcp.tool()

@@ -18,7 +18,6 @@ import pytest
 from conftest import CaptureMCP, make_ctx
 from mcp.server.fastmcp.exceptions import ToolError
 
-from bridge_db import config
 from bridge_db.tools import conflicts as conflict_mod
 from bridge_db.tools import context as c_mod
 from bridge_db.tools import handoffs as h_mod
@@ -161,32 +160,13 @@ async def test_update_section_version_cas_catches_same_second_conflict(
     assert survivor["content"] == "concurrent same-second edit"
 
 
-async def test_update_section_blind_backcompat_in_warn_mode(
-    db: aiosqlite.Connection, c_fns: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The 'warn' rollback lever preserves the historical blind-upsert
-    behavior (accepted, flagged, receipted) — no longer the default."""
-    monkeypatch.setattr(config, "CONTEXT_CAS_MODE", "warn")
-    ctx = make_ctx(db)
-    await c_fns["update_section"](
-        caller="claude_ai", section_name="career", content="v1", ctx=ctx
-    )
-    result = await c_fns["update_section"](
-        caller="claude_ai", section_name="career", content="v2", ctx=ctx
-    )
-    assert result["ok"] is True
-    assert result["legacy_blind_write"] is True
-    section = await c_fns["get_section"](section_name="career", ctx=ctx)
-    assert section["content"] == "v2"
-
-
-async def test_update_section_without_if_match_rejected_by_default(
+async def test_update_section_without_if_match_rejected(
     db: aiosqlite.Connection, c_fns: dict[str, Any]
 ) -> None:
-    """The shipped default is 'enforce' (INV-4, flipped 2026-07-10 on the
-    DST evidence seed): an existing-row blind write is rejected with a
-    durable receipt instead of silently displacing committed work."""
-    assert config.CONTEXT_CAS_MODE == "enforce"  # the shipped default
+    """CAS is unconditional for existing rows (INV-4, flipped to the sole
+    behavior 2026-07-12 when the warn/enforce canary was cut): a blind
+    write against an existing section is rejected with a durable receipt
+    instead of silently displacing committed work."""
     ctx = make_ctx(db)
     await c_fns["update_section"](
         caller="claude_ai", section_name="career", content="v1", ctx=ctx
@@ -201,6 +181,22 @@ async def test_update_section_without_if_match_rejected_by_default(
     assert result["reason_code"] == "missing_cas"
     survivor = await c_fns["get_section"](section_name="career", ctx=ctx)
     assert survivor["content"] == "v1"
+
+
+async def test_update_section_new_section_insert_needs_no_cas(
+    db: aiosqlite.Connection, c_fns: dict[str, Any]
+) -> None:
+    """A brand-new section has nothing to CAS against: the first write
+    succeeds without if_match_version or if_match_updated_at."""
+    ctx = make_ctx(db)
+    result = await c_fns["update_section"](
+        caller="claude_ai", section_name="career", content="v1", ctx=ctx
+    )
+
+    assert result["ok"] is True
+    assert result["version"] == 1
+    section = await c_fns["get_section"](section_name="career", ctx=ctx)
+    assert section["content"] == "v1"
 
 
 async def test_get_write_conflicts_reads_section_conflict_receipts(

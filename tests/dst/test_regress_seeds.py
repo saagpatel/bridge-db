@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from dst.test_cas_pingpong import run_cas_pingpong_enforce, run_cas_pingpong_warn
+from dst.test_cas_pingpong import run_blind_vs_cas, run_cas_vs_cas
 from dst.test_claim_race import run_claim_race
 from dst.test_clear_race import run_clear_race
 from dst.test_receipt_crash import run_receipt_crash
@@ -21,8 +21,8 @@ _SCENARIOS: dict[str, Callable[[Path, int], Awaitable[dict[str, Any]]]] = {
     "claim-race": run_claim_race,
     "clear-race": run_clear_race,
     "receipt-crash": run_receipt_crash,
-    "cas-pingpong-warn": run_cas_pingpong_warn,
-    "cas-pingpong-enforce": run_cas_pingpong_enforce,
+    "cas-pingpong-missing-cas": run_blind_vs_cas,
+    "cas-pingpong-stale-cas": run_cas_vs_cas,
     "wal-starvation-red": run_wal_starvation_red,
     "wal-starvation-control": run_wal_starvation_control,
     "trust-race": run_trust_race,

@@ -107,12 +107,3 @@ PRINCIPALS_PATH: Path = Path(
 # 'enforce' (reject mismatches and unbound writes). Unrecognized values are
 # treated as 'enforce' by auth.auth_mode() — fail closed.
 AUTH_MODE: str = os.environ.get("BRIDGE_DB_AUTH_MODE", "off")
-
-# Context-section CAS dial: 'enforce' rejects existing-row blind writes with a
-# durable conflict receipt; 'warn' is the rollback lever (blind writes accepted,
-# flagged, and receipted). Default flipped warn→enforce 2026-07-10 on the DST
-# INV-4 evidence (17/30 interleavings silently lose committed work in warn;
-# tests/dst/regress_seeds.txt cas-pingpong-warn 2) after a live-audit check
-# found zero blind writers: no update_section events in the audit history and
-# zero write_conflicts rows.
-CONTEXT_CAS_MODE: str = os.environ.get("BRIDGE_DB_CONTEXT_CAS_MODE", "enforce")

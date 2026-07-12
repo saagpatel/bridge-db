@@ -10,9 +10,10 @@ Coverage roster (label → cheapest pinned firing run):
 - raced_claim_receipt_written   → claim-race @ RACING_SEED
 - fault_fired_in_receipt_window → receipt-crash @ CRASHING_SEED
 - stale_claim_receipt_written   → receipt-crash @ CRASHING_SEED (recovery arm)
-- legacy_blind_write_accepted   → cas-pingpong warn @ LOST_UPDATE_SEED
-- stale_cas_rejection           → cas-pingpong warn @ STALE_CAS_SEED (CAS loses)
-- missing_cas_rejection         → cas-pingpong enforce @ LOST_UPDATE_SEED
+- stale_cas_rejection           → cas-vs-cas @ STALE_CAS_SEED (two honest CAS
+  writers race; the loser goes stale, not missing_cas)
+- missing_cas_rejection         → blind-vs-cas @ MISSING_CAS_SEED (unconditional
+  since the 2026-07-12 canary cut — no longer race-dependent)
 - wal_truncated                 → wal-starvation control @ PINNED_SEED
 - clear_refused_foreign_claim    → clear-race @ CLEAR_REFUSED_SEED
 - clear_refused_race             → clear-race @ CLEAR_REFUSED_SEED (race branch)
@@ -27,25 +28,22 @@ asserted here — listing them keeps the gap loud instead of silent):
 from pathlib import Path
 
 from bridge_db.invariants import sometimes_counts
-from dst.test_cas_pingpong import LOST_UPDATE_SEED, run_cas_pingpong
+from dst.test_cas_pingpong import (
+    MISSING_CAS_SEED,
+    STALE_CAS_SEED,
+    run_blind_vs_cas,
+    run_cas_vs_cas,
+)
 from dst.test_claim_race import RACING_SEED, run_claim_race
 from dst.test_clear_race import CLEAR_REFUSED_SEED, run_clear_race
 from dst.test_receipt_crash import CRASHING_SEED, run_receipt_crash
 from dst.test_wal_starvation import PINNED_SEED, run_wal_starvation
-
-# cas-pingpong warn arm where the CAS writer loses (blind write commits
-# first, CAS token goes stale). Re-pinned 0 → 1 with the Phase-3 INV-5
-# fix: moving receipts inside _upsert_section changed the rejection
-# path's op count, shifting the RNG alignment (declared window change;
-# this gate is what caught the old seed going dead).
-STALE_CAS_SEED = 1
 
 EXPECTED_LABELS = frozenset(
     {
         "raced_claim_receipt_written",
         "fault_fired_in_receipt_window",
         "stale_claim_receipt_written",
-        "legacy_blind_write_accepted",
         "stale_cas_rejection",
         "missing_cas_rejection",
         "wal_truncated",
@@ -58,9 +56,8 @@ EXPECTED_LABELS = frozenset(
 async def test_every_corpus_reachable_label_fires(tmp_path: Path) -> None:
     await run_claim_race(tmp_path / "claim", RACING_SEED)
     await run_receipt_crash(tmp_path / "crash", CRASHING_SEED)
-    await run_cas_pingpong(tmp_path / "warn", LOST_UPDATE_SEED, mode="warn")
-    await run_cas_pingpong(tmp_path / "stale", STALE_CAS_SEED, mode="warn")
-    await run_cas_pingpong(tmp_path / "enforce", LOST_UPDATE_SEED, mode="enforce")
+    await run_blind_vs_cas(tmp_path / "missing-cas", MISSING_CAS_SEED)
+    await run_cas_vs_cas(tmp_path / "stale-cas", STALE_CAS_SEED)
     await run_wal_starvation(tmp_path / "wal", PINNED_SEED, leak=False)
     await run_clear_race(tmp_path / "clear", CLEAR_REFUSED_SEED)
 

@@ -91,9 +91,10 @@ call `update_section(..., if_match_version=<version>)`. A stale token returns
 row. `if_match_updated_at` remains as a compatibility guard, but `version` is
 the preferred token because timestamps have one-second resolution.
 
-Existing-row blind writes are temporarily allowed in canary mode and returned as
-`legacy_blind_write=true`; set `BRIDGE_DB_CONTEXT_CAS_MODE=enforce` to reject
-them. New section inserts without CAS remain allowed.
+Existing-row blind writes are rejected unconditionally with a durable
+`missing_cas` receipt — `if_match_version` (or `if_match_updated_at`) is
+required for any write to a section that already exists. New section
+inserts without CAS remain allowed, since there is nothing to CAS against.
 
 `export_bridge_markdown` records the exported version/hash for each rendered
 Claude.ai-owned context section. Later `sync_from_file` imports a changed
