@@ -818,7 +818,8 @@ def register(mcp: FastMCP) -> None:
 
         db = get_db(ctx)
         cursor = await db.execute(
-            "SELECT tags, project_name, sync_disposition FROM activity_log WHERE id = ?",
+            "SELECT tags, project_name, sync_disposition, sync_reason, sync_policy_ref "
+            "FROM activity_log WHERE id = ?",
             (activity_id,),
         )
         row = await cursor.fetchone()
@@ -829,11 +830,26 @@ def register(mcp: FastMCP) -> None:
         if "SHIPPED" not in current_tags:
             raise ToolError(f"Activity entry {activity_id} is not tagged SHIPPED")
 
-        if not is_synced and row["sync_disposition"] == _SYNCED_DISPOSITION:
+        current_disposition = row["sync_disposition"]
+        if not is_synced and current_disposition == _SYNCED_DISPOSITION:
             raise ToolError(
                 f"Activity entry {activity_id} already has downstream sync proof "
                 "('synced'); it cannot be downgraded to a policy disposition"
             )
+
+        # Transitioning a policy disposition to 'synced' would otherwise null the
+        # prior policy reason/ref. Fold that reasoning into the note so the
+        # audit trail (visible on get_shipped_events' sync_receipt.notes) is not
+        # silently erased — the old two-table model kept both facts.
+        note_value = clean_notes
+        superseded: str | None = None
+        if is_synced and current_disposition in _POLICY_DISPOSITION_TYPES:
+            superseded = f"superseded prior disposition '{current_disposition}'"
+            if row["sync_reason"]:
+                superseded += f": {row['sync_reason']}"
+            if row["sync_policy_ref"]:
+                superseded += f" (policy_ref={row['sync_policy_ref']})"
+            note_value = f"{clean_notes}; {superseded}" if clean_notes else superseded
 
         # Tags ARE indexed in content_index (see fts_text_for_activity), so the
         # PROCESSED add re-indexes its row via reindex_activity_fts.
@@ -870,7 +886,7 @@ def register(mcp: FastMCP) -> None:
                 clean_ref if is_synced else None,
                 None if is_synced else clean_policy_ref,
                 None if is_synced else clean_reason,
-                clean_notes,
+                note_value,
                 activity_id,
             ),
         )
@@ -882,6 +898,8 @@ def register(mcp: FastMCP) -> None:
         detail = f"activity_id={activity_id} disposition={choice}"
         if is_synced:
             detail += f" downstream={clean_system}:{clean_ref}"
+        if superseded is not None:
+            detail += f" {superseded}"
         log_audit(
             "record_disposition", caller, row["project_name"], ok=True, detail=detail
         )

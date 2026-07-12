@@ -822,6 +822,65 @@ async def test_record_disposition_synced_refuses_policy_downgrade(
         )
 
 
+async def test_record_disposition_synced_over_policy_preserves_reasoning(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The allowed policy→synced transition must not silently erase the prior
+    policy reason/ref: it is folded into the synced note (and thus surfaces on
+    get_shipped_events' sync_receipt.notes), preserving the audit trail."""
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", tmp_path / "bridge.md")
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="cc", project_name="A", summary="s", tags=["SHIPPED"], ctx=ctx
+    )
+    cursor = await db.execute("SELECT id FROM activity_log")
+    row = await cursor.fetchone()
+    assert row is not None
+    activity_id = row["id"]
+
+    await fns["record_disposition"](
+        caller="codex",
+        activity_id=activity_id,
+        disposition="unsynced_by_policy",
+        reason="no downstream target yet",
+        policy_ref="/policy.md",
+        ctx=ctx,
+    )
+    # Later actually synced — the change-of-mind flow is allowed.
+    await fns["record_disposition"](
+        caller="codex",
+        activity_id=activity_id,
+        disposition="synced",
+        downstream_system="notion",
+        downstream_ref="page-9",
+        notes="synced after all",
+        ctx=ctx,
+    )
+
+    cursor = await db.execute(
+        "SELECT sync_disposition, sync_downstream_ref, sync_policy_ref, sync_reason, "
+        "sync_note FROM activity_log WHERE id = ?",
+        (activity_id,),
+    )
+    stored = await cursor.fetchone()
+    assert stored is not None
+    assert stored["sync_disposition"] == "synced"
+    assert stored["sync_downstream_ref"] == "page-9"
+    # The prior policy reasoning is preserved in the note, not silently dropped.
+    assert "synced after all" in stored["sync_note"]
+    assert "unsynced_by_policy" in stored["sync_note"]
+    assert "no downstream target yet" in stored["sync_note"]
+    assert "/policy.md" in stored["sync_note"]
+
+    shipped = await fns["get_shipped_events"](ctx=ctx)
+    assert shipped[0]["sync_receipt"]["downstream_ref"] == "page-9"
+    assert "no downstream target yet" in shipped[0]["sync_receipt"]["notes"]
+    assert shipped[0]["policy_disposition"] is None
+
+
 async def test_record_disposition_rejects_invalid_disposition(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:

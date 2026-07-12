@@ -1043,6 +1043,112 @@ async def test_migration_v13_to_v14_collapses_shipped_tables_losslessly(
     finally:
         await migrated.close()
 
+    # A pre-migration backup of the DB is left beside it so the irreversible
+    # DROP of the child tables is repairable.
+    assert (tmp_path / "v13.db.pre-v14.bak").exists()
+
+
+async def test_migration_v13_to_v14_is_crash_safe_after_partial_ddl(
+    tmp_path: Path,
+) -> None:
+    """A crash between the v14 ADD COLUMNs and the user_version bump must not
+    brick the next boot. Simulate it: manually add the sync_* columns (the DDL
+    portion) to a v13 DB with live receipt/disposition state, leave user_version
+    at 13, then re-open and assert ensure_schema completes cleanly and losslessly
+    instead of raising duplicate-column.
+    """
+    db_path = tmp_path / "v13_crash.db"
+    db = await aiosqlite.connect(str(db_path))
+    db.row_factory = aiosqlite.Row
+    await db.executescript("""
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL CHECK(source IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+            timestamp TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            branch TEXT,
+            tags TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            canonical_key TEXT,
+            source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested'))
+        );
+        CREATE TABLE shipped_sync_receipts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            activity_id INTEGER NOT NULL UNIQUE,
+            downstream_system TEXT NOT NULL,
+            downstream_ref TEXT NOT NULL,
+            synced_by TEXT NOT NULL CHECK(synced_by IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+            synced_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            notes TEXT,
+            FOREIGN KEY(activity_id) REFERENCES activity_log(id) ON DELETE CASCADE
+        );
+        CREATE TABLE shipped_event_dispositions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            activity_id INTEGER NOT NULL UNIQUE,
+            disposition_type TEXT NOT NULL CHECK(disposition_type IN (
+                'unsynced_by_policy', 'no_durable_target',
+                'superseded_without_receipt', 'declined_mapping'
+            )),
+            policy_ref TEXT,
+            reason TEXT NOT NULL,
+            decided_by TEXT NOT NULL CHECK(decided_by IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+            decided_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            notes TEXT,
+            FOREIGN KEY(activity_id) REFERENCES activity_log(id) ON DELETE CASCADE
+        );
+        CREATE VIRTUAL TABLE content_index USING fts5(
+            source_type UNINDEXED, source_id UNINDEXED, text,
+            tokenize = 'porter unicode61 remove_diacritics 2'
+        );
+        INSERT INTO activity_log (id, source, timestamp, project_name, summary, tags)
+            VALUES (1, 'codex', '2026-07-03', 'synced-proj', 's', '["SHIPPED","PROCESSED"]');
+        INSERT INTO shipped_sync_receipts
+            (activity_id, downstream_system, downstream_ref, synced_by, synced_at, notes)
+            VALUES (1, 'notion', 'page-1', 'codex', '2026-07-03T09:00:00Z', 'note');
+        -- Simulate the crash window: the 8 ADD COLUMNs already committed, but
+        -- the copy/DROP and the user_version bump did not run.
+        ALTER TABLE activity_log ADD COLUMN sync_disposition TEXT CHECK(sync_disposition IS NULL OR sync_disposition IN ('synced', 'unsynced_by_policy', 'no_durable_target', 'superseded_without_receipt', 'declined_mapping'));
+        ALTER TABLE activity_log ADD COLUMN sync_disposition_by TEXT CHECK(sync_disposition_by IS NULL OR sync_disposition_by IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops'));
+        ALTER TABLE activity_log ADD COLUMN synced_at TEXT;
+        ALTER TABLE activity_log ADD COLUMN sync_downstream_system TEXT;
+        ALTER TABLE activity_log ADD COLUMN sync_downstream_ref TEXT;
+        ALTER TABLE activity_log ADD COLUMN sync_policy_ref TEXT;
+        ALTER TABLE activity_log ADD COLUMN sync_reason TEXT;
+        ALTER TABLE activity_log ADD COLUMN sync_note TEXT;
+        PRAGMA user_version = 13;
+    """)
+    await db.commit()
+    await db.close()
+
+    # Re-open: ensure_schema re-runs the v14 step and must converge cleanly.
+    migrated = await open_db(db_path)
+    try:
+        cursor = await migrated.execute("PRAGMA user_version")
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == SCHEMA_VERSION
+
+        cursor = await migrated.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('shipped_sync_receipts', 'shipped_event_dispositions')"
+        )
+        assert await cursor.fetchall() == []
+
+        # The receipt state was copied onto the row despite the partial DDL.
+        cursor = await migrated.execute(
+            "SELECT sync_disposition, sync_downstream_ref, sync_note "
+            "FROM activity_log WHERE id = 1"
+        )
+        r1 = await cursor.fetchone()
+        assert r1 is not None
+        assert r1["sync_disposition"] == "synced"
+        assert r1["sync_downstream_ref"] == "page-1"
+        assert r1["sync_note"] == "note"
+    finally:
+        await migrated.close()
+
 
 async def test_migration_v9_to_v10_adds_context_versions_and_conflict_tables(
     tmp_path: Path,

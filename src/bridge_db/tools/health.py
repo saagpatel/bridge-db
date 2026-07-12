@@ -134,7 +134,17 @@ async def collect_claude_ai_section_drift(db: Any) -> dict[str, Any]:
 
 
 async def collect_health_metrics(db: Any) -> dict[str, Any]:
-    """Collect raw bridge health metrics from the current DB plus filesystem state."""
+    """Collect raw bridge health metrics from the current DB plus filesystem state.
+
+    Note (v14 boundary): `receipt_orphan_count` and `disposition_orphan_count`
+    keep their names but changed meaning. Pre-v14 they counted FK-orphaned
+    shipped_sync_receipts / shipped_event_dispositions rows; those child tables
+    were collapsed into activity_log `sync_*` columns, so the metrics now measure
+    disposition MALFORMATION on the row (a 'synced' row missing downstream proof;
+    a disposition on a non-SHIPPED row or a policy disposition missing its
+    reason). Both must always read 0 and are the compensating detection control
+    for the field requirements the old NOT NULL columns enforced.
+    """
     cursor = await db.execute("PRAGMA user_version")
     row = await cursor.fetchone()
     schema_version: int = row[0] if row else 0
@@ -197,12 +207,17 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     synced_row = await cursor.fetchone()
     synced_shipped_count: int = synced_row[0] if synced_row else 0
 
-    # BD-INV-1 integrity checks in the column model. Orphaning (a receipt/
-    # disposition whose activity row was pruned) is now structurally impossible —
-    # the state IS the row — so these instead assert the two remaining ways a
-    # disposition could be malformed and MUST stay zero:
-    #   receipt_orphan_count      — a 'synced' row missing its downstream proof.
-    #   disposition_orphan_count  — a disposition sitting on a non-SHIPPED row.
+    # BD-INV-1 integrity checks, reframed for the v14 column model. Pre-v14 these
+    # counted FK-orphans (a receipt/disposition whose activity row was pruned);
+    # that is structurally impossible now — the state IS the row — so the same
+    # two metric names now measure disposition MALFORMATION and MUST stay zero.
+    # They are the compensating detection control for the field requirements the
+    # old NOT NULL child-table columns enforced but the nullable sync_* columns
+    # cannot (see db.py _V14_SYNC_COLUMNS):
+    #   receipt_orphan_count      — a 'synced' row missing downstream_system/ref
+    #                               (a receipt without its proof).
+    #   disposition_orphan_count  — a disposition on a non-SHIPPED row, OR a
+    #                               policy disposition missing its reason.
     cursor = await db.execute(
         "SELECT COUNT(*) FROM activity_log "
         "WHERE sync_disposition = 'synced' "
@@ -213,8 +228,15 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
 
     cursor = await db.execute(
         "SELECT COUNT(*) FROM activity_log AS activity "
-        "WHERE activity.sync_disposition IS NOT NULL "
-        "AND NOT EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE value = 'SHIPPED')"
+        "WHERE ("
+        "  activity.sync_disposition IS NOT NULL "
+        "  AND NOT EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE value = 'SHIPPED')"
+        ") OR ("
+        "  activity.sync_disposition IN ("
+        "    'unsynced_by_policy', 'no_durable_target', "
+        "    'superseded_without_receipt', 'declined_mapping'"
+        "  ) AND (activity.sync_reason IS NULL OR trim(activity.sync_reason) = '')"
+        ")"
     )
     disposition_orphan_row = await cursor.fetchone()
     disposition_orphan_count: int = (

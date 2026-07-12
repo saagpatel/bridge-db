@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import shutil
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -445,20 +446,46 @@ ALTER TABLE pending_handoffs ADD COLUMN claimed_by TEXT;
 # time-bomb outright: a disposition can no longer outlive or be separated from
 # its row because it IS the row.
 #
-# The DDL string only adds the columns; the lossless receipt/disposition copy
-# and the DROP of the child tables run in the _migrate_shipped_state_to_columns
-# post-hook, which is guarded on table existence so it also succeeds on a DB
-# that never carried one of the legacy tables.
-_MIGRATION_V13_TO_V14 = """
-ALTER TABLE activity_log ADD COLUMN sync_disposition TEXT CHECK(sync_disposition IS NULL OR sync_disposition IN ('synced', 'unsynced_by_policy', 'no_durable_target', 'superseded_without_receipt', 'declined_mapping'));
-ALTER TABLE activity_log ADD COLUMN sync_disposition_by TEXT CHECK(sync_disposition_by IS NULL OR sync_disposition_by IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops'));
-ALTER TABLE activity_log ADD COLUMN synced_at TEXT;
-ALTER TABLE activity_log ADD COLUMN sync_downstream_system TEXT;
-ALTER TABLE activity_log ADD COLUMN sync_downstream_ref TEXT;
-ALTER TABLE activity_log ADD COLUMN sync_policy_ref TEXT;
-ALTER TABLE activity_log ADD COLUMN sync_reason TEXT;
-ALTER TABLE activity_log ADD COLUMN sync_note TEXT;
-"""
+# The step DDL is intentionally empty: EVERY v14 change (the guarded ADD COLUMNs,
+# the lossless copy, and the DROP of the child tables) runs in the
+# _migrate_shipped_state_to_columns post-hook so the whole step is idempotent and
+# crash-safe. `executescript` commits each ADD COLUMN at the engine level
+# regardless of the ladder's later commit, so an ADD-COLUMN-in-the-DDL approach
+# is NOT crash-safe: a kill between the ALTERs and the user_version bump would
+# leave the columns durably present at v13 and brick the next boot with a
+# duplicate-column error on re-run. Guarding each ADD on the live column set (and
+# each copy/DROP on table existence) makes a re-run after any interrupted attempt
+# a clean no-op that still converges to v14.
+_MIGRATION_V13_TO_V14 = "-- v13 → v14: all changes run in the _migrate_shipped_state_to_columns post-hook.\n"
+
+# Column definitions for the v14 ADD COLUMN step. Kept character-identical to the
+# activity_log block in _SCHEMA_DDL so a fresh install and a migrated DB converge
+# (see tests/test_schema_convergence_concurrency.py). NOTE: the synced/policy
+# field requirements the old NOT NULL child-table columns enforced (a 'synced'
+# row has downstream_system+ref, a policy row has a reason) are NOT expressed as
+# CHECK constraints here — SQLite cannot ADD a column with a CHECK that
+# references OTHER columns, and a table-level cross-column CHECK would require a
+# full activity_log rebuild (the FTS-mirrored core table). record_disposition is
+# the sole writer and validates those requirements; the health
+# receipt_orphan_count / disposition_orphan_count metrics are the compensating
+# detection control (they flag a 'synced' row missing downstream proof or a
+# policy row missing its reason, and must always read 0).
+_V14_SYNC_COLUMNS: tuple[tuple[str, str], ...] = (
+    (
+        "sync_disposition",
+        "TEXT CHECK(sync_disposition IS NULL OR sync_disposition IN ('synced', 'unsynced_by_policy', 'no_durable_target', 'superseded_without_receipt', 'declined_mapping'))",
+    ),
+    (
+        "sync_disposition_by",
+        "TEXT CHECK(sync_disposition_by IS NULL OR sync_disposition_by IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops'))",
+    ),
+    ("synced_at", "TEXT"),
+    ("sync_downstream_system", "TEXT"),
+    ("sync_downstream_ref", "TEXT"),
+    ("sync_policy_ref", "TEXT"),
+    ("sync_reason", "TEXT"),
+    ("sync_note", "TEXT"),
+)
 
 
 async def apply_pragmas(db: aiosqlite.Connection) -> None:
@@ -495,22 +522,67 @@ async def _table_exists(db: aiosqlite.Connection, name: str) -> bool:
     return await cursor.fetchone() is not None
 
 
-async def _migrate_shipped_state_to_columns(db: aiosqlite.Connection) -> None:
-    """v13→v14 post-hook: copy the shipped_sync_receipts + shipped_event_dispositions
-    child tables onto activity_log's sync_* columns (added by the step DDL), then
-    drop the child tables.
+async def _backup_db_file(db: aiosqlite.Connection, label: str) -> None:
+    """Write a one-time consistent file copy of the main DB before a destructive
+    migration step, so a botched or interrupted migration is repairable.
 
-    Guarded on table existence: a complete v13 DB always carries both tables
-    (created at v4 and v8), so the copy always runs; the guards only skip a no-op
-    copy on a DB that never carried one of them (the minimal migration-test
-    fixtures, or a manually repaired DB). A receipt maps to the 'synced'
-    disposition; a policy row keeps its disposition_type. The receipt copy runs
-    first and the disposition copy skips any row that already has a receipt, so a
-    (structurally near-impossible) both-state row resolves to 'synced' — the
-    single column cannot hold contradictory receipt+disposition state.
+    No-op for an in-memory DB (no file path). Idempotent: if the backup already
+    exists (e.g. from a prior interrupted attempt) the pristine copy is kept
+    rather than overwritten with partially-migrated state. Commits and TRUNCATE-
+    checkpoints first so the copied main file is self-contained (WAL flushed in).
+    """
+    cursor = await db.execute("PRAGMA database_list")
+    main_path = next(
+        (row[2] for row in await cursor.fetchall() if row[1] == "main" and row[2]),
+        None,
+    )
+    if not main_path:
+        return
+    backup = Path(f"{main_path}.{label}.bak")
+    if backup.exists():
+        logger.info("migration backup already present at %s; keeping it", backup)
+        return
+    await db.commit()
+    await checkpoint_wal(db)
+    shutil.copy2(main_path, backup)
+    logger.info("migration backup written to %s", backup)
+
+
+async def _migrate_shipped_state_to_columns(db: aiosqlite.Connection) -> None:
+    """v13→v14 post-hook: add the sync_* columns, copy the shipped_sync_receipts +
+    shipped_event_dispositions child tables onto them, then drop the child tables.
+
+    Idempotent and crash-safe. Each ADD COLUMN is guarded on the live column set
+    (PRAGMA table_info) and each copy/DROP on table existence, so re-running this
+    step after an interrupted migration (columns present but user_version still
+    13) is a clean no-op that still converges to v14 instead of raising
+    duplicate-column. Before touching a DB that still holds legacy child-table
+    state, a one-time file backup is taken so the irreversible DROP is repairable.
+
+    A complete v13 DB carries both tables (created at v4 and v8). A receipt maps
+    to the 'synced' disposition; a policy row keeps its disposition_type. The
+    receipt copy runs first and the disposition copy skips any row that already
+    has a receipt, so a (structurally near-impossible) both-state row resolves to
+    'synced' — the single column cannot hold contradictory receipt+disposition
+    state.
     """
     receipts_exist = await _table_exists(db, "shipped_sync_receipts")
     dispositions_exist = await _table_exists(db, "shipped_event_dispositions")
+
+    # Back up before the destructive collapse when legacy child-table state that
+    # the DROP would otherwise make unrecoverable is present.
+    if receipts_exist or dispositions_exist:
+        await _backup_db_file(db, "pre-v14")
+
+    # Idempotent ADD COLUMN: skip any column already present so a crash between
+    # the ALTERs and the user_version bump cannot brick the next boot.
+    cursor = await db.execute("PRAGMA table_info(activity_log)")
+    existing_columns = {row[1] for row in await cursor.fetchall()}
+    for name, decl in _V14_SYNC_COLUMNS:
+        if name not in existing_columns:
+            await db.execute(
+                f"ALTER TABLE activity_log ADD COLUMN {name} {decl}"  # noqa: S608 — name/decl from the closed _V14_SYNC_COLUMNS literal
+            )
 
     if receipts_exist:
         await db.execute(

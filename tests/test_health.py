@@ -228,6 +228,45 @@ async def test_health_counts_processed_shipped_without_receipts(
     assert result["processed_shipped_without_receipt_count"] == 1
 
 
+async def test_health_orphan_metrics_flag_disposition_malformation(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
+) -> None:
+    """The v14 orphan metrics are the compensating detection control for the
+    field requirements the old NOT NULL columns enforced: a 'synced' row missing
+    downstream proof, and a policy disposition missing its reason (both of which
+    the nullable sync_* columns no longer prevent at the SQL layer)."""
+    (tmp_path / "test.db").touch()
+    # A clean SHIPPED row keeps the metrics at zero.
+    await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary, tags) "
+        "VALUES ('cc', '2026-07-01', 'clean', 's', ?)",
+        (json.dumps(["SHIPPED"]),),
+    )
+    await db.commit()
+    clean = await fns["health"](ctx=make_ctx(db))
+    assert clean["receipt_orphan_count"] == 0
+    assert clean["disposition_orphan_count"] == 0
+
+    # Malformed states written directly (bypassing record_disposition, which
+    # would reject them) must be flagged.
+    await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary, tags, "
+        "sync_disposition) VALUES ('cc', '2026-07-01', 'synced-no-proof', 's', ?, 'synced')",
+        (json.dumps(["SHIPPED"]),),
+    )
+    await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary, tags, "
+        "sync_disposition) VALUES ('cc', '2026-07-01', 'policy-no-reason', 's', ?, "
+        "'unsynced_by_policy')",
+        (json.dumps(["SHIPPED"]),),
+    )
+    await db.commit()
+
+    result = await fns["health"](ctx=make_ctx(db))
+    assert result["receipt_orphan_count"] == 1  # synced row lacks downstream proof
+    assert result["disposition_orphan_count"] == 1  # policy row lacks a reason
+
+
 async def test_health_bridge_file_info(
     db: aiosqlite.Connection,
     fns: dict[str, Any],
