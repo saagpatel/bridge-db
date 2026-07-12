@@ -156,22 +156,20 @@ uv run python -m bridge_db --dogfood
 Manual equivalent:
 
 1. After Bridge Syncs or shipped-event reconciliation, run
-   `mcp__bridge_db__audit_tail(limit=10)` and confirm new shipped events use
-   `confirm_shipped_sync` with downstream proof instead of bare
-   `mark_shipped_processed`.
+   `mcp__bridge_db__audit_tail(limit=10)` and confirm new shipped events are
+   resolved with `record_disposition` — `disposition='synced'` carrying
+   downstream proof, not a bare mark.
 2. If shipped-event drift is suspected, run
-   `mcp__bridge_db__audit_tail(tool="confirm_shipped_sync", limit=10)` and
+   `mcp__bridge_db__audit_tail(tool="record_disposition", limit=10)` and
    `uv run python -m bridge_db --status`.
    Read `status.freshness.shipped_events.next_action`; actionable unprocessed
-   shipped rows should route to `confirm_shipped_sync` with downstream proof or
-   `record_shipped_event_disposition` with an explicit policy reason.
-3. If a compatibility `mark_shipped_processed` row appears, inspect its
-   `detail` field for the requested `activity_ids`, `updated_ids`, and
-   `missing_ids`, then confirm `status` still reports
-   `processed_shipped_without_receipt=0`.
-   Dogfood may still show old `shipped_bypass_ids` audit detail from before
-   the F7 guard; when the live receiptless counter is zero, treat that as
-   historical evidence rather than current operator action.
+   shipped rows route to `record_disposition` — `disposition='synced'` with
+   downstream proof, or a policy disposition with an explicit `reason`.
+3. If `status` reports `processed_shipped_without_receipt` nonzero, a SHIPPED row
+   is tagged `PROCESSED` without a `synced` disposition — inspect it and either
+   record the downstream proof or an explicit policy disposition. Treat a
+   persistently zero counter as clean; older `shipped_bypass_ids` audit detail
+   from before the v14 collapse is historical evidence, not current action.
 4. Use `mcp__bridge_db__recall_stats(days=7)` only to evaluate recall over
    bridge-owned state: sections, activity, snapshots, and handoffs.
 5. Confirm `uv run python -m bridge_db --status` reports `fts_missing=0` and
@@ -213,19 +211,21 @@ that motivated it):
   day.
 - `system_snapshots` keeps the latest 10 rows per system family; Codex
   operating snapshots and consulted-node snapshots are retained independently.
-- `shipped_sync_receipts` is the downstream proof ledger for shipped events that
-  were confirmed through `confirm_shipped_sync`. It (and
-  `shipped_event_dispositions`) still declare `ON DELETE CASCADE` against
-  `activity_log(id)` — that FK is intentionally untouched. Once its parent
-  `SHIPPED` row is retention-protected, the row can never prune, so the cascade
-  can never fire in practice. **This is by design** — the fix was protecting
-  the parent row, not rewiring the child; do not "fix" the FK separately if you
-  see it during a review.
+- A shipped event's downstream proof and policy dispositions now live on the
+  `activity_log` row itself, in the `sync_*` columns (schema v14): `record_disposition`
+  writes `sync_disposition='synced'` with `sync_downstream_system`/`sync_downstream_ref`
+  for a receipt, or a policy value with `sync_reason` for a non-receipt decision.
+  The former `shipped_sync_receipts` and `shipped_event_dispositions` child
+  tables (and their `ON DELETE CASCADE` FKs) were dropped — the cascade
+  time-bomb is gone outright because the state IS the row and a protected row
+  never prunes.
 - `health` and `--dogfood` add `ledger_protected_count` (current protected-row
-  count), `receipt_orphan_count`, and `disposition_orphan_count`. The orphan
-  counts should always read `0`; a nonzero value means a protected row was
-  deleted anyway and BD-INV-1 was violated. Every prune also emits a
-  `log_activity.prune` audit line naming the deleted ids and tags.
+  count), `synced_shipped_count`, `receipt_orphan_count`, and
+  `disposition_orphan_count`. In the column model the orphan counts are integrity
+  guards that should always read `0`: `receipt_orphan_count` = `synced` rows
+  missing downstream proof; `disposition_orphan_count` = dispositions on a
+  non-`SHIPPED` row. Every prune also emits a `log_activity.prune` audit line
+  naming the deleted ids and tags.
 - Claude Code SessionEnd logging uses `--log-session-boundary`; that path adds
   an FTS row and intentionally does not run activity retention pruning.
 - If activity counts move, verify health through `--status`, `--dogfood`,

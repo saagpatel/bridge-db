@@ -130,8 +130,7 @@ mcp__bridge_db__get_latest_snapshot("codex") # Codex infrastructure state
 mcp__bridge_db__get_recent_activity(limit=20) # raw mixed activity feed
 mcp__bridge_db__get_activity_signal(limit=20) # operator feed with lifecycle rows compressed
 mcp__bridge_db__get_shipped_events(unprocessed_only=False) # shipped projects
-mcp__bridge_db__confirm_shipped_sync(...) # record downstream proof, then mark processed
-mcp__bridge_db__record_shipped_event_disposition(...) # record non-receipt policy disposition
+mcp__bridge_db__record_disposition(...) # terminal sync state: 'synced' receipt or policy disposition
 mcp__bridge_db__get_cost_history()          # cost trend
 ```
 
@@ -157,20 +156,27 @@ insertion timestamp. For `since` filters on activity reads, bridge-db matches
 either field, so `since="YYYY-MM-DD"` includes rows inserted on that UTC date
 even when the logical activity date is the previous operator-local day.
 
-`record_shipped_event_disposition` is for non-receipt decisions only. It does
-not add `PROCESSED` and does not write to `shipped_sync_receipts`. Dispositioned
-rows no longer re-appear on repeat sync runs: `get_shipped_events(unprocessed_only=True)`
-now excludes both `PROCESSED` rows and rows carrying a disposition.
+`record_disposition(caller, activity_id, disposition, ...)` writes a SHIPPED
+row's single terminal sync disposition onto the `activity_log` `sync_*` columns
+(schema v14). `disposition='synced'` REQUIRES `downstream_system` +
+`downstream_ref`, records the downstream reference, and adds `PROCESSED` — the
+only path that claims a durable downstream sync. A policy `disposition`
+(`unsynced_by_policy` / `no_durable_target` / `superseded_without_receipt` /
+`declined_mapping`) REQUIRES a `reason`, does not add `PROCESSED`, and does not
+claim sync. A row already carrying `synced` proof cannot be downgraded to a
+policy disposition. Dispositioned rows do not re-appear on repeat sync runs:
+`get_shipped_events(unprocessed_only=True)` excludes both `PROCESSED` rows and
+any row with a `sync_disposition`.
 
 `get_shipped_events` also takes a `limit` param (default 200, max 1000, newest
 first) alongside `since` and `unprocessed_only`, so a client passing its own
 `limit` is now honored instead of silently ignored.
 
-`mark_shipped_processed` remains a compatibility path only for non-shipped
-operational rows. It refuses `SHIPPED` activity ids before updating anything.
-If a blocked `mark_shipped_processed` attempt appears in `audit_tail`, route the
-row to `confirm_shipped_sync` with downstream proof or
-`record_shipped_event_disposition` with an explicit policy reason. If
+`record_disposition` replaces the former `confirm_shipped_sync` /
+`record_shipped_event_disposition` / `mark_shipped_processed` trio. It is
+SHIPPED-only; the legacy non-shipped `PROCESSED`-marking path is retired. A
+SHIPPED row can never be marked resolved without either downstream proof
+(`synced`) or an explicit reasoned policy disposition. If
 `status.processed_shipped_without_receipt` is nonzero, treat it as historical or
 manual drift until proven otherwise.
 
@@ -281,15 +287,15 @@ All principals may use read-side tools for bridge-owned state:
 
 | Principal | Write capabilities | Boundaries |
 |---|---|---|
-| `codex` | `log_activity(caller="codex")`, `save_snapshot(caller="codex")`, `record_cost(caller="codex")`, `confirm_shipped_sync(caller="codex")`, `record_shipped_event_disposition(caller="codex")`, `pick_up_handoff`/`clear_handoff` where the handoff gate allows it | Owns Codex truth and verification; must not write or refresh `cc` snapshots or Claude.ai sections |
-| `cc` | `log_activity(caller="cc")`, `save_snapshot(caller="cc")`, `record_cost(caller="cc")`, `confirm_shipped_sync(caller="cc")`, `record_shipped_event_disposition(caller="cc")`, `pick_up_handoff`/`clear_handoff` where the handoff gate allows it | Owns Claude Code state and session telemetry; must not write Codex snapshots or Claude.ai sections |
+| `codex` | `log_activity(caller="codex")`, `save_snapshot(caller="codex")`, `record_cost(caller="codex")`, `record_disposition(caller="codex")`, `pick_up_handoff`/`clear_handoff` where the handoff gate allows it | Owns Codex truth and verification; must not write or refresh `cc` snapshots or Claude.ai sections |
+| `cc` | `log_activity(caller="cc")`, `save_snapshot(caller="cc")`, `record_cost(caller="cc")`, `record_disposition(caller="cc")`, `pick_up_handoff`/`clear_handoff` where the handoff gate allows it | Owns Claude Code state and session telemetry; must not write Codex snapshots or Claude.ai sections |
 | `claude_ai` | `update_section` for `career`, `speaking`, `research`, and `capabilities`; `create_handoff(caller="claude_ai")`; compatibility file edits to those four sections followed by `sync_from_file` | Advisory and dispatch surface; must not write Codex/CC snapshots or act as local execution proof |
-| `notion_os` | `log_activity(caller="notion_os")`, `record_cost(caller="notion_os")`, `confirm_shipped_sync(caller="notion_os")`, `record_shipped_event_disposition(caller="notion_os")` | Owns Notion-side receipts/activity it actually verified; must not infer project mappings beyond `notion_sync` |
-| `personal_ops` | `log_activity(caller="personal_ops")`, `record_cost(caller="personal_ops")`, `confirm_shipped_sync(caller="personal_ops")`, `record_shipped_event_disposition(caller="personal_ops")` | Owns operator-facing coordination receipts; must not replace repo-local or bridge-db verification |
+| `notion_os` | `log_activity(caller="notion_os")`, `record_cost(caller="notion_os")`, `record_disposition(caller="notion_os")` | Owns Notion-side receipts/activity it actually verified; must not infer project mappings beyond `notion_sync` |
+| `personal_ops` | `log_activity(caller="personal_ops")`, `record_cost(caller="personal_ops")`, `record_disposition(caller="personal_ops")` | Owns operator-facing coordination receipts; must not replace repo-local or bridge-db verification |
 
-`mark_shipped_processed` is intentionally absent from the shipped-event write
-path above. It remains available only for non-shipped operational rows and
-refuses `SHIPPED` activity ids.
+`record_disposition` is the sole shipped-event write verb above. It is
+SHIPPED-only and writes the row's terminal `sync_disposition`; the former
+`mark_shipped_processed` non-shipped `PROCESSED`-marking path is retired.
 
 ---
 

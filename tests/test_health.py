@@ -178,12 +178,9 @@ async def test_health_actionable_unprocessed_excludes_dispositions(
         (json.dumps(["SHIPPED"]),),
     )
     await db.execute(
-        """
-        INSERT INTO shipped_event_dispositions (
-            activity_id, disposition_type, reason, decided_by
-        )
-        VALUES (?, 'unsynced_by_policy', 'experimental artifact', 'codex')
-        """,
+        "UPDATE activity_log SET sync_disposition = 'unsynced_by_policy', "
+        "sync_reason = 'experimental artifact', sync_disposition_by = 'codex', "
+        "synced_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
         (disposed_id,),
     )
     await db.commit()
@@ -216,9 +213,11 @@ async def test_health_counts_processed_shipped_without_receipts(
     assert receipted_row is not None
     receipted_id = int(receipted_row[0])
     await db.execute(
-        "INSERT INTO shipped_sync_receipts "
-        "(activity_id, downstream_system, downstream_ref, synced_by) "
-        "VALUES (?, 'notion', 'https://notion.so/example', 'codex')",
+        "UPDATE activity_log SET sync_disposition = 'synced', "
+        "sync_downstream_system = 'notion', "
+        "sync_downstream_ref = 'https://notion.so/example', "
+        "sync_disposition_by = 'codex', "
+        "synced_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
         (receipted_id,),
     )
     await db.commit()
@@ -549,7 +548,7 @@ async def test_status_freshness_shipped_event_next_actions(
             "reason": "Processed SHIPPED rows lack receipt proof.",
         },
         {
-            "action": "confirm_shipped_sync_or_record_disposition",
+            "action": "record_disposition",
             "owner": "operator",
             "reason": "Actionable SHIPPED rows need receipt-backed sync or disposition.",
         },
@@ -565,9 +564,7 @@ async def test_status_freshness_actionable_unprocessed_next_action_without_recei
 
     result = await mod.collect_status_summary(db, now=FIXED_NOW)
 
-    assert result["freshness"]["shipped_events"]["next_action"] == (
-        "confirm_shipped_sync_or_record_disposition"
-    )
+    assert result["freshness"]["shipped_events"]["next_action"] == "record_disposition"
 
 
 async def test_status_freshness_counts_dispositioned_unprocessed_shipped(
@@ -578,12 +575,9 @@ async def test_status_freshness_counts_dispositioned_unprocessed_shipped(
         db, "cc", "2026-07-07T11:00:00Z", tags=["SHIPPED"]
     )
     await db.execute(
-        """
-        INSERT INTO shipped_event_dispositions (
-            activity_id, disposition_type, reason, decided_by
-        )
-        VALUES (?, 'declined_mapping', 'no canonical downstream row', 'codex')
-        """,
+        "UPDATE activity_log SET sync_disposition = 'declined_mapping', "
+        "sync_reason = 'no canonical downstream row', sync_disposition_by = 'codex', "
+        "synced_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
         (activity_id,),
     )
     await db.commit()
@@ -601,7 +595,7 @@ async def test_status_freshness_counts_dispositioned_unprocessed_shipped(
         "next_action": "none",
     }
     assert not any(
-        action["action"] == "confirm_shipped_sync_or_record_disposition"
+        action["action"] == "record_disposition"
         for action in result["freshness"]["next_actions"]
     )
 

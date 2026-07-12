@@ -25,6 +25,7 @@ uv run pytest    # verify the install
 - Schema v10: context sections carry monotonic `version` tokens; stale writes and raced handoff claims produce durable `write_conflicts` receipts.
 - Schema v12: adds the `session_classification` sidecar for heuristic cost-routing attribution while keeping `session_costs` as pure actuals. Schema v11 backfills activity `tags` into `content_index` so lifecycle tags (SHIPPED, DECISION, ...) are recall-able on existing DBs.
 - Schema v13: adds `claimed_by` to `pending_handoffs` (the INV-13 claimant gate for `clear_handoff`). Riding the same migration train, activity retention now exempts rows tagged `SHIPPED` or `LEDGER` (case-insensitive) from the 50-per-source prune — BD-INV-1: retention never deletes a protected row, its receipt, or its disposition.
+- Schema v14: collapses the shipped-sync trio (`shipped_sync_receipts` + `shipped_event_dispositions`) into `activity_log` `sync_*` disposition columns and drops the two child tables. A shipped event's terminal sync state (a `synced` downstream receipt or a policy disposition) now lives on the activity row itself, written by the single `record_disposition` verb. Because the state is the row, BD-INV-1's guarantee is structural — no FK-CASCADE can orphan a receipt.
 - FTS5 `content_index` mirrors all content tables; `health` and `status` verify source-row / FTS-row alignment.
 - `status` includes a native freshness block for owner-specific snapshot, activity, handoff, and shipped-event attention. Freshness attention is advisory: top-level `ok` / `overall` remain tied to DB, schema, fallback-file, and FTS health.
 - 26 MCP tools across 10 modules (activity, handoffs, context, snapshots, cost, export, health, recall, audit, conflicts).
@@ -51,12 +52,12 @@ No shared daemon. Each MCP client spawns its own `bridge-db` process via stdio. 
 ## Tools
 
 Verify the current tool count from source with
-`rg '@mcp\.tool' src/bridge_db -c`. As of the 2026-06-20 source check, the
-surface is 26 tools across these 10 modules:
+`rg '@mcp\.tool' src/bridge_db -c`. As of the 2026-07-12 v14 collapse, the
+surface is 24 tools across these 10 modules:
 
 | Module | Tools |
 |---|---|
-| activity | `log_activity`, `get_recent_activity`, `get_activity_signal`, `get_shipped_events`, `confirm_shipped_sync`, `record_shipped_event_disposition`, `mark_shipped_processed` |
+| activity | `log_activity`, `get_recent_activity`, `get_activity_signal`, `get_shipped_events`, `record_disposition` |
 | handoffs | `create_handoff`, `get_pending_handoffs`, `pick_up_handoff`, `clear_handoff` |
 | context | `update_section`, `get_section`, `get_all_sections`, `sync_from_file` |
 | snapshots | `save_snapshot`, `get_latest_snapshot` |
@@ -198,11 +199,12 @@ service, table, migration, tool, or CLI flag.
 
 `activity_log` retention is two-tier: unprotected rows remain recent context
 capped at 50 per source, while rows tagged `SHIPPED` or `LEDGER` are
-permanently retained (BD-INV-1). The durable ledger and the
-`shipped_sync_receipts` proof for downstream shipped-event syncs both live
-inside `activity_log` alongside the rolling buffer — a protected row's receipt
-or disposition can no longer cascade-die with it, because the parent row never
-prunes. Treat `processed_shipped_without_receipt=0`
+permanently retained (BD-INV-1). The durable ledger and each shipped event's
+sync disposition (its downstream receipt or its policy decision) both live on
+the activity row itself, in the `sync_*` columns added at schema v14 — a
+protected row's receipt or disposition can no longer cascade-die with it,
+because the state IS the row and the parent row never prunes. Treat
+`processed_shipped_without_receipt=0`
 and `fts_missing=0` as primary clean signals, and use
 `actionable_unprocessed_shipped=0` with
 `dispositioned_unprocessed_shipped>0` when policy dispositions explain why raw
@@ -233,20 +235,22 @@ For Notion reconciliation, treat each shipped event's `notion_sync` object as th
 machine-readable gate:
 
 - `ready`: fetch the explicit `notion_page_id`, update only that row, fetch it
-  again, then call `confirm_shipped_sync` with the readback proof.
-- `meta_no_target`: do not update Notion. Confirm the event with
-  `downstream_system=policy` and `downstream_ref` pointing to the configured
-  policy file after verifying the policy applies to the event.
+  again, then call `record_disposition(disposition='synced', ...)` with the
+  readback proof.
+- `meta_no_target`: do not update Notion. Record the event with
+  `disposition='synced'`, `downstream_system=policy`, and `downstream_ref`
+  pointing to the configured policy file after verifying the policy applies.
 - `unmatched`, `no_notion_target`, or `registry_unavailable`: leave the event
   unprocessed and repair the project registry or mapping source first.
 
-For non-receipt handling, use `record_shipped_event_disposition` only when an
-operator policy says the row should remain auditable but should not proceed to a
-downstream receipt. The disposition appears as `policy_disposition` on
-`get_shipped_events`; it does not write a receipt and does not add `PROCESSED`.
-Do not use `mark_shipped_processed` for `SHIPPED` rows; it is retained only for
-non-shipped operational events such as `TASK_DONE`, `APPROVAL_SENT`,
-`PLANNING_APPLIED`, or `REVIEW_CLOSED`.
+For non-receipt handling, use `record_disposition` with a policy `disposition`
+(`unsynced_by_policy` / `no_durable_target` / `superseded_without_receipt` /
+`declined_mapping`) and a `reason` when an operator policy says the row should
+remain auditable but should not proceed to a downstream receipt. The disposition
+appears as `policy_disposition` on `get_shipped_events`; it does not add
+`PROCESSED` and does not claim sync. `record_disposition` is SHIPPED-only — the
+former `mark_shipped_processed` path for non-shipped operational events
+(`TASK_DONE`, `APPROVAL_SENT`, `PLANNING_APPLIED`, `REVIEW_CLOSED`) is retired.
 
 ## Startup Sync
 

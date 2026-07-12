@@ -4,8 +4,11 @@ from pathlib import Path
 
 import aiosqlite
 import pytest
+from conftest import CaptureMCP, make_ctx
 
+from bridge_db import config
 from bridge_db.db import SCHEMA_VERSION, ensure_schema, open_db
+from bridge_db.tools import activity as activity_mod
 
 
 async def test_schema_creates_all_tables(db: aiosqlite.Connection) -> None:
@@ -30,8 +33,6 @@ async def test_schema_creates_all_tables(db: aiosqlite.Connection) -> None:
         "pending_handoffs",
         "session_classification",
         "session_costs",
-        "shipped_event_dispositions",
-        "shipped_sync_receipts",
         "system_snapshots",
         "write_conflicts",
     }
@@ -46,8 +47,6 @@ async def test_schema_creates_indexes(db: aiosqlite.Connection) -> None:
     assert "idx_activity_timestamp" in indexes
     assert "idx_snapshot_system" in indexes
     assert "idx_handoff_status" in indexes
-    assert "idx_shipped_disposition_type" in indexes
-    assert "idx_shipped_sync_downstream" in indexes
     assert "idx_sc_project" in indexes
     assert "idx_sc_started" in indexes
     assert "idx_scl_routing" in indexes
@@ -298,7 +297,11 @@ async def test_migration_v2_to_current_populates_content_index(tmp_path: Path) -
             assert count_row is not None
             assert count_row[0] == 1, f"{table} count changed during migration"
 
-        cursor = await migrated.execute("SELECT COUNT(*) FROM shipped_sync_receipts")
+        # Shipped-sync state collapsed onto activity_log columns at v14; a plain
+        # migration creates no dispositions.
+        cursor = await migrated.execute(
+            "SELECT COUNT(*) FROM activity_log WHERE sync_disposition IS NOT NULL"
+        )
         receipt_row = await cursor.fetchone()
         assert receipt_row is not None
         assert receipt_row[0] == 0
@@ -325,8 +328,12 @@ async def test_migration_v2_to_current_populates_content_index(tmp_path: Path) -
         await migrated.close()
 
 
-async def test_migration_v3_to_v4_adds_shipped_sync_receipts(tmp_path: Path) -> None:
-    """A v3 DB gains receipt storage without changing existing activity rows."""
+async def test_migration_v3_to_head_preserves_activity_and_collapses_receipts(
+    tmp_path: Path,
+) -> None:
+    """A v3 DB migrates to HEAD without changing existing activity rows; the
+    shipped_sync_receipts table added at v4 is collapsed onto activity_log
+    columns and dropped by v14."""
     db = await aiosqlite.connect(str(tmp_path / "v3.db"))
     db.row_factory = aiosqlite.Row
     await db.executescript("""
@@ -400,22 +407,20 @@ async def test_migration_v3_to_v4_adds_shipped_sync_receipts(tmp_path: Path) -> 
         assert activity_row is not None
         assert activity_row[0] == 1
 
-        await migrated.execute(
-            """
-            INSERT INTO shipped_sync_receipts (
-                activity_id, downstream_system, downstream_ref, synced_by
-            )
-            VALUES (1, 'notion', 'page-123', 'codex')
-            """
+        # The transient receipt/disposition tables are gone at HEAD; sync state
+        # lives on the activity row and is NULL until a disposition is recorded.
+        cursor = await migrated.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('shipped_sync_receipts', 'shipped_event_dispositions')"
         )
-        await migrated.commit()
+        assert await cursor.fetchall() == []
 
         cursor = await migrated.execute(
-            "SELECT downstream_ref FROM shipped_sync_receipts"
+            "SELECT sync_disposition FROM activity_log WHERE id = 1"
         )
-        receipt = await cursor.fetchone()
-        assert receipt is not None
-        assert receipt["downstream_ref"] == "page-123"
+        disp = await cursor.fetchone()
+        assert disp is not None
+        assert disp["sync_disposition"] is None
     finally:
         await migrated.close()
 
@@ -763,10 +768,12 @@ async def test_migration_v6_to_v7_is_idempotent(tmp_path: Path) -> None:
         await second.close()
 
 
-async def test_migration_v7_to_v8_adds_shipped_event_dispositions(
+async def test_migration_v7_to_head_collapses_disposition_state(
     tmp_path: Path,
 ) -> None:
-    """A v7 DB gains the non-receipt shipped-event disposition table."""
+    """A v7 DB migrates to HEAD; the disposition table added at v8 is collapsed
+    onto activity_log's sync_disposition column and dropped by v14, and the
+    disposition-type CHECK moves onto the activity row."""
     db = await aiosqlite.connect(str(tmp_path / "v7.db"))
     db.row_factory = aiosqlite.Row
     await db.executescript("""
@@ -836,38 +843,203 @@ async def test_migration_v7_to_v8_adds_shipped_event_dispositions(
         assert row is not None
         assert row[0] == SCHEMA_VERSION
 
-        await migrated.execute(
-            """
-            INSERT INTO shipped_event_dispositions (
-                activity_id, disposition_type, reason, decided_by
-            )
-            VALUES (1, 'unsynced_by_policy', 'experimental artifact', 'codex')
-            """
+        # The disposition table added at v8 is collapsed onto activity_log and
+        # dropped by v14; the seeded SHIPPED row survives with NULL sync state.
+        cursor = await migrated.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('shipped_sync_receipts', 'shipped_event_dispositions')"
         )
-        await migrated.commit()
+        assert await cursor.fetchall() == []
 
         cursor = await migrated.execute(
-            "SELECT disposition_type FROM shipped_event_dispositions WHERE activity_id = 1"
+            "SELECT sync_disposition FROM activity_log WHERE id = 1"
         )
-        disposition = await cursor.fetchone()
-        assert disposition is not None
-        assert disposition["disposition_type"] == "unsynced_by_policy"
+        seeded = await cursor.fetchone()
+        assert seeded is not None
+        assert seeded["sync_disposition"] is None
 
+        # The disposition-type CHECK moved onto the activity row: a value outside
+        # the allowed set is rejected by the column constraint.
         await migrated.execute(
-            "INSERT INTO activity_log (source, timestamp, project_name, summary, tags) "
-            "VALUES ('cc', '2026-06-13', 'fable-outputs', 'another artifact', '[\"SHIPPED\"]')"
+            "UPDATE activity_log SET sync_disposition = 'unsynced_by_policy' WHERE id = 1"
         )
         await migrated.commit()
-
         with pytest.raises(aiosqlite.IntegrityError):
             await migrated.execute(
-                """
-                INSERT INTO shipped_event_dispositions (
-                    activity_id, disposition_type, reason, decided_by
-                )
-                VALUES (2, 'bogus', 'invalid', 'codex')
-                """
+                "UPDATE activity_log SET sync_disposition = 'bogus' WHERE id = 1"
             )
+    finally:
+        await migrated.close()
+
+
+async def test_migration_v13_to_v14_collapses_shipped_tables_losslessly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A v13 DB with existing receipts + dispositions migrates to v14 with every
+    row's shipped-sync state copied onto activity_log columns, the two child
+    tables dropped, and get_shipped_events output preserved field-for-field."""
+    monkeypatch.setattr(
+        config, "PROJECT_REGISTRY_PATH", tmp_path / "missing-registry.json"
+    )
+    monkeypatch.setattr(
+        config, "META_SHIPPED_EVENTS_PATH", tmp_path / "missing-meta.json"
+    )
+
+    db = await aiosqlite.connect(str(tmp_path / "v13.db"))
+    db.row_factory = aiosqlite.Row
+    await db.executescript("""
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL CHECK(source IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+            timestamp TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            branch TEXT,
+            tags TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            canonical_key TEXT,
+            source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested'))
+        );
+        CREATE TABLE shipped_sync_receipts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            activity_id INTEGER NOT NULL UNIQUE,
+            downstream_system TEXT NOT NULL,
+            downstream_ref TEXT NOT NULL,
+            synced_by TEXT NOT NULL CHECK(synced_by IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+            synced_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            notes TEXT,
+            FOREIGN KEY(activity_id) REFERENCES activity_log(id) ON DELETE CASCADE
+        );
+        CREATE TABLE shipped_event_dispositions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            activity_id INTEGER NOT NULL UNIQUE,
+            disposition_type TEXT NOT NULL CHECK(disposition_type IN (
+                'unsynced_by_policy', 'no_durable_target',
+                'superseded_without_receipt', 'declined_mapping'
+            )),
+            policy_ref TEXT,
+            reason TEXT NOT NULL,
+            decided_by TEXT NOT NULL CHECK(decided_by IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+            decided_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            notes TEXT,
+            FOREIGN KEY(activity_id) REFERENCES activity_log(id) ON DELETE CASCADE
+        );
+        CREATE VIRTUAL TABLE content_index USING fts5(
+            source_type UNINDEXED, source_id UNINDEXED, text,
+            tokenize = 'porter unicode61 remove_diacritics 2'
+        );
+
+        INSERT INTO activity_log (id, source, timestamp, project_name, summary, tags, created_at)
+            VALUES (1, 'codex', '2026-07-03', 'synced-proj', 'shipped and synced',
+                    '["SHIPPED","PROCESSED"]', '2026-07-03T00:00:00Z');
+        INSERT INTO activity_log (id, source, timestamp, project_name, summary, tags, created_at)
+            VALUES (2, 'cc', '2026-07-02', 'policy-proj', 'shipped but policy',
+                    '["SHIPPED"]', '2026-07-02T00:00:00Z');
+        INSERT INTO activity_log (id, source, timestamp, project_name, summary, tags, created_at)
+            VALUES (3, 'cc', '2026-07-01', 'open-proj', 'shipped unresolved',
+                    '["SHIPPED"]', '2026-07-01T00:00:00Z');
+
+        INSERT INTO shipped_sync_receipts
+            (activity_id, downstream_system, downstream_ref, synced_by, synced_at, notes)
+            VALUES (1, 'notion', 'page-1', 'codex', '2026-07-03T09:00:00Z', 'synced note');
+        INSERT INTO shipped_event_dispositions
+            (activity_id, disposition_type, policy_ref, reason, decided_by, decided_at, notes)
+            VALUES (2, 'unsynced_by_policy', '/p.md', 'experimental', 'cc',
+                    '2026-07-02T09:00:00Z', 'policy note');
+
+        PRAGMA user_version = 13;
+    """)
+    await db.commit()
+    await db.close()
+
+    # The expected shipped-sync sub-objects mirror the pre-migration v13 read
+    # contract exactly — this is the byte-identical target.
+    expected_synced_receipt = {
+        "downstream_system": "notion",
+        "downstream_ref": "page-1",
+        "synced_by": "codex",
+        "synced_at": "2026-07-03T09:00:00Z",
+        "notes": "synced note",
+    }
+    expected_policy_disposition = {
+        "disposition_type": "unsynced_by_policy",
+        "policy_ref": "/p.md",
+        "reason": "experimental",
+        "decided_by": "cc",
+        "decided_at": "2026-07-02T09:00:00Z",
+        "notes": "policy note",
+    }
+
+    migrated = await open_db(tmp_path / "v13.db")
+    try:
+        cursor = await migrated.execute("PRAGMA user_version")
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == SCHEMA_VERSION
+
+        # Old child tables dropped; state now lives on the activity rows.
+        cursor = await migrated.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('shipped_sync_receipts', 'shipped_event_dispositions')"
+        )
+        assert await cursor.fetchall() == []
+
+        # Receipt row copied verbatim into the synced-disposition columns.
+        cursor = await migrated.execute(
+            "SELECT sync_disposition, sync_downstream_system, sync_downstream_ref, "
+            "sync_disposition_by, synced_at, sync_note FROM activity_log WHERE id = 1"
+        )
+        r1 = await cursor.fetchone()
+        assert r1 is not None
+        assert r1["sync_disposition"] == "synced"
+        assert r1["sync_downstream_system"] == "notion"
+        assert r1["sync_downstream_ref"] == "page-1"
+        assert r1["sync_disposition_by"] == "codex"
+        assert r1["synced_at"] == "2026-07-03T09:00:00Z"
+        assert r1["sync_note"] == "synced note"
+
+        # Disposition row copied verbatim into the policy-disposition columns.
+        cursor = await migrated.execute(
+            "SELECT sync_disposition, sync_policy_ref, sync_reason, sync_disposition_by, "
+            "synced_at, sync_note FROM activity_log WHERE id = 2"
+        )
+        r2 = await cursor.fetchone()
+        assert r2 is not None
+        assert r2["sync_disposition"] == "unsynced_by_policy"
+        assert r2["sync_policy_ref"] == "/p.md"
+        assert r2["sync_reason"] == "experimental"
+        assert r2["sync_disposition_by"] == "cc"
+        assert r2["synced_at"] == "2026-07-02T09:00:00Z"
+        assert r2["sync_note"] == "policy note"
+
+        cursor = await migrated.execute(
+            "SELECT sync_disposition FROM activity_log WHERE id = 3"
+        )
+        r3 = await cursor.fetchone()
+        assert r3 is not None
+        assert r3["sync_disposition"] is None
+
+        # get_shipped_events reproduces the pre-migration read contract exactly.
+        cap = CaptureMCP()
+        activity_mod.register(cap)
+        ctx = make_ctx(migrated)
+
+        events = await cap.fns["get_shipped_events"](ctx=ctx)
+        assert [e["id"] for e in events] == [1, 2, 3]  # newest-first by timestamp
+        by_id = {e["id"]: e for e in events}
+        assert by_id[1]["sync_receipt"] == expected_synced_receipt
+        assert by_id[1]["policy_disposition"] is None
+        assert by_id[1]["tags"] == ["SHIPPED", "PROCESSED"]
+        assert by_id[2]["policy_disposition"] == expected_policy_disposition
+        assert by_id[2]["sync_receipt"] is None
+        assert by_id[3]["sync_receipt"] is None
+        assert by_id[3]["policy_disposition"] is None
+
+        unprocessed = await cap.fns["get_shipped_events"](
+            unprocessed_only=True, ctx=ctx
+        )
+        assert [e["id"] for e in unprocessed] == [3]
     finally:
         await migrated.close()
 
@@ -984,10 +1156,22 @@ async def test_migration_v10_to_v11_reindexes_activity_tags(tmp_path: Path) -> N
         (act_id, "bridge-db\nrecall precision landed"),
     )
     # open_db() bootstraps a fresh DB at the current schema, which already has
-    # pending_handoffs.claimed_by (added at v13) — drop it back off so the
-    # rewound version below matches a real pre-v13 DB and the ladder's v13 ALTER
-    # ADD COLUMN can apply cleanly instead of hitting a duplicate column.
+    # the columns added by later ALTER migrations: pending_handoffs.claimed_by
+    # (v13) and activity_log's sync_* disposition columns (v14). Drop them back
+    # off so the rewound version below matches a real pre-v13 DB and the ladder's
+    # ALTER ADD COLUMN steps apply cleanly instead of hitting a duplicate column.
     await db.execute("ALTER TABLE pending_handoffs DROP COLUMN claimed_by")
+    for _sync_col in (
+        "sync_disposition",
+        "sync_disposition_by",
+        "synced_at",
+        "sync_downstream_system",
+        "sync_downstream_ref",
+        "sync_policy_ref",
+        "sync_reason",
+        "sync_note",
+    ):
+        await db.execute(f"ALTER TABLE activity_log DROP COLUMN {_sync_col}")  # noqa: S608
     await db.execute("PRAGMA user_version = 10")
     await db.commit()
     await db.close()
@@ -1021,10 +1205,22 @@ async def test_migration_v11_to_v12_adds_session_classification(tmp_path: Path) 
         """
     )
     # open_db() bootstraps a fresh DB at the current schema, which already has
-    # pending_handoffs.claimed_by (added at v13) — drop it back off so the
-    # rewound version below matches a real pre-v13 DB and the ladder's v13 ALTER
-    # ADD COLUMN can apply cleanly instead of hitting a duplicate column.
+    # the columns added by later ALTER migrations: pending_handoffs.claimed_by
+    # (v13) and activity_log's sync_* disposition columns (v14). Drop them back
+    # off so the rewound version below matches a real pre-v13 DB and the ladder's
+    # ALTER ADD COLUMN steps apply cleanly instead of hitting a duplicate column.
     await db.execute("ALTER TABLE pending_handoffs DROP COLUMN claimed_by")
+    for _sync_col in (
+        "sync_disposition",
+        "sync_disposition_by",
+        "synced_at",
+        "sync_downstream_system",
+        "sync_downstream_ref",
+        "sync_policy_ref",
+        "sync_reason",
+        "sync_note",
+    ):
+        await db.execute(f"ALTER TABLE activity_log DROP COLUMN {_sync_col}")  # noqa: S608
     await db.execute("PRAGMA user_version = 11")
     await db.commit()
     await db.close()
@@ -1080,10 +1276,22 @@ async def test_migration_v11_to_v12_is_idempotent(tmp_path: Path) -> None:
 
     db = await open_db(db_path)
     # open_db() bootstraps a fresh DB at the current schema, which already has
-    # pending_handoffs.claimed_by (added at v13) — drop it back off so the
-    # rewound version below matches a real pre-v13 DB and the ladder's v13 ALTER
-    # ADD COLUMN can apply cleanly instead of hitting a duplicate column.
+    # the columns added by later ALTER migrations: pending_handoffs.claimed_by
+    # (v13) and activity_log's sync_* disposition columns (v14). Drop them back
+    # off so the rewound version below matches a real pre-v13 DB and the ladder's
+    # ALTER ADD COLUMN steps apply cleanly instead of hitting a duplicate column.
     await db.execute("ALTER TABLE pending_handoffs DROP COLUMN claimed_by")
+    for _sync_col in (
+        "sync_disposition",
+        "sync_disposition_by",
+        "synced_at",
+        "sync_downstream_system",
+        "sync_downstream_ref",
+        "sync_policy_ref",
+        "sync_reason",
+        "sync_note",
+    ):
+        await db.execute(f"ALTER TABLE activity_log DROP COLUMN {_sync_col}")  # noqa: S608
     await db.execute("PRAGMA user_version = 11")
     await db.commit()
     await db.close()

@@ -29,12 +29,18 @@ from bridge_db.project_resolver import resolve as resolve_project
 
 logger = logging.getLogger("bridge_db.tools.activity")
 
-_SHIPPED_EVENT_DISPOSITION_TYPES = {
+# The receipt-backed proof disposition: claims a durable downstream sync and
+# requires downstream_system + downstream_ref (the old confirm_shipped_sync path).
+_SYNCED_DISPOSITION = "synced"
+# Non-receipt policy dispositions: record why an event is not receipt-backed
+# without claiming sync (the old record_shipped_event_disposition path).
+_POLICY_DISPOSITION_TYPES = {
     "unsynced_by_policy",
     "no_durable_target",
     "superseded_without_receipt",
     "declined_mapping",
 }
+_ALL_DISPOSITIONS = {_SYNCED_DISPOSITION, *_POLICY_DISPOSITION_TYPES}
 _SESSION_BOUNDARY_TAG = "session-boundary"
 _LIFECYCLE_ACTIVITY_SQL = """
 (
@@ -176,7 +182,7 @@ def _load_meta_shipped_event_policy(project_name: str) -> dict[str, Any] | None:
         "record_outcome_in": (
             record_outcome_in
             if isinstance(record_outcome_in, str) and record_outcome_in
-            else "bridge-db shipped_sync_receipts"
+            else "bridge-db activity sync disposition"
         ),
     }
 
@@ -258,8 +264,9 @@ def register(mcp: FastMCP) -> None:
 
         Tag conventions (tags are indexed in content_index, so they are recall-able):
         - SHIPPED: a feature/artifact reached a durable, usable state. Requires an
-          eventual confirm_shipped_sync receipt or record_shipped_event_disposition —
-          unsynced SHIPPED rows nag in health until terminally resolved.
+          eventual record_disposition (disposition='synced' for a downstream
+          receipt, or a policy disposition) — unsynced SHIPPED rows nag in health
+          until terminally resolved.
         - LEDGER: a durable operator-facing record for the next agent's catch-up.
           Attach when the operator says "log this to BridgeDB" or the entry should
           outlive the rolling window.
@@ -579,13 +586,14 @@ def register(mcp: FastMCP) -> None:
             conditions.append(condition)
             params.extend(since_params)
         if unprocessed_only:
+            # "Unprocessed" excludes both PROCESSED-tagged rows and any row that
+            # has reached a terminal sync disposition (synced or a policy value).
+            # The PROCESSED-tag clause additionally holds a legacy receiptless-
+            # processed row (PROCESSED tag, no disposition) out of the feed.
             conditions.append(
                 "NOT EXISTS (SELECT 1 FROM json_each(tags) WHERE value = 'PROCESSED')"
             )
-            conditions.append(
-                "NOT EXISTS (SELECT 1 FROM shipped_event_dispositions AS d2 "
-                "WHERE d2.activity_id = a.id)"
-            )
+            conditions.append("a.sync_disposition IS NULL")
 
         where = "WHERE " + " AND ".join(conditions)
         params.append(limit)
@@ -602,20 +610,15 @@ def register(mcp: FastMCP) -> None:
                 a.created_at,
                 a.canonical_key,
                 a.source_trust,
-                r.downstream_system,
-                r.downstream_ref,
-                r.synced_by,
-                r.synced_at,
-                r.notes AS sync_notes,
-                d.disposition_type,
-                d.policy_ref,
-                d.reason AS disposition_reason,
-                d.decided_by,
-                d.decided_at,
-                d.notes AS disposition_notes
+                a.sync_disposition,
+                a.sync_disposition_by,
+                a.synced_at,
+                a.sync_downstream_system,
+                a.sync_downstream_ref,
+                a.sync_policy_ref,
+                a.sync_reason,
+                a.sync_note
             FROM activity_log AS a
-            LEFT JOIN shipped_sync_receipts AS r ON r.activity_id = a.id
-            LEFT JOIN shipped_event_dispositions AS d ON d.activity_id = a.id
             {where}
             ORDER BY a.timestamp DESC
             LIMIT ?
@@ -687,25 +690,25 @@ def register(mcp: FastMCP) -> None:
                     "instruction_boundary": instruction_boundary(r["source_trust"]),
                     "sync_receipt": (
                         {
-                            "downstream_system": r["downstream_system"],
-                            "downstream_ref": r["downstream_ref"],
-                            "synced_by": r["synced_by"],
+                            "downstream_system": r["sync_downstream_system"],
+                            "downstream_ref": r["sync_downstream_ref"],
+                            "synced_by": r["sync_disposition_by"],
                             "synced_at": r["synced_at"],
-                            "notes": r["sync_notes"],
+                            "notes": r["sync_note"],
                         }
-                        if r["downstream_ref"] is not None
+                        if r["sync_disposition"] == _SYNCED_DISPOSITION
                         else None
                     ),
                     "policy_disposition": (
                         {
-                            "disposition_type": r["disposition_type"],
-                            "policy_ref": r["policy_ref"],
-                            "reason": r["disposition_reason"],
-                            "decided_by": r["decided_by"],
-                            "decided_at": r["decided_at"],
-                            "notes": r["disposition_notes"],
+                            "disposition_type": r["sync_disposition"],
+                            "policy_ref": r["sync_policy_ref"],
+                            "reason": r["sync_reason"],
+                            "decided_by": r["sync_disposition_by"],
+                            "decided_at": r["synced_at"],
+                            "notes": r["sync_note"],
                         }
-                        if r["disposition_type"] is not None
+                        if r["sync_disposition"] in _POLICY_DISPOSITION_TYPES
                         else None
                     ),
                 }
@@ -713,260 +716,110 @@ def register(mcp: FastMCP) -> None:
         return events
 
     @mcp.tool()
-    async def mark_shipped_processed(
-        activity_ids: Annotated[
-            list[int], Field(description="IDs of activity entries to mark as PROCESSED")
-        ],
-        ctx: Context = None,  # type: ignore[assignment]
-    ) -> dict[str, Any]:
-        """Add 'PROCESSED' tag to activity events so they are not re-processed.
-
-        LEGACY / receiptless path. It records NO downstream proof, so for genuine
-        SHIPPED artifacts prefer ``confirm_shipped_sync`` (which writes a
-        ``shipped_sync_receipts`` row). This tool is retained for non-shipped
-        operational events (TASK_DONE / APPROVAL_SENT / PLANNING_APPLIED /
-        REVIEW_CLOSED) that have no shipped-receipt lifecycle.
-
-        Guard (F7): if any passed id is tagged SHIPPED, this tool refuses the
-        whole batch before updating rows. SHIPPED rows must either get
-        receipt-backed processing through ``confirm_shipped_sync`` or an explicit
-        non-receipt policy decision through ``record_shipped_event_disposition``.
-        """
-        if not activity_ids:
-            raise ToolError("activity_ids must not be empty")
-
-        db = get_db(ctx)
-        updated = 0
-        updated_ids: list[int] = []
-        missing_ids: list[int] = []
-        blocked_shipped_ids: list[int] = []
-        tags_by_activity_id: dict[int, list[str]] = {}
-
-        # Tags ARE indexed in content_index (see fts_text_for_activity), so each
-        # tag mutation below re-indexes its row via reindex_activity_fts.
-        for activity_id in activity_ids:
-            cursor = await db.execute(
-                "SELECT tags FROM activity_log WHERE id = ?", (activity_id,)
-            )
-            row = await cursor.fetchone()
-            if row is None:
-                logger.warning(
-                    "mark_shipped_processed: id %d not found, skipping", activity_id
-                )
-                missing_ids.append(activity_id)
-                continue
-            current_tags: list[str] = json.loads(row["tags"])
-            tags_by_activity_id[activity_id] = current_tags
-            if "SHIPPED" in current_tags:
-                blocked_shipped_ids.append(activity_id)
-
-        if blocked_shipped_ids:
-            logger.warning(
-                "mark_shipped_processed: refused SHIPPED ids %s; use confirm_shipped_sync "
-                "for receipt-backed shipped artifacts or record_shipped_event_disposition "
-                "for explicit non-receipt decisions",
-                blocked_shipped_ids,
-            )
-            log_audit(
-                "mark_shipped_processed",
-                None,
-                None,
-                ok=False,
-                detail=(
-                    f"activity_ids={activity_ids} missing_ids={missing_ids} "
-                    f"blocked_shipped_ids={blocked_shipped_ids}"
-                ),
-            )
-            raise ToolError(
-                "mark_shipped_processed refuses SHIPPED activity ids "
-                f"{blocked_shipped_ids}; use confirm_shipped_sync with downstream proof "
-                "or record_shipped_event_disposition for an explicit non-receipt decision"
-            )
-
-        for activity_id, current_tags in tags_by_activity_id.items():
-            if "PROCESSED" not in current_tags:
-                current_tags.append("PROCESSED")
-                await db.execute(
-                    "UPDATE activity_log SET tags = ? WHERE id = ?",
-                    (json.dumps(current_tags), activity_id),
-                )
-                await reindex_activity_fts(db, activity_id)
-                updated += 1
-                updated_ids.append(activity_id)
-
-        await db.commit()
-
-        await _export_bridge_markdown_after_processing(db)
-
-        log_audit(
-            "mark_shipped_processed",
-            None,
-            None,
-            ok=True,
-            detail=(
-                f"activity_ids={activity_ids} updated_ids={updated_ids} "
-                f"missing_ids={missing_ids} updated={updated}/{len(activity_ids)}"
-            ),
-        )
-        logger.info(
-            "mark_shipped_processed: updated %d/%d entries", updated, len(activity_ids)
-        )
-        return {
-            "ok": True,
-            "updated": updated,
-            "total": len(activity_ids),
-            "activity_ids": activity_ids,
-            "updated_ids": updated_ids,
-            "missing_ids": missing_ids,
-            "shipped_bypass_ids": [],
-        }
-
-    @mcp.tool()
-    async def record_shipped_event_disposition(
+    async def record_disposition(
         caller: Annotated[
             CallerID, Field(description="System recording the disposition")
         ],
         activity_id: Annotated[
-            int, Field(description="SHIPPED activity entry to classify")
+            int, Field(description="SHIPPED activity entry to dispose")
         ],
-        disposition_type: Annotated[
+        disposition: Annotated[
             str,
             Field(
                 description=(
-                    "One of: unsynced_by_policy, no_durable_target, "
-                    "superseded_without_receipt, declined_mapping"
+                    "Terminal sync disposition. 'synced' = receipt-backed "
+                    "downstream proof (requires downstream_system + "
+                    "downstream_ref, adds PROCESSED). A policy value "
+                    "(unsynced_by_policy, no_durable_target, "
+                    "superseded_without_receipt, declined_mapping) = non-receipt "
+                    "decision (requires reason, does not claim sync)."
                 )
             ),
         ],
+        downstream_system: Annotated[
+            str | None,
+            Field(
+                description="External system updated, e.g. 'notion' or 'github' (synced only)"
+            ),
+        ] = None,
+        downstream_ref: Annotated[
+            str | None,
+            Field(
+                description="Durable downstream reference, e.g. Notion page ID or URL (synced only)"
+            ),
+        ] = None,
         reason: Annotated[
-            str, Field(description="Why this event is not receipt-ready")
-        ],
+            str | None,
+            Field(
+                description="Why this event is not receipt-ready (policy dispositions only)"
+            ),
+        ] = None,
         policy_ref: Annotated[
             str | None,
-            Field(description="Optional durable policy or report reference"),
-        ] = None,
-        notes: Annotated[
-            str | None,
-            Field(description="Optional operator evidence or follow-up notes"),
-        ] = None,
-        ctx: Context = None,  # type: ignore[assignment]
-    ) -> dict[str, Any]:
-        """Record a non-receipt disposition for a SHIPPED event.
-
-        This is not a downstream receipt and does not mark the event PROCESSED.
-        It is for rows that should remain auditable but are not actionable for
-        normal bridge-sync receipt processing.
-        """
-        require_caller(ctx, caller, tool="record_shipped_event_disposition")
-        disposition = disposition_type.strip()
-        if disposition not in _SHIPPED_EVENT_DISPOSITION_TYPES:
-            allowed = ", ".join(sorted(_SHIPPED_EVENT_DISPOSITION_TYPES))
-            raise ToolError(f"disposition_type must be one of: {allowed}")
-        clean_reason = reason.strip()
-        if not clean_reason:
-            raise ToolError("reason must not be empty")
-        clean_policy_ref = policy_ref.strip() if policy_ref is not None else None
-        clean_notes = notes.strip() if notes is not None else None
-
-        db = get_db(ctx)
-        cursor = await db.execute(
-            "SELECT tags, project_name FROM activity_log WHERE id = ?", (activity_id,)
-        )
-        row = await cursor.fetchone()
-        if row is None:
-            raise ToolError(f"No activity entry found with id {activity_id}")
-
-        current_tags: list[str] = json.loads(row["tags"])
-        if "SHIPPED" not in current_tags:
-            raise ToolError(f"Activity entry {activity_id} is not tagged SHIPPED")
-
-        cursor = await db.execute(
-            "SELECT downstream_ref FROM shipped_sync_receipts WHERE activity_id = ?",
-            (activity_id,),
-        )
-        receipt = await cursor.fetchone()
-        if receipt is not None:
-            raise ToolError(
-                f"Activity entry {activity_id} already has a shipped_sync_receipts row"
-            )
-
-        await db.execute(
-            """
-            INSERT OR REPLACE INTO shipped_event_dispositions (
-                activity_id, disposition_type, policy_ref, reason, decided_by, notes
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                activity_id,
-                disposition,
-                clean_policy_ref,
-                clean_reason,
-                caller,
-                clean_notes,
-            ),
-        )
-        await db.commit()
-
-        detail = f"activity_id={activity_id} disposition_type={disposition}"
-        log_audit(
-            "record_shipped_event_disposition",
-            caller,
-            row["project_name"],
-            ok=True,
-            detail=detail,
-        )
-        logger.info(
-            "recorded shipped-event disposition: id=%d disposition=%s by=%s",
-            activity_id,
-            disposition,
-            caller,
-        )
-        return {
-            "ok": True,
-            "activity_id": activity_id,
-            "project_name": row["project_name"],
-            "disposition_type": disposition,
-            "policy_ref": clean_policy_ref,
-            "decided_by": caller,
-        }
-
-    @mcp.tool()
-    async def confirm_shipped_sync(
-        caller: Annotated[
-            CallerID, Field(description="System confirming downstream sync")
-        ],
-        activity_id: Annotated[
-            int, Field(description="SHIPPED activity entry that was synced")
-        ],
-        downstream_system: Annotated[
-            str,
-            Field(description="External system updated, e.g. 'notion' or 'github'"),
-        ],
-        downstream_ref: Annotated[
-            str,
             Field(
-                description="Durable downstream reference, e.g. Notion page ID or URL"
+                description="Optional durable policy or report reference (policy dispositions only)"
             ),
-        ],
+        ] = None,
         notes: Annotated[
             str | None,
             Field(description="Optional short sync note or operator evidence"),
         ] = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
-        """Record downstream proof, then mark one SHIPPED activity event PROCESSED."""
-        require_caller(ctx, caller, tool="confirm_shipped_sync")
-        system = downstream_system.strip()
-        ref = downstream_ref.strip()
-        if not system:
-            raise ToolError("downstream_system must not be empty")
-        if not ref:
-            raise ToolError("downstream_ref must not be empty")
+        """Record the terminal sync disposition for one SHIPPED activity event.
+
+        Single verb replacing the former confirm_shipped_sync /
+        record_shipped_event_disposition / mark_shipped_processed trio. A SHIPPED
+        row reaches exactly one disposition, stored on the row itself (the v14
+        ``sync_*`` columns):
+
+        - ``disposition='synced'`` is the receipt-backed proof path: it REQUIRES
+          ``downstream_system`` + ``downstream_ref``, adds the ``PROCESSED`` tag,
+          and records the downstream reference. Only this path claims a durable
+          downstream sync.
+        - A policy ``disposition`` (unsynced_by_policy / no_durable_target /
+          superseded_without_receipt / declined_mapping) is a non-receipt
+          decision: it REQUIRES a ``reason``, does NOT add ``PROCESSED``, and does
+          not claim sync — it records why the event is not receipt-backed.
+
+        Guarantees carried over from the trio: a SHIPPED row can never be marked
+        resolved without either downstream proof or an explicit reasoned policy
+        decision, and a row that already carries downstream proof ('synced')
+        cannot be downgraded to a policy disposition. The legacy non-shipped
+        PROCESSED-marking path (mark_shipped_processed) is retired; this tool is
+        SHIPPED-only.
+        """
+        require_caller(ctx, caller, tool="record_disposition")
+        choice = disposition.strip()
+        if choice not in _ALL_DISPOSITIONS:
+            allowed = ", ".join(sorted(_ALL_DISPOSITIONS))
+            raise ToolError(f"disposition must be one of: {allowed}")
+
+        is_synced = choice == _SYNCED_DISPOSITION
+        clean_system = (
+            downstream_system.strip() if downstream_system is not None else None
+        )
+        clean_ref = downstream_ref.strip() if downstream_ref is not None else None
+        clean_reason = reason.strip() if reason is not None else None
+        clean_policy_ref = policy_ref.strip() if policy_ref is not None else None
+        clean_notes = notes.strip() if notes is not None else None
+
+        if is_synced:
+            if not clean_system:
+                raise ToolError(
+                    "downstream_system must not be empty for a 'synced' disposition"
+                )
+            if not clean_ref:
+                raise ToolError(
+                    "downstream_ref must not be empty for a 'synced' disposition"
+                )
+        elif not clean_reason:
+            raise ToolError("reason must not be empty for a policy disposition")
 
         db = get_db(ctx)
         cursor = await db.execute(
-            "SELECT tags, project_name FROM activity_log WHERE id = ?", (activity_id,)
+            "SELECT tags, project_name, sync_disposition FROM activity_log WHERE id = ?",
+            (activity_id,),
         )
         row = await cursor.fetchone()
         if row is None:
@@ -976,8 +829,16 @@ def register(mcp: FastMCP) -> None:
         if "SHIPPED" not in current_tags:
             raise ToolError(f"Activity entry {activity_id} is not tagged SHIPPED")
 
+        if not is_synced and row["sync_disposition"] == _SYNCED_DISPOSITION:
+            raise ToolError(
+                f"Activity entry {activity_id} already has downstream sync proof "
+                "('synced'); it cannot be downgraded to a policy disposition"
+            )
+
+        # Tags ARE indexed in content_index (see fts_text_for_activity), so the
+        # PROCESSED add re-indexes its row via reindex_activity_fts.
         processed_added = False
-        if "PROCESSED" not in current_tags:
+        if is_synced and "PROCESSED" not in current_tags:
             current_tags.append("PROCESSED")
             await db.execute(
                 "UPDATE activity_log SET tags = ? WHERE id = ?",
@@ -986,42 +847,58 @@ def register(mcp: FastMCP) -> None:
             await reindex_activity_fts(db, activity_id)
             processed_added = True
 
+        # synced_at holds the receipt sync time for 'synced' and the decision
+        # time for a policy disposition. SQL strftime is the seam-approved clock
+        # source for DB-side timestamps (clock.py docstring, Phase 1).
         await db.execute(
             """
-            INSERT INTO shipped_sync_receipts (
-                activity_id, downstream_system, downstream_ref, synced_by, notes
-            )
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(activity_id) DO UPDATE SET
-                downstream_system = excluded.downstream_system,
-                downstream_ref = excluded.downstream_ref,
-                synced_by = excluded.synced_by,
+            UPDATE activity_log SET
+                sync_disposition = ?,
+                sync_disposition_by = ?,
                 synced_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-                notes = excluded.notes
+                sync_downstream_system = ?,
+                sync_downstream_ref = ?,
+                sync_policy_ref = ?,
+                sync_reason = ?,
+                sync_note = ?
+            WHERE id = ?
             """,
-            (activity_id, system, ref, caller, notes),
+            (
+                choice,
+                caller,
+                clean_system if is_synced else None,
+                clean_ref if is_synced else None,
+                None if is_synced else clean_policy_ref,
+                None if is_synced else clean_reason,
+                clean_notes,
+                activity_id,
+            ),
         )
         await db.commit()
 
-        await _export_bridge_markdown_after_processing(db)
+        if is_synced:
+            await _export_bridge_markdown_after_processing(db)
 
-        detail = f"activity_id={activity_id} downstream={system}:{ref}"
+        detail = f"activity_id={activity_id} disposition={choice}"
+        if is_synced:
+            detail += f" downstream={clean_system}:{clean_ref}"
         log_audit(
-            "confirm_shipped_sync", caller, row["project_name"], ok=True, detail=detail
+            "record_disposition", caller, row["project_name"], ok=True, detail=detail
         )
         logger.info(
-            "confirmed shipped sync: id=%d downstream=%s:%s by=%s",
+            "recorded disposition: id=%d disposition=%s by=%s",
             activity_id,
-            system,
-            ref,
+            choice,
             caller,
         )
         return {
             "ok": True,
             "activity_id": activity_id,
             "project_name": row["project_name"],
+            "disposition": choice,
+            "decided_by": caller,
             "processed_added": processed_added,
-            "downstream_system": system,
-            "downstream_ref": ref,
-            "synced_by": caller,
+            "downstream_system": clean_system if is_synced else None,
+            "downstream_ref": clean_ref if is_synced else None,
+            "policy_ref": None if is_synced else clean_policy_ref,
         }
