@@ -13,10 +13,13 @@ clear-race 0
 # receipt via the statement-atomic dedupe). Re-pinned 11 → 5 → 20 across
 # the fix rounds (declared window changes as loser-path ops shifted).
 receipt-crash 20
-# cas-pingpong: RC-3 — warn arm is the INV-4 lost-update evidence seed,
-# enforce arm is the CONTROL on the identical interleaving
-cas-pingpong-warn 2
-cas-pingpong-enforce 2
+# cas-pingpong: RC-3 — the warn/enforce canary was cut 2026-07-12; missing_cas
+# is now unconditional (blind-vs-cas holds on any seed, pinned at 0).
+# stale-cas pins the still-live two-honest-CAS-writer race that replaces the
+# old warn-mode "blind wins the race, CAS goes stale" mechanism (dead now
+# that a blind write can never win against an existing row).
+cas-pingpong-missing-cas 0
+cas-pingpong-stale-cas 0
 # wal-starvation: WC-9 — red arm pins the leaked-tx wall (INV-10 fires,
 # checkpoint starved); control arm pins bounded-WAL liveness
 wal-starvation-red 0

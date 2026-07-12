@@ -195,9 +195,9 @@ The `update_section` tool enforces ownership — only `caller="claude_ai"` can w
 these sections. CC and Codex calls with these section names will receive a ToolError.
 If the section changed since `current` was read, `update_section` returns
 `ok=False`, `conflict=True`, and a `receipt_id`; re-read, merge deliberately, and
-retry with the new version. Existing-row blind writes are temporarily allowed for
-compatibility and returned as `legacy_blind_write=True`, but consumers should not
-depend on that path.
+retry with the new version. A write to an existing section without
+`if_match_version` is rejected the same way (`reason_code="missing_cas"`) —
+there is no blind-write path for existing sections.
 
 ### sync_from_file (startup safety net)
 

@@ -94,7 +94,7 @@ async def test_section_cas_write_steps_version_and_counts_rejections(
         operation="update_section",
     )
     await db.commit()
-    assert first == {"written": True, "legacy_blind_write": False, "receipt_id": None}
+    assert first == {"written": True, "receipt_id": None}
 
     cursor = await db.execute(
         "SELECT version FROM context_sections WHERE section_name = 'career'"
@@ -115,7 +115,6 @@ async def test_section_cas_write_steps_version_and_counts_rejections(
     await db.commit()
     assert cas_write == {
         "written": True,
-        "legacy_blind_write": False,
         "receipt_id": None,
     }
 
