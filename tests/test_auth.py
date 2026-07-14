@@ -110,18 +110,25 @@ def test_load_principals_skips_malformed_entries(tmp_path: Path) -> None:
 
 
 class _FakeLifespan:
-    def __init__(self, principal: str | None) -> None:
+    def __init__(
+        self, principal: str | None, credential_hash: str | None = None
+    ) -> None:
         self.principal = principal
+        self.credential_hash = credential_hash
 
 
 class _FakeRequestContext:
-    def __init__(self, principal: str | None) -> None:
-        self.lifespan_context = _FakeLifespan(principal)
+    def __init__(
+        self, principal: str | None, credential_hash: str | None = None
+    ) -> None:
+        self.lifespan_context = _FakeLifespan(principal, credential_hash)
 
 
 class _FakeCtx:
-    def __init__(self, principal: str | None) -> None:
-        self.request_context = _FakeRequestContext(principal)
+    def __init__(
+        self, principal: str | None, credential_hash: str | None = None
+    ) -> None:
+        self.request_context = _FakeRequestContext(principal, credential_hash)
 
 
 def audit_events() -> list[dict[str, object]]:
@@ -192,6 +199,27 @@ def test_require_bound_caller_rejects_mismatch_and_accepts_match(
     auth.require_bound_caller(_FakeCtx("claude_ai"), "claude_ai", tool="create_handoff")
 
 
+@pytest.mark.parametrize("mode", ["off", "warn", "enforce"])
+def test_active_session_revalidates_enrollment_after_revocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    principals_path = tmp_path / "principals.json"
+    write_principals(principals_path, {"cc": "token-cc"})
+    monkeypatch.setattr(config, "PRINCIPALS_PATH", principals_path)
+    monkeypatch.setattr(config, "AUTH_MODE", mode)
+    ctx = _FakeCtx("cc", auth.hash_token("token-cc"))
+
+    auth.require_caller(ctx, "cc", tool="log_activity")
+    write_principals(principals_path, {})
+
+    with pytest.raises(ToolError, match="no longer enrolled"):
+        auth.require_caller(ctx, "cc", tool="log_activity")
+    with pytest.raises(ToolError, match="no longer enrolled"):
+        auth.require_bound_caller(ctx, "cc", tool="record_cost")
+    events = [event for event in audit_events() if event["tool"] == "auth.revoked"]
+    assert len(events) == 2
+
+
 @pytest.mark.parametrize("mode", ["warn", "enforce"])
 def test_clamp_blocks_operator_in_active_modes(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
     monkeypatch.setattr(config, "AUTH_MODE", mode)
@@ -244,6 +272,8 @@ async def test_app_lifespan_binds_principal_from_env(
 
     async with app_lifespan(server_mcp) as app_ctx:
         assert app_ctx.principal == "cc"
+        assert app_ctx.credential_hash == auth.hash_token("token-cc")
+        assert app_ctx.credential_hash != "token-cc"
 
 
 async def test_app_lifespan_unknown_token_binds_none_and_audits(

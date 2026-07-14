@@ -26,12 +26,13 @@ logger = logging.getLogger("bridge_db.server")
 class AppContext:
     db: aiosqlite.Connection
     principal: str | None = None
+    credential_hash: str | None = None
 
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # noqa: ARG001
     from bridge_db.audit import log_audit
-    from bridge_db.auth import auth_mode, load_principals, resolve_principal
+    from bridge_db.auth import auth_mode, hash_token, load_principals, resolve_principal
 
     raw_token = os.environ.get("BRIDGE_DB_PRINCIPAL_TOKEN")
     token = raw_token.strip() if raw_token is not None else None
@@ -52,7 +53,11 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # 
     )
     db = await open_db(config.DB_PATH)
     try:
-        yield AppContext(db=db, principal=principal)
+        yield AppContext(
+            db=db,
+            principal=principal,
+            credential_hash=hash_token(token) if token and principal else None,
+        )
     finally:
         await db.close()
         logger.info("bridge-db shut down")

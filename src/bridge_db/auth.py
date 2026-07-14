@@ -76,11 +76,39 @@ def resolve_principal(token: str | None, principals: dict[str, str]) -> str | No
 
 
 def get_principal(ctx: Any) -> str | None:
-    """Read the connection-bound principal off the lifespan context. None-safe."""
+    """Return the still-enrolled connection principal. None-safe and fail-closed."""
     try:
-        return getattr(ctx.request_context.lifespan_context, "principal", None)
+        lifespan = ctx.request_context.lifespan_context
+        principal = getattr(lifespan, "principal", None)
+        credential_hash = getattr(lifespan, "credential_hash", None)
     except AttributeError:
         return None
+    if credential_hash is None:
+        return principal
+    live_principal = load_principals(config.PRINCIPALS_PATH).get(credential_hash)
+    return principal if live_principal == principal else None
+
+
+def _revoked_bound_credential(ctx: Any) -> tuple[bool, str | None]:
+    try:
+        lifespan = ctx.request_context.lifespan_context
+        cached = getattr(lifespan, "principal", None)
+        credential_hash = getattr(lifespan, "credential_hash", None)
+    except AttributeError:
+        return False, None
+    return credential_hash is not None and get_principal(ctx) is None, cached
+
+
+def _reject_revoked_credential(ctx: Any, caller: str, tool: str) -> None:
+    revoked, cached = _revoked_bound_credential(ctx)
+    if not revoked:
+        return
+    detail = f"tool={tool} principal={cached or 'unbound'} caller={caller} decision=revoked"
+    log_audit("auth.revoked", cached, None, ok=False, detail=detail)
+    logger.warning("revoked credential refused: %s", detail)
+    raise ToolError(
+        "Bound credential is no longer enrolled; restart and enroll or bind a current token"
+    )
 
 
 def require_bound_caller(ctx: Any, caller: str, tool: str) -> None:
@@ -90,6 +118,7 @@ def require_bound_caller(ctx: Any, caller: str, tool: str) -> None:
     compatibility dial cannot disable their identity boundary. Mismatch audit
     attribution comes from the bound principal, never the request's claim.
     """
+    _reject_revoked_credential(ctx, caller, tool)
     principal = get_principal(ctx)
     if principal == caller:
         return
@@ -111,6 +140,7 @@ def require_caller(ctx: Any, caller: str, tool: str) -> None:
     off: no-op. warn: allow but audit mismatches. enforce: reject mismatches
     and unbound connections. Match is always silent.
     """
+    _reject_revoked_credential(ctx, caller, tool)
     mode = auth_mode()
     if mode == "off":
         return
