@@ -1,5 +1,6 @@
 """Tests for activity log tools."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -1433,6 +1434,57 @@ async def test_record_disposition_synced_records_proof_and_marks_processed(
     assert shipped[0]["sync_receipt"]["synced_by"] == "codex"
     assert shipped[0]["policy_disposition"] is None
     assert bridge_path.exists()
+
+
+async def test_record_disposition_audit_fingerprints_downstream_reference(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", tmp_path / "bridge.md")
+    ctx = make_ctx(db, principal="codex")
+    await fns["log_activity"](
+        caller="codex",
+        project_name="AuditRedaction",
+        summary="shipped",
+        tags=["SHIPPED"],
+        ctx=ctx,
+    )
+    row = await (await db.execute("SELECT id FROM activity_log")).fetchone()
+    assert row is not None
+    reference = (
+        "https://example.invalid/callback?token=synthetic-secret-marker#fragment"
+    )
+
+    await fns["record_disposition"](
+        caller="codex",
+        activity_id=row["id"],
+        disposition="synced",
+        downstream_system="example",
+        downstream_ref=reference,
+        ctx=ctx,
+    )
+
+    stored = await (
+        await db.execute(
+            "SELECT sync_downstream_ref FROM activity_log WHERE id = ?", (row["id"],)
+        )
+    ).fetchone()
+    assert stored is not None and stored["sync_downstream_ref"] == reference
+    events = [
+        json.loads(line)
+        for line in config.AUDIT_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    ]
+    detail = next(
+        event["detail"]
+        for event in events
+        if event["tool"] == "record_disposition" and event["ok"] is True
+    )
+    fingerprint = hashlib.sha256(reference.encode("utf-8")).hexdigest()[:16]
+    assert reference not in detail
+    assert "synthetic-secret-marker" not in detail
+    assert f"downstream_ref_sha256={fingerprint}" in detail
 
 
 async def test_record_disposition_synced_auto_export_records_context_export_state(

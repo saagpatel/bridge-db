@@ -1,5 +1,6 @@
 """Activity and shipped-event tools."""
 
+import hashlib
 import json
 import logging
 from typing import Annotated, Any, cast
@@ -46,6 +47,13 @@ _POLICY_DISPOSITION_TYPES = {
     "declined_mapping",
 }
 _ALL_DISPOSITIONS = {_SYNCED_DISPOSITION, *_POLICY_DISPOSITION_TYPES}
+
+
+def _audit_ref_fingerprint(value: str) -> str:
+    """Return bounded correlation evidence without redisclosing the reference."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
 _SESSION_BOUNDARY_TAG = "session-boundary"
 _LIFECYCLE_ACTIVITY_SQL = """
 (
@@ -1096,7 +1104,11 @@ def register(mcp: FastMCP) -> None:
 
         detail = f"activity_id={activity_id} disposition={choice}"
         if is_synced:
-            detail += f" downstream={clean_system}:{clean_ref}"
+            assert clean_ref is not None
+            detail += (
+                f" downstream_system={clean_system}"
+                f" downstream_ref_sha256={_audit_ref_fingerprint(clean_ref)}"
+            )
         if superseded is not None:
             detail += f" {superseded}"
         log_audit(
