@@ -1179,7 +1179,14 @@ async def test_record_disposition_reports_and_recovers_failed_projection(
     monkeypatch.setattr(config, "BRIDGE_FILE_PATH", tmp_path / "bridge.md")
     snapshot: list[export_mod.ContextExportSnapshot] = []
     content = await export_mod.build_markdown(db, context_snapshot=snapshot)
-    await export_mod.export_bridge_file(db, content, snapshot)
+    await export_mod.export_bridge_file(
+        db,
+        content,
+        snapshot,
+        principal="projection_retry",
+        trigger="projection_retry",
+        projection_job_id=job_id,
+    )
     await db.commit()
     job = await (
         await db.execute(
@@ -1473,6 +1480,16 @@ async def test_record_disposition_synced_auto_export_records_context_export_stat
     assert export_state is not None
     assert export_state["exported_version"] == 3
     assert export_state["exported_content_sha256"]
+    receipt = await (
+        await db.execute(
+            "SELECT principal, trigger, projection_job_id "
+            "FROM bridge_export_receipts"
+        )
+    ).fetchone()
+    assert receipt is not None
+    assert receipt["principal"] == "codex"
+    assert receipt["trigger"] == "shipped_disposition"
+    assert receipt["projection_job_id"] is not None
 
 
 async def test_record_disposition_synced_is_idempotent_and_immutable(

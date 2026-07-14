@@ -134,6 +134,26 @@ def require_bound_caller(ctx: Any, caller: str, tool: str) -> None:
     raise ToolError(f"Caller mismatch: connection bound to '{principal}', cannot act as '{caller}'")
 
 
+def require_bound_principal(ctx: Any, tool: str) -> str:
+    """Require and return a live enrolled principal for a caller-less mutation.
+
+    A small number of tools derive their actor solely from the channel binding
+    instead of accepting a caller claim. They still fail closed regardless of
+    the rollout dial and revalidate credential enrollment before mutation.
+    """
+    _reject_revoked_credential(ctx, "implicit", tool)
+    principal = get_principal(ctx)
+    if principal is not None:
+        return principal
+    detail = f"tool={tool} principal=unbound decision=unbound mode=strict"
+    log_audit("auth.mismatch", None, None, ok=False, detail=detail)
+    logger.warning("auth mismatch: %s", detail)
+    raise ToolError(
+        "Unauthenticated connection: no BRIDGE_DB_PRINCIPAL_TOKEN bound. "
+        "Enroll a principal and set the token in this client's MCP spawn env."
+    )
+
+
 def require_caller(ctx: Any, caller: str, tool: str) -> None:
     """Cross-check the claimed caller against the connection-bound principal.
 

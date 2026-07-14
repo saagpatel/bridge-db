@@ -11,6 +11,7 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 
 from bridge_db import clock, config
+from bridge_db.auth import require_bound_principal
 from bridge_db.db import content_sha256, get_db, protected_tags_predicate
 
 logger = logging.getLogger("bridge_db.tools.export")
@@ -401,9 +402,15 @@ async def record_context_export_state(
 
 
 async def export_bridge_file(
-    db: Any, content: str, context_snapshot: list[ContextExportSnapshot]
+    db: Any,
+    content: str,
+    context_snapshot: list[ContextExportSnapshot],
+    *,
+    principal: str,
+    trigger: str,
+    projection_job_id: int | None = None,
 ) -> int:
-    """CAS-protect and record one complete fallback-file export."""
+    """CAS-protect and durably attribute one complete fallback-file export."""
     path = config.BRIDGE_FILE_PATH
     current_content = path.read_text(encoding="utf-8") if path.exists() else None
     cursor = await db.execute(
@@ -486,6 +493,24 @@ async def export_bridge_file(
         """,
         (content_sha256(content),),
     )
+    exported_context_sections = len(context_snapshot)
+    await db.execute(
+        """
+        INSERT INTO bridge_export_receipts (
+            principal, trigger, projection_job_id, previous_content_sha256,
+            exported_content_sha256, exported_context_sections, byte_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            principal,
+            trigger,
+            projection_job_id,
+            expected_hash,
+            content_sha256(content),
+            exported_context_sections,
+            len(content),
+        ),
+    )
     return exported_context_sections
 
 
@@ -495,12 +520,17 @@ def register(mcp: FastMCP) -> None:
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Regenerate the markdown bridge file from the database. Call after any write operation."""
+        principal = require_bound_principal(ctx, tool="export_bridge_markdown")
         db = get_db(ctx)
         context_snapshot: list[ContextExportSnapshot] = []
         content = await build_markdown(db, context_snapshot=context_snapshot)
 
         exported_context_sections = await export_bridge_file(
-            db, content, context_snapshot
+            db,
+            content,
+            context_snapshot,
+            principal=principal,
+            trigger="manual",
         )
         await db.commit()
         bridge_path = config.BRIDGE_FILE_PATH

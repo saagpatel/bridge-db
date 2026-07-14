@@ -149,7 +149,13 @@ async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, A
             await db.commit()
             context_snapshot: list[ContextExportSnapshot] = []
             content = await build_markdown(db, context_snapshot=context_snapshot)
-            await export_bridge_file(db, content, context_snapshot)
+            await export_bridge_file(
+                db,
+                content,
+                context_snapshot,
+                principal="codex_seed",
+                trigger="codex_seed",
+            )
             await db.commit()
         elif not dry_run:
             await db.rollback()

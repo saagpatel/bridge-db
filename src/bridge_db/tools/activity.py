@@ -223,7 +223,7 @@ def _load_meta_shipped_event_policy(project_name: str) -> dict[str, Any] | None:
 
 
 async def _export_bridge_markdown_after_processing(
-    db: Any, projection_job_id: int
+    db: Any, projection_job_id: int, principal: str
 ) -> dict[str, Any]:
     """Attempt one durable fallback projection and report its exact state."""
     try:
@@ -235,7 +235,14 @@ async def _export_bridge_markdown_after_processing(
 
         context_snapshot: list[ContextExportSnapshot] = []
         content = await build_markdown(db, context_snapshot=context_snapshot)
-        await export_bridge_file(db, content, context_snapshot)
+        await export_bridge_file(
+            db,
+            content,
+            context_snapshot,
+            principal=principal,
+            trigger="shipped_disposition",
+            projection_job_id=projection_job_id,
+        )
         await db.commit()
         logger.info("auto-export triggered after shipped-event processing")
     except Exception:
@@ -1084,7 +1091,7 @@ def register(mcp: FastMCP) -> None:
         projection: dict[str, Any] | None = None
         if projection_job_id is not None:
             projection = await _export_bridge_markdown_after_processing(
-                db, projection_job_id
+                db, projection_job_id, caller
             )
 
         detail = f"activity_id={activity_id} disposition={choice}"

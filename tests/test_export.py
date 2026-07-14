@@ -6,6 +6,7 @@ from typing import Any
 import aiosqlite
 import pytest
 from conftest import CaptureMCP, make_ctx
+from mcp.server.fastmcp.exceptions import ToolError
 
 from bridge_db.db import insert_activity_row
 from bridge_db.tools import activity as act_mod
@@ -159,6 +160,63 @@ async def test_export_writes_to_file(
     cfg.BRIDGE_FILE_PATH = original  # restore
 
 
+async def test_export_rejects_unbound_before_file_or_database_mutation(
+    db: aiosqlite.Connection,
+    all_fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge_path = tmp_path / "bridge.md"
+    bridge_path.write_text("pending file-side edit", encoding="utf-8")
+    monkeypatch.setattr(exp_mod.config, "BRIDGE_FILE_PATH", bridge_path)
+
+    with pytest.raises(ToolError, match="Unauthenticated connection"):
+        await all_fns["export_bridge_markdown"](ctx=make_ctx(db, principal=None))
+
+    assert bridge_path.read_text(encoding="utf-8") == "pending file-side edit"
+    state_count = await (
+        await db.execute("SELECT COUNT(*) FROM bridge_file_export_state")
+    ).fetchone()
+    receipt_count = await (
+        await db.execute("SELECT COUNT(*) FROM bridge_export_receipts")
+    ).fetchone()
+    assert state_count is not None and state_count[0] == 0
+    assert receipt_count is not None and receipt_count[0] == 0
+
+
+async def test_successful_manual_export_records_principal_bound_receipt(
+    db: aiosqlite.Connection,
+    all_fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge_path = tmp_path / "bridge.md"
+    monkeypatch.setattr(exp_mod.config, "BRIDGE_FILE_PATH", bridge_path)
+
+    result = await all_fns["export_bridge_markdown"](
+        ctx=make_ctx(db, principal="claude_ai")
+    )
+
+    receipt = await (
+        await db.execute(
+            "SELECT principal, trigger, previous_content_sha256, "
+            "exported_content_sha256, exported_context_sections, byte_count "
+            "FROM bridge_export_receipts"
+        )
+    ).fetchone()
+    assert receipt is not None
+    assert receipt["principal"] == "claude_ai"
+    assert receipt["trigger"] == "manual"
+    assert receipt["previous_content_sha256"] is None
+    assert receipt["exported_content_sha256"] == exp_mod.content_sha256(
+        bridge_path.read_text(encoding="utf-8")
+    )
+    assert receipt["exported_context_sections"] == result[
+        "exported_context_sections"
+    ]
+    assert receipt["byte_count"] == result["bytes"]
+
+
 async def test_export_records_context_section_export_state(
     db: aiosqlite.Connection, all_fns: dict[str, Any], tmp_path: Path
 ) -> None:
@@ -259,7 +317,13 @@ async def test_export_receipt_uses_rendered_section_snapshot(
             ctx=ctx,
         )
 
-        await exp_mod.export_bridge_file(db, rendered, snapshot)
+        await exp_mod.export_bridge_file(
+            db,
+            rendered,
+            snapshot,
+            principal="projection_retry",
+            trigger="projection_retry",
+        )
         await db.commit()
         receipt = await (
             await db.execute(
