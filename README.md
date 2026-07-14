@@ -72,7 +72,7 @@ Write tools enforce `caller` ownership, so systems can only write the slices of 
 
 ## Provenance & the pickup gate
 
-Instruction-bearing rows carry a `source_trust` label — `operator`, `agent`, or `ingested` — recording who authored the content. It lives only in the DB (schema v7+, on `pending_handoffs`, `activity_log`, `context_sections`, `system_snapshots`) and is **never serialized into the markdown export**, which would otherwise launder provenance.
+Instruction-bearing rows carry a `source_trust` label — `operator`, `agent`, or `ingested` — recording who authored the content. The canonical label lives in the DB (schema v7+, on `pending_handoffs`, `activity_log`, `context_sections`, `system_snapshots`). Markdown exports include a visible stored-data warning and advisory per-block copies of the DB labels so file consumers do not lose the instruction boundary. Because the fallback is editable, those serialized labels are never proof of operator authorship and are ignored on import.
 
 - **Writers** set it via an optional `source_trust` param; the conservative default is `agent`. `create_handoff` and `update_section` require exact channel-bound owners even when the global auth rollout mode is `off`, and MCP requests for `operator` trust are clamped to `agent`. Every accepted section content change receives fresh provenance; it never inherits operator trust from an older version.
 - **The gate** lives at the one dangerous transition — `pick_up_handoff` moving a handoff `pending → active`:

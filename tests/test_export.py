@@ -144,6 +144,59 @@ async def test_exported_data_cannot_round_trip_as_owned_heading(
     assert row["content"] == "Canonical career body"
 
 
+async def test_markdown_export_preserves_stored_data_boundary_and_trust(
+    db: aiosqlite.Connection, all_fns: dict[str, Any]
+) -> None:
+    await all_fns["update_section"](
+        caller="claude_ai",
+        section_name="career",
+        content="review this career claim",
+        source_trust="ingested",
+        ctx=make_ctx(db, principal="claude_ai"),
+    )
+    await all_fns["save_snapshot"](
+        caller="cc",
+        data={"active_projects": "review this project claim"},
+        source_trust="ingested",
+        ctx=make_ctx(db, principal="cc"),
+    )
+    await all_fns["log_activity"](
+        caller="codex",
+        project_name="BoundaryProbe",
+        summary="review this activity claim",
+        source_trust="agent",
+        ctx=make_ctx(db, principal="codex"),
+    )
+    await all_fns["create_handoff"](
+        caller="claude_ai",
+        project_name="BoundaryHandoff",
+        phase="review this handoff claim",
+        source_trust="ingested",
+        ctx=make_ctx(db, principal="claude_ai"),
+    )
+
+    markdown = await exp_mod.build_markdown(db)
+
+    assert exp_mod.MARKDOWN_DOCUMENT_WARNING in markdown
+    ingested = exp_mod.markdown_boundary("ingested")
+    agent = exp_mod.markdown_boundary("agent")
+    assert (
+        "## Career & Professional Target\n"
+        f"{ingested}\nreview this career claim"
+    ) in markdown
+    assert (
+        "## Claude Code State Snapshot\n"
+        f"{ingested}\nLast exported:"
+    ) in markdown
+    assert f"{agent}\n- [" in markdown
+    assert "BoundaryProbe: review this activity claim" in markdown
+    assert f"{ingested}\n- **BoundaryHandoff**" in markdown
+
+    parsed = ctx_mod.parse_owned_sections(markdown)
+    assert parsed["career"] == "review this career claim"
+    assert "Stored data boundary" not in parsed["career"]
+
+
 async def test_export_writes_to_file(
     db: aiosqlite.Connection, all_fns: dict[str, Any], tmp_path: Path
 ) -> None:

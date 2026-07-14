@@ -252,7 +252,9 @@ The file is an unauthenticated channel in every auth mode. Changed or new
 sections are imported as `source_trust='ingested'`
 and reported in the `demoted` list of the return value. Sections whose content is
 identical to what is already in the DB are skipped and their existing label is
-preserved. The operator reviews demoted sections and promotes reviewed ones via
+preserved. Exported stored-data boundary lines and advisory `source_trust` labels
+are reserved projection metadata: the importer strips them from section bodies
+and never treats them as authority. The operator reviews demoted sections and promotes reviewed ones via
 `uv run python -m bridge_db --promote-section <section>` (TTY-gated). The ceremony
 prints the exact content, version, and SHA-256 digest, requires confirmation, then
 revalidates that same row under a write lock before promotion. Claude Code's

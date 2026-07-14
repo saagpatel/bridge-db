@@ -13,6 +13,11 @@ from mcp.server.fastmcp import Context, FastMCP
 from bridge_db import clock, config
 from bridge_db.auth import require_bound_principal
 from bridge_db.db import content_sha256, get_db, protected_tags_predicate
+from bridge_db.instruction_boundary import (
+    MARKDOWN_DOCUMENT_WARNING,
+    is_markdown_boundary_line,
+    markdown_boundary,
+)
 
 logger = logging.getLogger("bridge_db.tools.export")
 
@@ -65,9 +70,14 @@ def _section_body(markdown: str, heading: str) -> str:
         return ""
     body_start = start + len(marker)
     next_heading = markdown.find("\n## ", body_start)
-    if next_heading == -1:
-        return markdown[body_start:].strip()
-    return markdown[body_start:next_heading].strip()
+    body = (
+        markdown[body_start:]
+        if next_heading == -1
+        else markdown[body_start:next_heading]
+    )
+    return "\n".join(
+        line for line in body.strip().splitlines() if not is_markdown_boundary_line(line)
+    ).strip()
 
 
 def _core_context_is_placeholder_only(content: str) -> bool:
@@ -139,7 +149,7 @@ async def _latest_codex_operating_snapshot(
 ) -> tuple[Any | None, dict[str, Any] | None]:
     cursor = await db.execute(
         """
-        SELECT snapshot_date, data
+        SELECT snapshot_date, data, source_trust
         FROM system_snapshots
         WHERE system='codex'
         ORDER BY created_at DESC, id DESC
@@ -160,12 +170,12 @@ async def build_markdown(
 
     # --- Context sections (Claude.ai-owned) ---
     cursor = await db.execute(
-        "SELECT section_name, content, version "
+        "SELECT section_name, content, version, source_trust "
         "FROM context_sections ORDER BY section_name"
     )
     section_rows = await cursor.fetchall()
-    sections: dict[str, str] = {
-        r["section_name"]: r["content"] for r in section_rows
+    sections: dict[str, tuple[str, str]] = {
+        r["section_name"]: (r["content"], r["source_trust"]) for r in section_rows
     }
     if context_snapshot is not None:
         context_snapshot.extend(
@@ -180,7 +190,7 @@ async def build_markdown(
 
     # --- CC State Snapshot ---
     cursor = await db.execute(
-        "SELECT snapshot_date, data FROM system_snapshots "
+        "SELECT snapshot_date, data, source_trust FROM system_snapshots "
         "WHERE system='cc' ORDER BY created_at DESC, id DESC LIMIT 1"
     )
     cc_snap_row = await cursor.fetchone()
@@ -200,7 +210,9 @@ async def build_markdown(
         cost_table += f"| **Total** | **${total:.0f}** |\n"
 
         cc_snapshot_md = (
-            f"## Claude Code State Snapshot\nLast exported: {_markdown_data(snap_date)}\n\n"
+            "## Claude Code State Snapshot\n"
+            f"{markdown_boundary(cc_snap_row['source_trust'])}\n"
+            f"Last exported: {_markdown_data(snap_date)}\n\n"
         )
         for key, label in [
             ("active_projects", "Active Projects"),
@@ -230,6 +242,7 @@ async def build_markdown(
                 f" [{']['.join(_markdown_data(tag) for tag in tags)}]" if tags else ""
             )
             branch_str = f" ({_markdown_data(r['branch'])})" if r["branch"] else ""
+            lines.append(markdown_boundary(r["source_trust"]))
             lines.append(
                 f"- [{_markdown_data(r['timestamp'])}]{tag_str} "
                 f"{_markdown_data(r['project_name'])}: "
@@ -239,7 +252,7 @@ async def build_markdown(
 
     # --- Recent CC Activity ---
     cursor = await db.execute(
-        "SELECT timestamp, project_name, summary, branch, tags FROM activity_log "
+        "SELECT timestamp, project_name, summary, branch, tags, source_trust FROM activity_log "
         "WHERE source='cc' ORDER BY created_at DESC, id DESC LIMIT 20"
     )
     cc_activity_rows = await cursor.fetchall()
@@ -253,7 +266,9 @@ async def build_markdown(
     codex_snap_row, cdata = await _latest_codex_operating_snapshot(db)
     if codex_snap_row and cdata is not None:
         codex_snapshot_md = (
-            "## Codex State Snapshot\nLast exported: "
+            "## Codex State Snapshot\n"
+            f"{markdown_boundary(codex_snap_row['source_trust'])}\n"
+            "Last exported: "
             f"{_markdown_data(codex_snap_row['snapshot_date'])}\n\n"
         )
         for key, label in [
@@ -268,7 +283,7 @@ async def build_markdown(
 
     # --- Recent Codex Activity ---
     cursor = await db.execute(
-        "SELECT timestamp, project_name, summary, branch, tags FROM activity_log "
+        "SELECT timestamp, project_name, summary, branch, tags, source_trust FROM activity_log "
         "WHERE source='codex' ORDER BY created_at DESC, id DESC LIMIT 20"
     )
     codex_activity_rows = await cursor.fetchall()
@@ -288,7 +303,7 @@ async def build_markdown(
     extra_activity_mds: list[str] = []
     for source, heading in _EXTRA_SOURCES.items():
         cursor = await db.execute(
-            "SELECT timestamp, project_name, summary, branch, tags FROM activity_log "
+            "SELECT timestamp, project_name, summary, branch, tags, source_trust FROM activity_log "
             "WHERE source=? ORDER BY created_at DESC, id DESC LIMIT 20",
             (source,),
         )
@@ -300,7 +315,7 @@ async def build_markdown(
     # --- Pinned Ledger (retention-protected rows, all sources) ---
     protected_sql, protected_params = protected_tags_predicate()
     cursor = await db.execute(
-        "SELECT timestamp, project_name, summary, branch, tags FROM activity_log "
+        "SELECT timestamp, project_name, summary, branch, tags, source_trust FROM activity_log "
         f"WHERE {protected_sql} "  # noqa: S608
         "ORDER BY created_at DESC, id DESC LIMIT 15",
         protected_params,
@@ -316,13 +331,14 @@ async def build_markdown(
 
     # --- Pending Handoffs ---
     cursor = await db.execute(
-        "SELECT project_name, project_path, roadmap_file, phase, dispatched_at "
+        "SELECT project_name, project_path, roadmap_file, phase, dispatched_at, source_trust "
         "FROM pending_handoffs WHERE status='pending' ORDER BY dispatched_at DESC, id DESC"
     )
     handoff_rows = await cursor.fetchall()
     if handoff_rows:
         handoff_lines: list[str] = []
         for r in handoff_rows:
+            handoff_lines.append(markdown_boundary(r["source_trust"]))
             line = f"- **{_markdown_data(r['project_name'])}**"
             if r["project_path"]:
                 line += f" — path: `{_markdown_data(r['project_path'])}`"
@@ -346,11 +362,17 @@ async def build_markdown(
         "# Claude.ai <-> Claude Code <-> Codex Context Bridge",
         f"Last synced: {today}",
         "",
+        MARKDOWN_DOCUMENT_WARNING,
+        "",
     ]
 
     for section_key in _SECTION_ORDER:
+        content, source_trust = sections.get(
+            section_key, (_EMPTY_SECTION_PLACEHOLDER, "unknown")
+        )
         parts.append(_HEADING_MAP[section_key])
-        parts.append(sections.get(section_key, _EMPTY_SECTION_PLACEHOLDER))
+        parts.append(markdown_boundary(source_trust))
+        parts.append(content)
         parts.append("")
 
     parts.append(handoffs_md)

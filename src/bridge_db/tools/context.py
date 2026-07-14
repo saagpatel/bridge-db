@@ -25,7 +25,10 @@ from bridge_db.db import (
     rollback_on_error,
     upsert_fts_entry,
 )
-from bridge_db.instruction_boundary import instruction_boundary
+from bridge_db.instruction_boundary import (
+    instruction_boundary,
+    is_markdown_boundary_line,
+)
 from bridge_db.invariants import always_tx, sometimes
 from bridge_db.models import SECTION_OWNERS, CallerID, SourceTrust
 
@@ -45,6 +48,8 @@ def parse_owned_sections(markdown: str) -> dict[str, str]:
     current_section: str | None = None
 
     for line in markdown.splitlines():
+        if current_section is not None and is_markdown_boundary_line(line):
+            continue
         if line.startswith("## "):
             heading = line[3:].strip()
             current_section = _SECTION_HEADING_MAP.get(heading)
