@@ -55,6 +55,7 @@ def _audit_ref_fingerprint(value: str) -> str:
 
 
 _SESSION_BOUNDARY_TAG = "session-boundary"
+ACTIVITY_SIGNAL_RAW_SCAN_ROWS = 2000
 _LIFECYCLE_ACTIVITY_SQL = """
 (
     source = 'cc'
@@ -72,6 +73,16 @@ def _decode_tags(raw: str) -> list[str]:
         [str(tag) for tag in cast(list[object], parsed)]
         if isinstance(parsed, list)
         else []
+    )
+
+
+def _is_lifecycle_activity(row: Any) -> bool:
+    return bool(
+        row["source"] == "cc"
+        and (
+            str(row["summary"]).casefold().startswith("cc session ended")
+            or _SESSION_BOUNDARY_TAG in _decode_tags(row["tags"])
+        )
     )
 
 
@@ -515,11 +526,6 @@ def register(mcp: FastMCP) -> None:
             conditions.append(condition)
             params.extend(since_params)
 
-        lifecycle_where = (
-            "WHERE " + " AND ".join([*conditions, _LIFECYCLE_ACTIVITY_SQL])
-            if conditions
-            else f"WHERE {_LIFECYCLE_ACTIVITY_SQL}"
-        )
         substantive_where = (
             "WHERE " + " AND ".join([*conditions, f"NOT {_LIFECYCLE_ACTIVITY_SQL}"])
             if conditions
@@ -527,29 +533,42 @@ def register(mcp: FastMCP) -> None:
         )
 
         lifecycle_cursor = await db.execute(
-            f"""
+            """
             SELECT
                 source,
                 project_name,
-                CASE
-                    WHEN summary LIKE 'CC session ended%' THEN 'CC session ended'
-                    ELSE summary
-                END AS summary_family,
+                summary,
+                tags,
                 timestamp,
                 created_at,
                 id,
                 canonical_key,
                 source_trust
             FROM activity_log
-            {lifecycle_where}
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
             """,
-            params,
+            (ACTIVITY_SIGNAL_RAW_SCAN_ROWS + 1,),
         )
-        lifecycle_rows = await lifecycle_cursor.fetchall()
+        raw_horizon: list[Any] = list(await lifecycle_cursor.fetchall())
+        lifecycle_scan_truncated = len(raw_horizon) > ACTIVITY_SIGNAL_RAW_SCAN_ROWS
+        lifecycle_rows: list[Any] = []
+        since_threshold = _created_at_since_threshold(since) if since is not None else None
+        for row in raw_horizon[:ACTIVITY_SIGNAL_RAW_SCAN_ROWS]:
+            if source is not None and row["source"] != source:
+                continue
+            if since_threshold is not None and row["created_at"] < since_threshold:
+                continue
+            if _is_lifecycle_activity(row):
+                lifecycle_rows.append(row)
 
         aggregates: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         for row in lifecycle_rows:
-            summary_family = row["summary_family"]
+            summary_family = (
+                "CC session ended"
+                if str(row["summary"]).casefold().startswith("cc session ended")
+                else row["summary"]
+            )
             time_bucket = _activity_time_bucket(row["timestamp"])
             key = (row["source"], row["project_name"], summary_family, time_bucket)
             current = aggregates.get(key)
@@ -634,7 +653,20 @@ def register(mcp: FastMCP) -> None:
                 if r["id"] not in ledger_ids
             ],
         ]
-        return [*ledger_entries, *_select_activity_signal_entries(entries, limit)]
+        selected = [*ledger_entries, *_select_activity_signal_entries(entries, limit)]
+        if lifecycle_scan_truncated:
+            return [
+                {
+                    "kind": "lifecycle_scan_truncated",
+                    "scanned_rows": ACTIVITY_SIGNAL_RAW_SCAN_ROWS,
+                    "raw_scan_limit": ACTIVITY_SIGNAL_RAW_SCAN_ROWS,
+                    "message": (
+                        "Lifecycle aggregates cover only the bounded newest-row horizon"
+                    ),
+                },
+                *selected,
+            ]
+        return selected
 
     @mcp.tool()
     async def get_shipped_events(

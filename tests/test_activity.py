@@ -396,6 +396,40 @@ async def test_get_activity_signal_keeps_substantive_rows_visible_under_noise(
     assert signal[1]["project_name"] == "evals"
 
 
+async def test_get_activity_signal_bounds_raw_horizon_and_reports_truncation(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BDB-DS-083-R1: response limits also bound raw lifecycle work."""
+    monkeypatch.setattr(mod, "ACTIVITY_SIGNAL_RAW_SCAN_ROWS", 3)
+    for hour in range(5):
+        await insert_activity_row(
+            db,
+            source="cc",
+            timestamp=f"2026-06-19T{hour:02d}:00:00Z",
+            project_name=f"project-{hour}",
+            summary="CC session ended",
+            tags=["session-boundary", "LEDGER"],
+        )
+    await db.commit()
+
+    signal = await fns["get_activity_signal"](limit=2, ctx=make_ctx(db))
+
+    notice = signal[0]
+    assert notice == {
+        "kind": "lifecycle_scan_truncated",
+        "scanned_rows": 3,
+        "raw_scan_limit": 3,
+        "message": "Lifecycle aggregates cover only the bounded newest-row horizon",
+    }
+    aggregates = [entry for entry in signal[1:] if entry["kind"] == "lifecycle_aggregate"]
+    assert [entry["project_name"] for entry in aggregates] == [
+        "project-4",
+        "project-3",
+    ]
+
+
 async def test_get_activity_signal_reserves_substantive_row_when_lifecycle_buckets_exceed_limit(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:

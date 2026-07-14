@@ -17,7 +17,7 @@ from bridge_db import config
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 # A migration post-hook runs after its DDL, before the version bump+commit
 # (e.g. FTS repopulation). Its return value is ignored.
@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS activity_log (
 
 CREATE INDEX IF NOT EXISTS idx_activity_source ON activity_log(source);
 CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_log(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_activity_created_id ON activity_log(created_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS system_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -585,6 +586,11 @@ CREATE TABLE IF NOT EXISTS bridge_import_receipts (
 );
 """
 
+_MIGRATION_V19_TO_V20 = """
+CREATE INDEX IF NOT EXISTS idx_activity_created_id
+ON activity_log(created_at DESC, id DESC);
+"""
+
 # Column definitions for the v14 ADD COLUMN step. Kept character-identical to the
 # activity_log block in _SCHEMA_DDL so a fresh install and a migrated DB converge
 # (see tests/test_schema_convergence_concurrency.py). NOTE: the synced/policy
@@ -838,6 +844,7 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         (17, _MIGRATION_V16_TO_V17, None),
         (18, _MIGRATION_V17_TO_V18, None),
         (19, _MIGRATION_V18_TO_V19, None),
+        (20, _MIGRATION_V19_TO_V20, None),
     ]
     for target, ddl, post_hook in migrations:
         if current_version >= target:
