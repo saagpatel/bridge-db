@@ -1412,7 +1412,7 @@ async def test_record_disposition_synced_auto_export_records_context_export_stat
     assert export_state["exported_content_sha256"]
 
 
-async def test_record_disposition_synced_is_idempotent_and_refreshes_proof(
+async def test_record_disposition_synced_is_idempotent_and_immutable(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
     ctx = make_ctx(db, principal="codex")
@@ -1430,36 +1430,53 @@ async def test_record_disposition_synced_is_idempotent_and_refreshes_proof(
         disposition="synced",
         downstream_system="notion",
         downstream_ref="page-1",
+        notes="original proof",
         ctx=ctx,
     )
-    second = await fns["record_disposition"](
+    cursor = await db.execute(
+        "SELECT sync_disposition, sync_disposition_by, synced_at, "
+        "sync_downstream_system, sync_downstream_ref, sync_note, tags "
+        "FROM activity_log WHERE id = ?",
+        (activity_id,),
+    )
+    original = await cursor.fetchone()
+    assert original is not None
+
+    replay = await fns["record_disposition"](
         caller="codex",
         activity_id=activity_id,
         disposition="synced",
         downstream_system="notion",
-        downstream_ref="page-2",
+        downstream_ref="page-1",
+        notes="original proof",
         ctx=ctx,
     )
 
+    with pytest.raises(ToolError, match="immutable downstream sync proof"):
+        await fns["record_disposition"](
+            caller="codex",
+            activity_id=activity_id,
+            disposition="synced",
+            downstream_system="notion",
+            downstream_ref="page-2",
+            notes="replacement proof",
+            ctx=ctx,
+        )
+
     assert first["processed_added"] is True
-    assert second["processed_added"] is False
+    assert replay["processed_added"] is False
 
     cursor = await db.execute(
-        "SELECT sync_downstream_ref, sync_disposition FROM activity_log WHERE id = ?",
+        "SELECT sync_disposition, sync_disposition_by, synced_at, "
+        "sync_downstream_system, sync_downstream_ref, sync_note, tags "
+        "FROM activity_log WHERE id = ?",
         (activity_id,),
     )
     stored = await cursor.fetchone()
     assert stored is not None
-    assert stored["sync_disposition"] == "synced"
-    assert stored["sync_downstream_ref"] == "page-2"
-
-    # The second synced call must not append a duplicate PROCESSED tag.
-    cursor = await db.execute(
-        "SELECT tags FROM activity_log WHERE id = ?", (activity_id,)
-    )
-    tag_row = await cursor.fetchone()
-    assert tag_row is not None
-    assert json.loads(tag_row["tags"]).count("PROCESSED") == 1
+    assert tuple(stored) == tuple(original)
+    assert stored["sync_downstream_ref"] == "page-1"
+    assert json.loads(stored["tags"]).count("PROCESSED") == 1
 
 
 async def test_log_activity_prunes_to_retention_limit(

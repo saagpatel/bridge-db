@@ -832,7 +832,8 @@ def register(mcp: FastMCP) -> None:
         Guarantees carried over from the trio: a SHIPPED row can never be marked
         resolved without either downstream proof or an explicit reasoned policy
         decision, and a row that already carries downstream proof ('synced')
-        cannot be downgraded to a policy disposition. The legacy non-shipped
+        cannot be downgraded or replaced. An exact replay of its canonical
+        receipt is a no-op. The legacy non-shipped
         PROCESSED-marking path (mark_shipped_processed) is retired; this tool is
         SHIPPED-only.
         """
@@ -851,6 +852,38 @@ def register(mcp: FastMCP) -> None:
         clean_policy_ref = policy_ref.strip() if policy_ref is not None else None
         clean_notes = notes.strip() if notes is not None else None
 
+        def same_synced_receipt(receipt: Any) -> bool:
+            return (
+                receipt["sync_disposition"] == _SYNCED_DISPOSITION
+                and receipt["sync_disposition_by"] == caller
+                and receipt["sync_downstream_system"] == clean_system
+                and receipt["sync_downstream_ref"] == clean_ref
+                and receipt["sync_note"] == clean_notes
+            )
+
+        def idempotent_synced_result(project_name: str) -> dict[str, Any]:
+            log_audit(
+                "record_disposition",
+                caller,
+                project_name,
+                ok=True,
+                detail=(
+                    f"activity_id={activity_id} disposition=synced "
+                    "decision=idempotent_noop"
+                ),
+            )
+            return {
+                "ok": True,
+                "activity_id": activity_id,
+                "project_name": project_name,
+                "disposition": choice,
+                "decided_by": caller,
+                "processed_added": False,
+                "downstream_system": clean_system,
+                "downstream_ref": clean_ref,
+                "policy_ref": None,
+            }
+
         if is_synced:
             if not clean_system:
                 raise ToolError(
@@ -865,8 +898,9 @@ def register(mcp: FastMCP) -> None:
 
         db = get_db(ctx)
         cursor = await db.execute(
-            "SELECT source, tags, project_name, sync_disposition, sync_reason, "
-            "sync_policy_ref "
+            "SELECT source, tags, project_name, sync_disposition, "
+            "sync_disposition_by, sync_downstream_system, sync_downstream_ref, "
+            "sync_reason, sync_policy_ref, sync_note "
             "FROM activity_log WHERE id = ?",
             (activity_id,),
         )
@@ -901,6 +935,25 @@ def register(mcp: FastMCP) -> None:
             )
 
         current_disposition = row["sync_disposition"]
+        if is_synced and current_disposition == _SYNCED_DISPOSITION:
+            if not same_synced_receipt(row):
+                log_audit(
+                    "record_disposition",
+                    caller,
+                    row["project_name"],
+                    ok=False,
+                    detail=(
+                        f"activity_id={activity_id} disposition=synced "
+                        "decision=refused reason=immutable_synced_receipt"
+                    ),
+                )
+                raise ToolError(
+                    f"Activity entry {activity_id} already has immutable downstream "
+                    "sync proof; a different synced receipt cannot replace it"
+                )
+
+            return idempotent_synced_result(row["project_name"])
+
         if not is_synced and current_disposition == _SYNCED_DISPOSITION:
             raise ToolError(
                 f"Activity entry {activity_id} already has downstream sync proof "
@@ -936,7 +989,7 @@ def register(mcp: FastMCP) -> None:
         # synced_at holds the receipt sync time for 'synced' and the decision
         # time for a policy disposition. SQL strftime is the seam-approved clock
         # source for DB-side timestamps (clock.py docstring, Phase 1).
-        await db.execute(
+        disposition_cursor = await db.execute(
             """
             UPDATE activity_log SET
                 sync_disposition = ?,
@@ -948,6 +1001,7 @@ def register(mcp: FastMCP) -> None:
                 sync_reason = ?,
                 sync_note = ?
             WHERE id = ?
+              AND (? = 0 OR sync_disposition IS NULL OR sync_disposition != 'synced')
             """,
             (
                 choice,
@@ -958,8 +1012,37 @@ def register(mcp: FastMCP) -> None:
                 None if is_synced else clean_reason,
                 note_value,
                 activity_id,
+                int(is_synced),
             ),
         )
+        if is_synced and disposition_cursor.rowcount != 1:
+            # A competing first receipt won after this call's SELECT. Roll back
+            # the staged tag/FTS work, then accept only an exact replay of that
+            # now-canonical proof.
+            await db.rollback()
+            cursor = await db.execute(
+                "SELECT sync_disposition, sync_disposition_by, "
+                "sync_downstream_system, sync_downstream_ref, sync_note "
+                "FROM activity_log WHERE id = ?",
+                (activity_id,),
+            )
+            latest = await cursor.fetchone()
+            if latest is not None and same_synced_receipt(latest):
+                return idempotent_synced_result(row["project_name"])
+            log_audit(
+                "record_disposition",
+                caller,
+                row["project_name"],
+                ok=False,
+                detail=(
+                    f"activity_id={activity_id} disposition=synced "
+                    "decision=refused reason=immutable_synced_receipt_race"
+                ),
+            )
+            raise ToolError(
+                f"Activity entry {activity_id} already has immutable downstream "
+                "sync proof; a different synced receipt cannot replace it"
+            )
         await db.commit()
 
         if is_synced:
