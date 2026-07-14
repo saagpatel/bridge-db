@@ -459,9 +459,29 @@ async def test_status_freshness_reports_fresh_snapshots(
         "latest_snapshot_date": "2026-07-07",
         "latest_created_at": "2026-07-07T11:00:00Z",
         "age_hours": 1.0,
+        "superseding_activity_id": None,
         "next_action": "none",
     }
     assert result["freshness"]["snapshots"]["codex"]["state"] == "fresh"
+
+
+async def test_status_marks_snapshot_superseded_by_newer_same_source_activity(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _make_status_health_ready(tmp_path, monkeypatch)
+    await _seed_snapshot(db, "cc", "2026-07-07", "2026-07-07T10:00:00Z")
+    await _seed_snapshot(db, "codex", "2026-07-07", "2026-07-07T11:00:00Z")
+    activity_id = await _seed_activity(db, "cc", "2026-07-07T11:30:00Z")
+    await db.commit()
+
+    result = await mod.collect_status_summary(db, now=FIXED_NOW)
+
+    cc = result["freshness"]["snapshots"]["cc"]
+    assert cc["state"] == "superseded"
+    assert cc["superseding_activity_id"] == activity_id
+    assert cc["next_action"] == "cc_refresh_snapshot"
+    assert result["storage_health"] == "healthy"
+    assert result["operating_state"] == "stale"
 
 
 async def test_status_freshness_reports_stale_snapshots_without_degrading_health(
@@ -476,6 +496,8 @@ async def test_status_freshness_reports_stale_snapshots_without_degrading_health
 
     assert result["ok"] is True
     assert result["overall"] == "healthy"
+    assert result["storage_health"] == "healthy"
+    assert result["operating_state"] == "stale"
     assert result["freshness"]["overall"] == "stale"
     assert result["freshness"]["snapshots"]["cc"]["state"] == "stale"
     assert result["freshness"]["snapshots"]["cc"]["age_hours"] == 73.0
@@ -682,11 +704,15 @@ async def test_status_freshness_preserves_existing_keys_and_top_level_health(
         "pending_handoffs_by_trust",
         "ok",
         "overall",
+        "storage_health",
+        "operating_state",
         "freshness",
     ):
         assert key in result
     assert result["ok"] is True
     assert result["overall"] == "healthy"
+    assert result["storage_health"] == "healthy"
+    assert result["operating_state"] == "stale"
     assert result["freshness"]["overall"] == "stale"
 
 

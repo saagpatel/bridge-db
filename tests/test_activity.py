@@ -541,6 +541,8 @@ async def test_get_shipped_events(
     assert shipped[0]["project_name"] == "A"
     assert "SHIPPED" in shipped[0]["tags"]
     assert shipped[0]["sync_receipt"] is None
+    assert shipped[0]["delivery_state"]["state"] == "unknown"
+    assert shipped[0]["delivery_state"]["dimensions"]["merged"] == "unknown"
 
 
 async def test_get_shipped_events_since_includes_recently_created_prior_date(
@@ -660,6 +662,16 @@ async def test_get_shipped_events_includes_notion_sync_contract(
         "notion_page_id": "page-ready",
         "notion_title": "Ready Project",
     }
+    assert (
+        by_name["ready-project"]["delivery_state"]["state"]
+        == "downstream_sync_pending"
+    )
+    assert (
+        by_name["ready-project"]["delivery_state"]["dimensions"][
+            "downstream_sync_pending"
+        ]
+        is True
+    )
     assert by_name["mapped-without-page"]["notion_sync"]["state"] == "no_notion_target"
     assert by_name["mapped-without-page"]["notion_sync"]["canonical_key"] is None
     assert by_name["missing-project"]["notion_sync"]["state"] == "unmatched"

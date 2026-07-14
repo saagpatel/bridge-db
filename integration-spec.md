@@ -172,6 +172,13 @@ any row with a `sync_disposition`.
 first) alongside `since` and `unprocessed_only`, so a client passing its own
 `limit` is now honored instead of silently ignored.
 
+Each returned shipped event includes `delivery_state`. The state is limited to
+bridge-owned receipt facts: `downstream_sync_pending`, `downstream_synced`,
+`policy_dispositioned`, or `unknown`. Its dimensions deliberately leave local
+completion, commit, push, merge, default-branch, deploy, and production
+readback as `unknown`; consumers must not infer those outcomes from a bridge
+sync receipt.
+
 `record_disposition` replaces the former `confirm_shipped_sync` /
 `record_shipped_event_disposition` / `mark_shipped_processed` trio. It is
 SHIPPED-only; the legacy non-shipped `PROCESSED`-marking path is retired. A

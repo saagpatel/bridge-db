@@ -315,7 +315,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
 
 
 def _snapshot_next_action(owner: str, state: str) -> str:
-    if state in {"stale", "missing", "unknown"}:
+    if state in {"stale", "superseded", "missing", "unknown"}:
         return f"{owner}_refresh_snapshot"
     return "none"
 
@@ -332,10 +332,33 @@ async def _snapshot_freshness(db: Any, now: datetime) -> dict[str, dict[str, Any
         latest_snapshot_date = row["snapshot_date"] if row else "none"
         latest_created_at = row["created_at"] if row else "none"
         age = _age_hours(row["created_at"], now) if row else None
+        latest_activity_cursor = await db.execute(
+            "SELECT id, created_at FROM activity_log WHERE source = ? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (system,),
+        )
+        latest_activity = await latest_activity_cursor.fetchone()
+        superseding_activity_id = None
+        activity_created_at = (
+            _parse_utc_timestamp(latest_activity["created_at"])
+            if latest_activity is not None
+            else None
+        )
+        snapshot_created_at = (
+            _parse_utc_timestamp(row["created_at"]) if row is not None else None
+        )
         if row is None:
             state = "missing"
         elif age is None:
             state = "unknown"
+        elif (
+            latest_activity is not None
+            and activity_created_at is not None
+            and snapshot_created_at is not None
+            and activity_created_at > snapshot_created_at
+        ):
+            state = "superseded"
+            superseding_activity_id = latest_activity["id"]
         elif age > SNAPSHOT_STALE_AFTER_HOURS:
             state = "stale"
         else:
@@ -346,6 +369,7 @@ async def _snapshot_freshness(db: Any, now: datetime) -> dict[str, dict[str, Any
             "latest_snapshot_date": latest_snapshot_date,
             "latest_created_at": latest_created_at,
             "age_hours": age,
+            "superseding_activity_id": superseding_activity_id,
             "next_action": _snapshot_next_action(system, state),
         }
     return snapshots
@@ -488,7 +512,7 @@ def _freshness_next_actions(
         )
     for owner in _SNAPSHOT_SYSTEMS:
         snapshot = snapshots[owner]
-        if snapshot["state"] in {"stale", "missing", "unknown"}:
+        if snapshot["state"] in {"stale", "superseded", "missing", "unknown"}:
             actions.append(
                 {
                     "action": snapshot["next_action"],
@@ -519,7 +543,10 @@ def _freshness_overall(
     handoffs: dict[str, Any],
     shipped_events: dict[str, Any],
 ) -> str:
-    if any(snapshot["state"] == "stale" for snapshot in snapshots.values()):
+    if any(
+        snapshot["state"] in {"stale", "superseded"}
+        for snapshot in snapshots.values()
+    ):
         return "stale"
     if handoffs["stale_pending_count"] or handoffs["stale_active_count"]:
         return "stale"
@@ -616,9 +643,14 @@ async def collect_status_summary(
     if bridge_age_seconds is not None:
         bridge_age_human = f"{bridge_age_seconds / 3600:.1f}h old"
 
+    freshness = await _collect_freshness_block(db, health, fixed_now)
+    storage_health = "healthy" if health["ok"] else "degraded"
+    operating_state = freshness["overall"]
     return {
         "ok": health["ok"],
-        "overall": "healthy" if health["ok"] else "degraded",
+        "overall": storage_health,
+        "storage_health": storage_health,
+        "operating_state": operating_state,
         "db": {
             "path": health["db_path"],
             "exists": health["db_exists"],
@@ -660,7 +692,7 @@ async def collect_status_summary(
         "latest_snapshots": latest_snapshots,
         "latest_activity": latest_activity,
         "latest_activity_json": json.dumps(latest_activity, sort_keys=True),
-        "freshness": await _collect_freshness_block(db, health, fixed_now),
+        "freshness": freshness,
     }
 
 

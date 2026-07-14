@@ -160,13 +160,21 @@ args = ["run", "--directory", "/path/to/bridge-db", "python", "-m", "bridge_db"]
 - Session boundary logging: Claude Code's SessionEnd hook should call `uv run --directory /path/to/bridge-db python -m bridge_db --log-session-boundary <project>` rather than writing SQLite directly; this path adds the FTS row and does not run activity retention pruning
 - Migration: `uv run python -m bridge_db.migration` (idempotent — safe to re-run)
 
-The MCP `status` result enriches the compact summary with `freshness`:
+The MCP `status` result separates storage integrity from operating freshness:
+
+- `overall` and `storage_health`: `healthy` or `degraded`, based only on DB,
+  schema, fallback-file, and FTS integrity. `overall` remains the compatibility
+  alias for existing consumers.
+- `operating_state`: `fresh`, `attention`, `stale`, or `unknown`, derived from
+  the `freshness` block without changing command success semantics.
+- `freshness`: the detailed operating-truth block described below.
 
 - `thresholds_hours`: `snapshot_stale_after=48.0`, `activity_quiet_after=72.0`,
   `pending_handoff_stale_after=168.0`, and
   `active_handoff_stale_after=72.0`.
 - `snapshots`: per-owner `cc` and `codex` entries with `state`, `owner`,
-  `latest_snapshot_date`, `latest_created_at`, `age_hours`, and `next_action`.
+  `latest_snapshot_date`, `latest_created_at`, `age_hours`,
+  `superseding_activity_id`, and `next_action`.
   Snapshot refresh actions stay owner-specific: `cc_refresh_snapshot` belongs
   to `cc`; `codex_refresh_snapshot` belongs to `codex`.
 - `activity_sources`: `cc`, `codex`, `claude_ai`, `notion_os`, and
@@ -181,13 +189,16 @@ The MCP `status` result enriches the compact summary with `freshness`:
 
 Freshness states use a narrow vocabulary: `fresh` means recent enough for that
 surface; `quiet` means an activity source has no recent rows and is not a
-health failure; `stale` means a snapshot or handoff needs refresh/review;
+health failure; `superseded` means newer owner activity exists after the latest
+snapshot; `stale` means an aged snapshot or handoff needs refresh/review;
 `missing` means the expected owner row is absent; and `unknown` means a missing
 or unparsable timestamp prevents age calculation.
 
 The CLI status command prints freshness as compact hints:
 
 ```text
+  Storage health: <healthy|degraded>
+  Operating state: <fresh|attention|stale|unknown>
   Freshness: <overall>
   Next actions: <action> (<owner>), ...
 ```
@@ -243,6 +254,11 @@ machine-readable gate:
   pointing to the configured policy file after verifying the policy applies.
 - `unmatched`, `no_notion_target`, or `registry_unavailable`: leave the event
   unprocessed and repair the project registry or mapping source first.
+
+Each shipped event also carries a `delivery_state` object. It reports only
+receipt-backed bridge facts (`downstream_sync_pending`, `downstream_synced`, or
+`policy_dispositioned`); Git, merge, default-branch, deploy, and production
+readback dimensions remain `unknown` unless another authority proves them.
 
 For non-receipt handling, use `record_disposition` with a policy `disposition`
 (`unsynced_by_policy` / `no_durable_target` / `superseded_without_receipt` /
