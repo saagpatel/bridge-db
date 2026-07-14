@@ -1,9 +1,9 @@
-"""Recall tool: lexical search across content_index (FTS5), plus JSONL query log."""
+"""Recall tool: lexical search across content_index plus minimized telemetry."""
 
 import json
 import logging
 import re
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import timedelta
 from typing import Annotated, Any, Literal, cast
 
@@ -23,7 +23,8 @@ _VALID_SCOPES: frozenset[str] = frozenset(
     {"all", "section", "activity", "snapshot", "handoff"}
 )
 
-# Append-only JSONL log of recall queries, co-located with the audit log.
+# Append-only JSONL recall telemetry, co-located with the audit log.
+# Raw query text is deliberately excluded from this operational record.
 # Used during the Phase -1 dogfood week to decide whether the vector layer
 # is worth building.
 RECALL_LOG_PATH = config.AUDIT_LOG_PATH.parent / "recall_query_log.jsonl"
@@ -102,13 +103,13 @@ def _match_candidates(tokens: list[str]) -> list[str]:
 
 
 def _log_recall(
-    query: str, scope: str, limit: int, n_results: int, caller: str | None
+    *, query_empty: bool, scope: str, limit: int, n_results: int, caller: str | None
 ) -> None:
-    """Append one line to the recall query log. Never raises."""
+    """Append minimized recall telemetry without retaining query text."""
     try:
         event: dict[str, Any] = {
             "ts": clock.now().isoformat().replace("+00:00", "Z"),
-            "query": query,
+            "query_empty": query_empty,
             "scope": scope,
             "limit": limit,
             "n_results": n_results,
@@ -129,8 +130,6 @@ def collect_recall_stats(days: int = 7) -> dict[str, Any]:
     misses = 0
     empty = 0
     scope_counter: Counter[str] = Counter()
-    query_counts: Counter[str] = Counter()
-    query_result_sums: dict[str, int] = defaultdict(int)
     caller_counts: Counter[str] = Counter()
     caller_misses: Counter[str] = Counter()
 
@@ -144,12 +143,15 @@ def collect_recall_stats(days: int = 7) -> dict[str, Any]:
             n_results = 0
         if n_results == 0:
             misses += 1
-        query = record.get("query", "")
-        if not isinstance(query, str) or not query.strip():
+        query_empty = record.get("query_empty")
+        if query_empty is True:
             empty += 1
-        else:
-            query_counts[query] += 1
-            query_result_sums[query] += n_results
+        elif query_empty is None:
+            # Legacy records may contain raw query text. Use it only to preserve
+            # the aggregate empty count; never retain, group, or return it.
+            legacy_query = record.get("query")
+            if not isinstance(legacy_query, str) or not legacy_query.strip():
+                empty += 1
         scope = record.get("scope")
         if isinstance(scope, str):
             scope_counter[scope] += 1
@@ -160,15 +162,6 @@ def collect_recall_stats(days: int = 7) -> dict[str, Any]:
         caller_counts[caller] += 1
         if n_results == 0:
             caller_misses[caller] += 1
-
-    top_queries = [
-        {
-            "query": q,
-            "count": c,
-            "avg_results": round(query_result_sums[q] / c, 2),
-        }
-        for q, c in query_counts.most_common(10)
-    ]
 
     miss_rate = round(misses / total, 4) if total else 0.0
 
@@ -185,7 +178,10 @@ def collect_recall_stats(days: int = 7) -> dict[str, Any]:
         "total_queries": total,
         "miss_rate": miss_rate,
         "empty_query_count": empty,
-        "top_queries": top_queries,
+        # Compatibility key retained so existing consumers do not fail while
+        # raw query collection and cross-client redisclosure remain disabled.
+        "top_queries": [],
+        "query_text_collection": "disabled",
         "scope_breakdown": dict(scope_counter),
         "caller_breakdown": caller_breakdown,
     }
@@ -284,7 +280,13 @@ def register(mcp: FastMCP) -> None:
         tokens = _tokens_for_match(query)
 
         if not tokens:
-            _log_recall(query, scope, clamped_limit, 0, caller)
+            _log_recall(
+                query_empty=not query.strip(),
+                scope=scope,
+                limit=clamped_limit,
+                n_results=0,
+                caller=caller,
+            )
             return []
 
         db = get_db(ctx)
@@ -335,7 +337,13 @@ def register(mcp: FastMCP) -> None:
                 }
             )
 
-        _log_recall(query, scope, clamped_limit, len(results), caller)
+        _log_recall(
+            query_empty=not query.strip(),
+            scope=scope,
+            limit=clamped_limit,
+            n_results=len(results),
+            caller=caller,
+        )
         return results
 
     @mcp.tool()
@@ -347,8 +355,8 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """Roll-up analytics over recall_query_log.jsonl for the last `days` days.
 
-        Answers "is recall earning its keep?" — returns total volume, miss rate,
-        top queries by count, and per-scope usage. Empty-string queries are
-        counted separately so they don't distort the top-queries ranking.
+        Answers "is recall earning its keep?" with non-sensitive aggregate
+        volume, miss-rate, scope, and caller metrics. Raw query text is neither
+        collected nor returned; the compatibility `top_queries` key is empty.
         """
         return collect_recall_stats(days)

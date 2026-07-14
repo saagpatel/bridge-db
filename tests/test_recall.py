@@ -85,7 +85,8 @@ async def test_recall_happy_path(
     log_lines = (tmp_path / "recall.jsonl").read_text().splitlines()
     assert len(log_lines) == 1
     entry = json.loads(log_lines[0])
-    assert entry["query"] == "bridge-db"
+    assert "query" not in entry
+    assert entry["query_empty"] is False
     assert entry["n_results"] == len(results)
 
 
@@ -156,6 +157,35 @@ async def test_recall_empty_result(
     assert results == []
     entry = json.loads((tmp_path / "recall.jsonl").read_text().splitlines()[0])
     assert entry["n_results"] == 0
+
+
+async def test_recall_telemetry_never_persists_or_rediscloses_raw_query(
+    capture: CaptureMCP, db: Any, tmp_path: Any, monkeypatch: Any
+) -> None:
+    """BDB-DS-023-R1: transient query text never becomes shared telemetry."""
+    log_path = tmp_path / "recall.jsonl"
+    monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", log_path)
+    sentinel = "sentinel-private-query-material"
+
+    await capture.fns["recall"](
+        query=sentinel,
+        limit=10,
+        scope="all",
+        caller="cc",
+        ctx=make_ctx(db, principal="cc"),
+    )
+
+    stored = log_path.read_text(encoding="utf-8")
+    assert sentinel not in stored
+    event = json.loads(stored)
+    assert "query" not in event
+    assert event["scope"] == "all"
+    assert event["caller"] == "cc"
+
+    stats = await capture.fns["recall_stats"](days=7)
+    assert sentinel not in json.dumps(stats)
+    assert stats["total_queries"] == 1
+    assert stats["miss_rate"] == 1.0
 
 
 async def test_recall_scope_filter(
@@ -281,13 +311,10 @@ async def test_recall_stats_aggregates_counts_and_miss_rate(
     assert result["total_queries"] == 5
     # 3 of 5 queries had 0 results
     assert result["miss_rate"] == 0.6
-    # Top query by count is "bridge-db" (2) or "handoff" (2); both present
-    top_map = {t["query"]: t for t in result["top_queries"]}
-    assert top_map["bridge-db"]["count"] == 2
-    assert top_map["bridge-db"]["avg_results"] == 4.0
-    assert top_map["handoff"]["count"] == 2
-    assert top_map["handoff"]["avg_results"] == 0.0
-    assert top_map["nothing"]["count"] == 1
+    # Legacy raw strings are never copied into the shared response.
+    assert result["top_queries"] == []
+    assert result["query_text_collection"] == "disabled"
+    assert "bridge-db" not in json.dumps(result)
     assert result["scope_breakdown"] == {"all": 3, "handoff": 2}
 
 
@@ -312,9 +339,8 @@ async def test_recall_stats_separates_empty_queries(
     result = await capture.fns["recall_stats"](days=7)
     assert result["total_queries"] == 3
     assert result["empty_query_count"] == 2
-    # Empty queries excluded from top_queries
-    top_queries = [t["query"] for t in result["top_queries"]]
-    assert top_queries == ["real"]
+    assert result["top_queries"] == []
+    assert "real" not in json.dumps(result)
 
 
 async def test_recall_stats_respects_time_window(
@@ -339,10 +365,11 @@ async def test_recall_stats_respects_time_window(
 
     result = await capture.fns["recall_stats"](days=7)
     assert result["total_queries"] == 1
-    assert [t["query"] for t in result["top_queries"]] == ["new"]
+    assert result["top_queries"] == []
+    assert "new" not in json.dumps(result)
 
 
-async def test_recall_stats_top_queries_capped_at_ten(
+async def test_recall_stats_disables_legacy_top_query_output(
     capture: CaptureMCP, tmp_path: Any, monkeypatch: Any
 ) -> None:
     log_path = tmp_path / "recall.jsonl"
@@ -362,7 +389,7 @@ async def test_recall_stats_top_queries_capped_at_ten(
 
     result = await capture.fns["recall_stats"](days=7)
     assert result["total_queries"] == 12
-    assert len(result["top_queries"]) == 10
+    assert result["top_queries"] == []
 
 
 async def test_recall_or_semantics_returns_partial_matches(
