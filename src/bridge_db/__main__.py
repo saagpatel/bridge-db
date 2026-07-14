@@ -105,6 +105,7 @@ async def run_status(*, now: datetime | None = None) -> bool:
 
     print("bridge-db status")
     print(f"  Storage health: {summary['storage_health']}")
+    print(f"  Projection health: {summary['projection_health']}")
     print(f"  Operating state: {summary['operating_state']}")
     print(
         "  DB:"
@@ -245,6 +246,7 @@ async def run_dogfood() -> bool:
 
     print("bridge-db dogfood")
     print(f"  Storage health: {summary['storage_health']}")
+    print(f"  Projection health: {summary['projection_health']}")
     print(f"  Operating state: {summary['operating_state']}")
     print(
         "  Signals:"

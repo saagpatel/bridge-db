@@ -31,8 +31,11 @@ def fns(db: aiosqlite.Connection) -> dict[str, Any]:
 
 @pytest.fixture(autouse=True)
 def patch_db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point DB_PATH at the test DB so db_exists reflects reality."""
+    """Point health filesystem inputs at isolated deterministic fixtures."""
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+    bridge = tmp_path / "bridge.md"
+    bridge.write_text("# BridgeDB\n", encoding="utf-8")
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge)
 
 
 async def test_health_returns_ok_on_healthy_db(
@@ -307,7 +310,9 @@ async def test_status_returns_compact_operator_summary(
 ) -> None:
     (tmp_path / "test.db").touch()
     bridge = tmp_path / "bridge.md"
-    bridge.write_text("# test", encoding="utf-8")
+    bridge.write_text(
+        "## Career & Professional Target\nCareer notes\n", encoding="utf-8"
+    )
     monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge)
 
     await db.execute(
@@ -874,6 +879,12 @@ async def _seed_claude_ai_section(
         "INSERT INTO context_sections (section_name, owner, content) VALUES (?, 'claude_ai', ?)",
         (section_name, content),
     )
+    await upsert_fts_entry(
+        db,
+        "section",
+        section_name,
+        fts_text_for_section(section_name, content),
+    )
     await db.commit()
 
 
@@ -892,7 +903,9 @@ async def test_claude_ai_section_drift_in_sync(
     drift = result["claude_ai_section_drift"]
     assert drift["checked"] is True
     assert drift["in_sync"] is True
+    assert drift["state"] == "current"
     assert drift["drifted_sections"] == []
+    assert result["projection_health"] == "current"
 
 
 async def test_claude_ai_section_drift_preserves_nested_h2_headings(
@@ -935,12 +948,18 @@ async def test_claude_ai_section_drift_detects_mismatch(
     drift = result["claude_ai_section_drift"]
     assert drift["checked"] is True
     assert drift["in_sync"] is False
+    assert drift["state"] == "drift"
     assert drift["drifted_sections"] == ["career"]
 
     status = await fns["status"](ctx=make_ctx(db))
     assert status["signals"]["claude_ai_unsynced_sections"] == 1
-    # Advisory only — drift must not flip overall health.
-    assert result["ok"] == status["ok"]
+    assert result["storage_ok"] is True
+    assert result["projection_health"] == "drift"
+    assert result["ok"] is False
+    assert status["ok"] is False
+    assert status["overall"] == "degraded"
+    assert status["storage_health"] == "healthy"
+    assert status["projection_health"] == "drift"
 
 
 async def test_claude_ai_section_drift_no_file(
@@ -953,8 +972,41 @@ async def test_claude_ai_section_drift_no_file(
     result = await fns["health"](ctx=make_ctx(db))
     drift = result["claude_ai_section_drift"]
     assert drift["checked"] is False
-    assert drift["in_sync"] is True
+    assert drift["in_sync"] is None
+    assert drift["state"] == "missing"
     assert drift["drifted_sections"] == []
+
+
+async def test_claude_ai_section_drift_unreadable_is_unknown_and_non_green(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = tmp_path / "bridge.md"
+    bridge.write_text("## Career & Professional Target\ncontent\n", encoding="utf-8")
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge)
+    original_read_text = Path.read_text
+
+    def fail_bridge_read(path: Path, *args: Any, **kwargs: Any) -> str:
+        if path == bridge:
+            raise PermissionError("synthetic unreadable bridge")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_bridge_read)
+
+    result = await fns["health"](ctx=make_ctx(db))
+    drift = result["claude_ai_section_drift"]
+    assert drift == {
+        "checked": False,
+        "in_sync": None,
+        "state": "unreadable",
+        "reason": "read_error",
+        "drifted_sections": [],
+    }
+    assert result["storage_ok"] is True
+    assert result["projection_health"] == "unreadable"
+    assert result["ok"] is False
 
 
 async def test_health_reports_auth_block(

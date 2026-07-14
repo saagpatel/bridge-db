@@ -85,39 +85,42 @@ async def _source_trust_breakdown(db: Any) -> dict[str, dict[str, int]]:
     return breakdown
 
 
-def _read_bridge_claude_ai_sections() -> dict[str, str] | None:
+def _read_bridge_claude_ai_sections() -> tuple[str, dict[str, str] | None]:
     """Parse the exported bridge file's claude_ai-owned sections the same way
     ``sync_from_file`` reads them. Returns ``{section_name: body}`` (only non-empty
-    sections), or ``None`` when the file is absent/unreadable."""
+    sections) together with ``readable``, ``missing``, or ``unreadable``."""
     path = config.BRIDGE_FILE_PATH
     if not path.exists():
-        return None
+        return "missing", None
     try:
         content = path.read_text(encoding="utf-8")
     except OSError:
-        return None
+        return "unreadable", None
     headings = extract_sections(content, allowed_headings=BRIDGE_SECTION_HEADINGS)
     sections: dict[str, str] = {}
     for heading, section_name in SECTION_MAP.items():
         body = headings.get(heading, "").strip()
         if body:
             sections[section_name] = body
-    return sections
+    return "readable", sections
 
 
 async def collect_claude_ai_section_drift(db: Any) -> dict[str, Any]:
     """Detect when the exported bridge file's claude_ai sections disagree with the
     DB projection (F8 clobber-race monitor).
 
-    A mismatch means either unsynced inbound Claude.ai file edits at risk of being
-    overwritten by the next ``export_bridge_markdown``, or a stale export — both
-    actionable (run ``sync_from_file`` or re-export). Advisory only: this is a
-    latent-risk signal and is intentionally NOT folded into ``ok`` so it can't flap
-    during the normal window between a DB write and the next export.
+    A mismatch means either unsynced inbound Claude.ai file edits or a stale
+    export. Missing and unreadable states remain distinct and never claim sync.
     """
-    file_sections = _read_bridge_claude_ai_sections()
-    if file_sections is None:
-        return {"checked": False, "in_sync": True, "drifted_sections": []}
+    read_state, file_sections = _read_bridge_claude_ai_sections()
+    if read_state != "readable" or file_sections is None:
+        return {
+            "checked": False,
+            "in_sync": None,
+            "state": read_state,
+            "reason": "not_found" if read_state == "missing" else "read_error",
+            "drifted_sections": [],
+        }
 
     cursor = await db.execute(
         "SELECT section_name, content FROM context_sections WHERE owner = 'claude_ai'"
@@ -130,7 +133,13 @@ async def collect_claude_ai_section_drift(db: Any) -> dict[str, Any]:
         for name in set(db_sections) | set(file_sections)
         if db_sections.get(name, "") != file_sections.get(name, "")
     )
-    return {"checked": True, "in_sync": not drifted, "drifted_sections": drifted}
+    return {
+        "checked": True,
+        "in_sync": not drifted,
+        "state": "drift" if drifted else "current",
+        "reason": None,
+        "drifted_sections": drifted,
+    }
 
 
 async def collect_health_metrics(db: Any) -> dict[str, Any]:
@@ -275,16 +284,21 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     claude_ai_section_drift = await collect_claude_ai_section_drift(db)
     source_trust_breakdown = await _source_trust_breakdown(db)
 
-    # WAL size and claude_ai section drift are soft signals — do not fold into `ok`.
-    ok = (
+    # Keep structural storage health separate from cross-store projection
+    # integrity. Generic readiness is green only when both are proven current.
+    storage_ok = (
         db_exists
         and schema_version == SCHEMA_VERSION
         and bridge_file_exists
         and fts_index["ok"]
     )
+    projection_health = claude_ai_section_drift["state"]
+    ok = storage_ok and projection_health == "current"
 
     return {
         "ok": ok,
+        "storage_ok": storage_ok,
+        "projection_health": projection_health,
         "db_path": str(db_path),
         "db_exists": db_exists,
         "schema_version": schema_version,
@@ -644,12 +658,15 @@ async def collect_status_summary(
         bridge_age_human = f"{bridge_age_seconds / 3600:.1f}h old"
 
     freshness = await _collect_freshness_block(db, health, fixed_now)
-    storage_health = "healthy" if health["ok"] else "degraded"
+    storage_health = "healthy" if health["storage_ok"] else "degraded"
+    projection_health = health["projection_health"]
+    overall = "healthy" if health["ok"] else "degraded"
     operating_state = freshness["overall"]
     return {
         "ok": health["ok"],
-        "overall": storage_health,
+        "overall": overall,
         "storage_health": storage_health,
+        "projection_health": projection_health,
         "operating_state": operating_state,
         "db": {
             "path": health["db_path"],

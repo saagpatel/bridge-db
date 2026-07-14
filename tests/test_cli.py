@@ -92,7 +92,9 @@ async def test_run_status_reports_healthy_summary(
 ) -> None:
     db_path = tmp_path / "bridge.db"
     bridge_path = tmp_path / "claude_ai_context.md"
-    bridge_path.write_text("# bridge\n", encoding="utf-8")
+    bridge_path.write_text(
+        "## Career & Professional Target\nCareer notes\n", encoding="utf-8"
+    )
 
     monkeypatch.setattr(cfg, "DB_PATH", db_path)
     monkeypatch.setattr(cfg, "BRIDGE_FILE_PATH", bridge_path)
@@ -143,6 +145,7 @@ async def test_run_status_reports_healthy_summary(
 
     assert ok is True
     assert "Storage health: healthy" in captured
+    assert "Projection health: current" in captured
     assert "Operating state: attention" in captured
     assert "contexts=1" in captured
     assert "pending_handoffs=0" in captured
