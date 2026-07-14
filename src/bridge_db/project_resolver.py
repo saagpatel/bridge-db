@@ -38,14 +38,16 @@ class Resolution:
     canonical_key: str | None
     registry_present: bool
     matched: bool
+    ambiguous: bool = False
     notion_page_id: str | None = None
     notion_title: str | None = None
 
 
 @dataclass(frozen=True)
 class _Index:
-    norm_to_entry: dict[str, _ResolvedEntry]
-    override_norm_to_entry: dict[str, _ResolvedEntry]
+    exact_to_entries: dict[str, frozenset[_ResolvedEntry]]
+    norm_to_entries: dict[str, frozenset[_ResolvedEntry]]
+    override_norm_to_entries: dict[str, frozenset[_ResolvedEntry]]
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,10 @@ def _normalize(value: str | None) -> str:
     if "/" in text:
         text = text.rsplit("/", 1)[-1]
     return _NON_ALNUM.sub("", text.lower())
+
+
+def _exact(value: str | None) -> str:
+    return value.strip().casefold() if value else ""
 
 
 def _repo_base(repo_full_name: str | None) -> str:
@@ -86,7 +92,8 @@ def _entry_canonical_key(entry: Mapping[str, object]) -> str | None:
 
 
 def _compile_index(registry: Mapping[str, object]) -> _Index:
-    norm_to_entry: dict[str, _ResolvedEntry] = {}
+    exact_candidates: dict[str, set[_ResolvedEntry]] = {}
+    norm_candidates: dict[str, set[_ResolvedEntry]] = {}
     entries_by_legacy_key: dict[str, _ResolvedEntry] = {}
     entries_by_repo_full_name: dict[str, _ResolvedEntry] = {}
     raw_entries = registry.get("entries", [])
@@ -102,27 +109,28 @@ def _compile_index(registry: Mapping[str, object]) -> _Index:
             continue
         raw_display = entry.get("display_name")
         display = raw_display if isinstance(raw_display, str) else None
-        forms = {_normalize(raw_display if isinstance(raw_display, str) else None)}
+        raw_forms: set[str] = set()
+        if display is not None:
+            raw_forms.add(display)
         repo = entry.get("repo_full_name")
-        if repo:
-            forms.add(_normalize(_repo_base(repo if isinstance(repo, str) else None)))
-            if isinstance(repo, str):
-                forms.add(_normalize(repo))
-        forms.add(_normalize(raw_key))
+        if isinstance(repo, str) and repo:
+            raw_forms.add(_repo_base(repo))
+            raw_forms.add(repo)
+        raw_forms.add(raw_key)
         raw_bridge_names = entry.get("bridge_project_names", [])
         bridge_names: list[object] = []
         if isinstance(raw_bridge_names, list):
             bridge_names = cast(list[object], raw_bridge_names)
         for raw_bridge_name in bridge_names:
             if isinstance(raw_bridge_name, str):
-                forms.add(_normalize(raw_bridge_name))
+                raw_forms.add(raw_bridge_name)
         raw_aliases = entry.get("aliases", [])
         aliases: list[object] = []
         if isinstance(raw_aliases, list):
             aliases = cast(list[object], raw_aliases)
         for raw_alias in aliases:
             if isinstance(raw_alias, str):
-                forms.add(_normalize(_strip_alias_prefix(raw_alias)))
+                raw_forms.add(_strip_alias_prefix(raw_alias))
         page_id = entry.get("notion_local_page_id")
         title = entry.get("notion_local_title")
         resolved = _ResolvedEntry(
@@ -133,10 +141,14 @@ def _compile_index(registry: Mapping[str, object]) -> _Index:
         entries_by_legacy_key[raw_key] = resolved
         if resolved.canonical_key is not None:
             entries_by_repo_full_name[resolved.canonical_key] = resolved
-        for form in forms:
-            if form:
-                norm_to_entry.setdefault(form, resolved)
-    override_norm_to_entry: dict[str, _ResolvedEntry] = {}
+        for raw_form in raw_forms:
+            exact_form = _exact(raw_form)
+            norm_form = _normalize(raw_form)
+            if exact_form:
+                exact_candidates.setdefault(exact_form, set()).add(resolved)
+            if norm_form:
+                norm_candidates.setdefault(norm_form, set()).add(resolved)
+    override_candidates: dict[str, set[_ResolvedEntry]] = {}
     raw_overrides = registry.get("resolution_overrides", {})
     overrides: dict[object, object] = (
         cast(dict[object, object], raw_overrides) if isinstance(raw_overrides, dict) else {}
@@ -147,10 +159,17 @@ def _compile_index(registry: Mapping[str, object]) -> _Index:
             if target is None and "/" in key:
                 target = _ResolvedEntry(canonical_key=key)
             if target is not None:
-                override_norm_to_entry[_normalize(raw)] = target
+                override_candidates.setdefault(_normalize(raw), set()).add(target)
     return _Index(
-        norm_to_entry=norm_to_entry,
-        override_norm_to_entry=override_norm_to_entry,
+        exact_to_entries={
+            form: frozenset(candidates) for form, candidates in exact_candidates.items()
+        },
+        norm_to_entries={
+            form: frozenset(candidates) for form, candidates in norm_candidates.items()
+        },
+        override_norm_to_entries={
+            form: frozenset(candidates) for form, candidates in override_candidates.items()
+        },
     )
 
 
@@ -183,9 +202,21 @@ def resolve(project_name: str, registry_path: Path | None = None) -> Resolution:
     norm = _normalize(project_name)
     if not norm:
         return Resolution(canonical_key=None, registry_present=True, matched=False)
-    entry = index.override_norm_to_entry.get(norm) or index.norm_to_entry.get(norm)
-    if entry is None:
+    candidates = index.override_norm_to_entries.get(norm)
+    if candidates is None:
+        candidates = index.exact_to_entries.get(_exact(project_name))
+    if candidates is None:
+        candidates = index.norm_to_entries.get(norm)
+    if not candidates:
         return Resolution(canonical_key=None, registry_present=True, matched=False)
+    if len(candidates) != 1:
+        return Resolution(
+            canonical_key=None,
+            registry_present=True,
+            matched=False,
+            ambiguous=True,
+        )
+    entry = next(iter(candidates))
     return Resolution(
         canonical_key=entry.canonical_key,
         registry_present=True,

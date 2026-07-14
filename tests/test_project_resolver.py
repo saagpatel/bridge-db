@@ -157,6 +157,58 @@ def test_present_but_unmatched_is_flagged_not_passed_through(tmp_path: Path) -> 
     assert result.canonical_key is None
 
 
+def test_lossy_collision_is_ambiguous_but_exact_identity_still_resolves(
+    tmp_path: Path,
+) -> None:
+    reg = _write_registry(
+        tmp_path / "r.json",
+        [
+            _entry(
+                "first",
+                "Foo-Bar",
+                repo="owner-a/Foo-Bar",
+                notion_local_page_id="page-a",
+            ),
+            _entry(
+                "second",
+                "foo_bar",
+                repo="owner-b/foo_bar",
+                notion_local_page_id="page-b",
+            ),
+        ],
+    )
+
+    ambiguous = resolve("foo bar", registry_path=reg)
+    assert ambiguous.registry_present is True
+    assert ambiguous.matched is False
+    assert ambiguous.ambiguous is True
+    assert ambiguous.canonical_key is None
+    assert ambiguous.notion_page_id is None
+
+    first = resolve("owner-a/Foo-Bar", registry_path=reg)
+    second = resolve("owner-b/foo_bar", registry_path=reg)
+    assert first.canonical_key == "owner-a/Foo-Bar"
+    assert first.notion_page_id == "page-a"
+    assert second.canonical_key == "owner-b/foo_bar"
+    assert second.notion_page_id == "page-b"
+
+
+def test_explicit_override_disambiguates_lossy_collision(tmp_path: Path) -> None:
+    reg = _write_registry(
+        tmp_path / "r.json",
+        [
+            _entry("first", "Foo-Bar", repo="owner-a/Foo-Bar"),
+            _entry("second", "foo_bar", repo="owner-b/foo_bar"),
+        ],
+        overrides={"foo bar": "second"},
+    )
+
+    result = resolve("foo bar", registry_path=reg)
+    assert result.matched is True
+    assert result.ambiguous is False
+    assert result.canonical_key == "owner-b/foo_bar"
+
+
 def test_reloads_when_registry_file_changes(tmp_path: Path) -> None:
     reg = _write_registry(tmp_path / "r.json", [_entry("MCPAudit", "MCPAudit")])
     assert resolve("Recall", registry_path=reg).matched is False
