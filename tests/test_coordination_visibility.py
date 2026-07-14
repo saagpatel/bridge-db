@@ -121,11 +121,15 @@ async def test_active_filter_exposes_claimant(
     created = await handoff_fns["create_handoff"](
         caller="claude_ai", project_name="ClaimedProj", ctx=ctx
     )
-    # agent-trust handoff: cc pickup needs the explicit confirm step
+    # Model the separate operator promotion ceremony before pickup.
+    await db.execute(
+        "UPDATE pending_handoffs SET source_trust = 'operator' WHERE id = ?",
+        (created["handoff_id"],),
+    )
+    await db.commit()
     picked = await handoff_fns["pick_up_handoff"](
         caller="cc",
         handoff_id=created["handoff_id"],
-        confirm=True,
         ctx=make_ctx(db, principal="cc"),
     )
     assert picked["ok"] is True

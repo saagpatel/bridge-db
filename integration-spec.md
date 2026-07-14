@@ -122,8 +122,8 @@ uv run python -m bridge_db --promote-handoff <handoff-id>
 
 The ceremony displays the row identity and digest, then rechecks the complete
 reviewed state under a write lock. It refuses a row that changed or left
-`pending` after review. Claude Code may continue to use its existing explicit
-confirmation path for non-operator handoffs.
+`pending` after review. Both Claude Code and Codex refuse non-operator pickup;
+an MCP client cannot supply its own approval or bypass this promotion step.
 
 Claude Code's `/start` skill already reads `mcp__bridge_db__get_pending_handoffs()` —
 it now runs `mcp__bridge_db__sync_from_file()` first, then reads pending handoffs.

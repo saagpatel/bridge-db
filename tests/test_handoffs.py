@@ -1,6 +1,7 @@
 """Tests for handoff queue tools."""
 
 from datetime import UTC, datetime
+import inspect
 import json
 from pathlib import Path
 from typing import Any
@@ -244,23 +245,34 @@ async def test_pick_up_nonexistent_handoff_raises(
         await fns["pick_up_handoff"](caller="cc", handoff_id=9999, ctx=ctx)
 
 
-async def test_pick_up_cc_agent_requires_confirmation_no_transition(
-    db: aiosqlite.Connection, fns: dict[str, Any]
+def test_pick_up_schema_has_no_self_confirmation_input(
+    fns: dict[str, Any],
 ) -> None:
+    assert "confirm" not in inspect.signature(fns["pick_up_handoff"]).parameters
+
+
+@pytest.mark.parametrize("source_trust", ["agent", "ingested"])
+async def test_pick_up_cc_non_operator_requires_independent_promotion(
+    db: aiosqlite.Connection, fns: dict[str, Any], source_trust: str
+) -> None:
+    """The consuming cc principal cannot approve its own non-operator input."""
     ctx = make_ctx(db)
     created = await fns["create_handoff"](
-        caller="claude_ai", project_name="P", ctx=ctx
-    )  # agent
+        caller="claude_ai",
+        project_name=f"Independent-{source_trust}",
+        source_trust=source_trust,
+        ctx=ctx,
+    )
     handoff_id = created["handoff_id"]
 
-    result = await fns["pick_up_handoff"](caller="cc", handoff_id=handoff_id, ctx=ctx)
-    assert result["ok"] is False
-    assert result["requires_confirmation"] is True
-    assert result["source_trust"] == "agent"
-    assert result["status"] == "pending"
+    with pytest.raises(ToolError, match="promote.*operator"):
+        await fns["pick_up_handoff"](
+            caller="cc", handoff_id=handoff_id, ctx=ctx
+        )
 
     cursor = await db.execute(
-        "SELECT status, picked_up_at FROM pending_handoffs WHERE id = ?", (handoff_id,)
+        "SELECT status, picked_up_at FROM pending_handoffs WHERE id = ?",
+        (handoff_id,),
     )
     row = await cursor.fetchone()
     assert row is not None
@@ -268,57 +280,7 @@ async def test_pick_up_cc_agent_requires_confirmation_no_transition(
     assert row["picked_up_at"] is None
 
 
-async def test_pick_up_cc_agent_with_confirm_activates(
-    db: aiosqlite.Connection, fns: dict[str, Any]
-) -> None:
-    ctx = make_ctx(db)
-    created = await fns["create_handoff"](caller="claude_ai", project_name="P", ctx=ctx)
-    handoff_id = created["handoff_id"]
-    result = await fns["pick_up_handoff"](
-        caller="cc", handoff_id=handoff_id, confirm=True, ctx=ctx
-    )
-    assert result["ok"] is True
-    assert result["status"] == "active"
-    assert result["source_trust"] == "agent"
-
-    cursor = await db.execute(
-        "SELECT status, picked_up_at FROM pending_handoffs WHERE id = ?", (handoff_id,)
-    )
-    row = await cursor.fetchone()
-    assert row is not None
-    assert row["status"] == "active"
-    assert row["picked_up_at"] is not None
-
-
-async def test_pick_up_cc_ingested_gate_then_confirm(
-    db: aiosqlite.Connection, fns: dict[str, Any]
-) -> None:
-    """ingested is non-operator: gated (no transition) without confirm, active with confirm."""
-    ctx = make_ctx(db)
-    created = await fns["create_handoff"](
-        caller="claude_ai", project_name="P", source_trust="ingested", ctx=ctx
-    )
-    handoff_id = created["handoff_id"]
-
-    gated = await fns["pick_up_handoff"](caller="cc", handoff_id=handoff_id, ctx=ctx)
-    assert gated["requires_confirmation"] is True
-    assert gated["source_trust"] == "ingested"
-    cursor = await db.execute(
-        "SELECT status, picked_up_at FROM pending_handoffs WHERE id = ?", (handoff_id,)
-    )
-    row = await cursor.fetchone()
-    assert row is not None
-    assert row["status"] == "pending"
-    assert row["picked_up_at"] is None
-
-    confirmed = await fns["pick_up_handoff"](
-        caller="cc", handoff_id=handoff_id, confirm=True, ctx=ctx
-    )
-    assert confirmed["ok"] is True
-    assert confirmed["status"] == "active"
-
-
-async def test_pick_up_codex_agent_refused_even_with_confirm(
+async def test_pick_up_codex_agent_refused_without_transition(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
     ctx = make_ctx(db)
@@ -329,11 +291,6 @@ async def test_pick_up_codex_agent_refused_even_with_confirm(
 
     with pytest.raises(ToolError, match="operator"):
         await fns["pick_up_handoff"](caller="codex", handoff_id=handoff_id, ctx=ctx)
-    # confirm=True must NOT bypass the codex refusal.
-    with pytest.raises(ToolError, match="operator"):
-        await fns["pick_up_handoff"](
-            caller="codex", handoff_id=handoff_id, confirm=True, ctx=ctx
-        )
 
     cursor = await db.execute(
         "SELECT status, picked_up_at FROM pending_handoffs WHERE id = ?", (handoff_id,)
@@ -358,33 +315,6 @@ async def test_pick_up_codex_ingested_refused(
 
     cursor = await db.execute(
         "SELECT status, picked_up_at FROM pending_handoffs WHERE id = ?", (handoff_id,)
-    )
-    row = await cursor.fetchone()
-    assert row is not None
-    assert row["status"] == "pending"
-    assert row["picked_up_at"] is None
-
-
-@pytest.mark.parametrize("source_trust", ["agent", "ingested"])
-async def test_codex_cannot_pick_up_non_operator_handoffs_even_with_confirm(
-    db: aiosqlite.Connection, fns: dict[str, Any], source_trust: str
-) -> None:
-    ctx = make_ctx(db)
-    created = await fns["create_handoff"](
-        caller="claude_ai",
-        project_name=f"NonOperator-{source_trust}",
-        source_trust=source_trust,
-        ctx=ctx,
-    )
-
-    with pytest.raises(ToolError, match="Codex cannot pick up"):
-        await fns["pick_up_handoff"](
-            caller="codex", handoff_id=created["handoff_id"], confirm=True, ctx=ctx
-        )
-
-    cursor = await db.execute(
-        "SELECT status, picked_up_at FROM pending_handoffs WHERE id = ?",
-        (created["handoff_id"],),
     )
     row = await cursor.fetchone()
     assert row is not None
@@ -450,7 +380,7 @@ async def test_bound_create_operator_promotion_then_codex_pickup(
 async def test_pick_up_gate_writes_distinct_audit_events(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
-    """confirmation_required / refused / allowed each emit a distinct audit event."""
+    """Independent-promotion refusals and allowed pickup are auditable."""
     ctx = make_ctx(db)
     agent = await fns["create_handoff"](
         caller="claude_ai", project_name="Agentish", ctx=ctx
@@ -460,7 +390,10 @@ async def test_pick_up_gate_writes_distinct_audit_events(
     )
     await _promote_handoff_for_test(db, operator["handoff_id"])
 
-    await fns["pick_up_handoff"](caller="cc", handoff_id=agent["handoff_id"], ctx=ctx)
+    with pytest.raises(ToolError):
+        await fns["pick_up_handoff"](
+            caller="cc", handoff_id=agent["handoff_id"], ctx=ctx
+        )
     with pytest.raises(ToolError):
         await fns["pick_up_handoff"](
             caller="codex", handoff_id=agent["handoff_id"], ctx=ctx
@@ -477,8 +410,7 @@ async def test_pick_up_gate_writes_distinct_audit_events(
     assert (
         len(details) == 3
     )  # exactly one event per pickup call (tmp log isolated by conftest)
-    assert any("decision=confirmation_required" in d for d in details)
-    assert any("decision=refused" in d for d in details)
+    assert sum("decision=refused" in d for d in details) == 2
     assert any("decision=allowed" in d for d in details)
 
 
@@ -511,8 +443,9 @@ async def test_clear_handoff_clears_all_matching_rows(
     second = await fns["create_handoff"](
         caller="claude_ai", project_name="MyProject", ctx=ctx
     )
+    await _promote_handoff_for_test(db, second["handoff_id"])
     await fns["pick_up_handoff"](
-        caller="cc", handoff_id=second["handoff_id"], confirm=True, ctx=ctx
+        caller="cc", handoff_id=second["handoff_id"], ctx=ctx
     )
 
     result = await fns["clear_handoff"](caller="cc", project_name="MyProject", ctx=ctx)
@@ -1072,12 +1005,11 @@ async def test_pick_up_handoff_codex_principal_cannot_spoof_cc_caller_in_warn(
     handoff_id = created["handoff_id"]
     assert created["source_trust"] == "agent"
 
-    # A codex-BOUND connection claims caller='cc' and tries to confirm-pick-up.
-    with pytest.raises(ToolError, match="Codex cannot pick up"):
+    # A codex-BOUND connection claims caller='cc' and tries to pick up.
+    with pytest.raises(ToolError, match="non-operator"):
         await cap.fns["pick_up_handoff"](
             caller="cc",
             handoff_id=handoff_id,
-            confirm=True,
             ctx=make_ctx(db, principal="codex"),
         )
 
@@ -1096,8 +1028,7 @@ async def test_pick_up_handoff_off_mode_unbound_gates_on_claimed_caller(
 ) -> None:
     """Legacy/off path: with no principal bound, the gate falls back to the claimed caller.
 
-    A cc caller confirming an agent-trust handoff on an unbound connection still
-    succeeds, proving the principal fallback preserves current behavior.
+    The claimed cc identity still cannot self-approve a non-operator handoff.
     """
     from conftest import CaptureMCP, make_ctx
 
@@ -1116,11 +1047,18 @@ async def test_pick_up_handoff_off_mode_unbound_gates_on_claimed_caller(
     handoff_id = created["handoff_id"]
     assert created["source_trust"] == "agent"
 
-    result = await cap.fns["pick_up_handoff"](
-        caller="cc",
-        handoff_id=handoff_id,
-        confirm=True,
-        ctx=make_ctx(db),  # unbound → gate_identity falls back to caller='cc'
+    with pytest.raises(ToolError, match="promote.*operator"):
+        await cap.fns["pick_up_handoff"](
+            caller="cc",
+            handoff_id=handoff_id,
+            ctx=make_ctx(db),  # unbound → gate_identity falls back to caller='cc'
+        )
+
+    cursor = await db.execute(
+        "SELECT status, picked_up_at FROM pending_handoffs WHERE id = ?",
+        (handoff_id,),
     )
-    assert result["ok"] is True
-    assert result["status"] == "active"
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["picked_up_at"] is None

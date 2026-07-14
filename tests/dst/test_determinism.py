@@ -87,8 +87,13 @@ async def _run_scenario(db_path: Path, seed: int) -> tuple[str, bytes]:
             ctx=ctx,
         )
 
+        await sim.execute(
+            "UPDATE pending_handoffs SET source_trust = 'operator' WHERE id = ?",
+            (created["handoff_id"],),
+        )
+        await sim.commit()
         picked = await fns["pick_up_handoff"](
-            caller="cc", handoff_id=created["handoff_id"], confirm=True, ctx=ctx
+            caller="cc", handoff_id=created["handoff_id"], ctx=ctx
         )
         assert picked["ok"] is True
         cleared = await fns["clear_handoff"](

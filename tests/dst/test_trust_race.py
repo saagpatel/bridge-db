@@ -65,7 +65,7 @@ async def _claimant(
         message = str(exc)
         if "picked up by another caller" in message:
             return {"outcome": "lost_receipt"}  # the CAS-miss (in-window) path
-        if "Codex cannot pick up" in message:
+        if "non-operator source trust" in message:
             return {"outcome": "refused_gate"}  # downgrade landed pre-SELECT
         raise
     finally:

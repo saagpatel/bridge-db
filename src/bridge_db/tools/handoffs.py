@@ -198,21 +198,14 @@ def register(mcp: FastMCP) -> None:
             Field(description="The system picking up the handoff: 'cc' or 'codex'"),
         ],
         handoff_id: Annotated[int, Field(description="ID of the handoff to pick up")],
-        confirm: Annotated[
-            bool,
-            Field(
-                description="Operator confirmation to pick up a non-operator-trust handoff "
-                "(cc only; ignored for codex, which is refused until promoted)"
-            ),
-        ] = False,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Mark a handoff as active (in progress). Only 'cc' or 'codex' may pick up.
 
-        Provenance gate: a non-'operator' handoff is gated at this pending → active
-        transition. 'cc' must re-invoke with confirm=True; 'codex' (danger-full-access)
-        is refused until the handoff is promoted to operator trust. 'operator'-trust
-        handoffs pick up in one call, as before.
+        Provenance gate: a non-'operator' handoff cannot cross this pending → active
+        transition. An independent operator must first review and promote the exact
+        pending row through the TTY-only promotion ceremony. 'operator'-trust
+        handoffs pick up in one call.
         """
         require_caller(ctx, caller, tool="pick_up_handoff")
         if caller not in ("cc", "codex"):
@@ -273,48 +266,29 @@ def register(mcp: FastMCP) -> None:
         trust = row["source_trust"]
         project = row["project_name"]
 
-        # The provenance gate keys on the channel-bound principal when one is
-        # bound, falling back to the claimed caller only when unbound (auth
-        # 'off'/legacy). Without this, a principal-bound connection could dodge
-        # the Codex refusal in 'warn' mode (where require_caller audits but does
-        # not block a caller/principal mismatch) by claiming a different caller.
+        # Attribute a successful claim to the channel-bound principal when one
+        # exists, falling back to the claimed caller only in legacy auth-off mode.
         gate_identity = get_principal(ctx) or caller
 
         # Provenance gate — the pending → active transition is the dangerous step.
+        # The consuming MCP principal cannot supply its own approval evidence;
+        # only the exact-row TTY ceremony can establish operator trust.
         if trust != "operator":
-            if gate_identity == "codex":
-                log_audit(
-                    "pick_up_handoff",
-                    caller,
-                    project,
-                    ok=False,
-                    detail=f"source_trust={trust} decision=refused principal={get_principal(ctx)}",
-                )
-                raise ToolError(
-                    f"Codex cannot pick up a non-operator-trust handoff (source_trust='{trust}'). "
-                    "Review and promote it with `python -m bridge_db --promote-handoff "
-                    f"{handoff_id}` before picking up with Codex."
-                )
-            if not confirm:  # gate_identity is 'cc' (or an unbound caller)
-                log_audit(
-                    "pick_up_handoff",
-                    caller,
-                    project,
-                    ok=False,
-                    detail=f"source_trust={trust} decision=confirmation_required",
-                )
-                return {
-                    "ok": False,
-                    "requires_confirmation": True,
-                    "handoff_id": handoff_id,
-                    "project_name": project,
-                    "source_trust": trust,
-                    "status": "pending",
-                    "reason": (
-                        "non-operator-trust handoff; re-invoke pick_up_handoff with confirm=True"
-                    ),
-                }
-            # cc + confirm=True → confirmed override; fall through to the transition.
+            log_audit(
+                "pick_up_handoff",
+                caller,
+                project,
+                ok=False,
+                detail=(
+                    f"source_trust={trust} decision=refused "
+                    f"principal={get_principal(ctx)}"
+                ),
+            )
+            raise ToolError(
+                f"Handoff {handoff_id} has non-operator source trust '{trust}'. "
+                "Review and promote the exact pending handoff to operator trust with "
+                f"`python -m bridge_db --promote-handoff {handoff_id}` before pickup."
+            )
 
         # INV-8: trust is a second TOCTOU coordinate the status guard alone
         # does not cover — the provenance gate above evaluated SELECT-time
@@ -388,15 +362,12 @@ def register(mcp: FastMCP) -> None:
                 f"Conflict receipt: {receipt_id}."
             )
         await db.commit()
-        decision = (
-            "allowed confirm=true" if (trust != "operator" and confirm) else "allowed"
-        )
         log_audit(
             "pick_up_handoff",
             caller,
             project,
             ok=True,
-            detail=f"source_trust={trust} decision={decision}",
+            detail=f"source_trust={trust} decision=allowed",
         )
         logger.info(
             "handoff picked up: id=%d by %s (source_trust=%s)",

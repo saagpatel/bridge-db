@@ -67,7 +67,8 @@ uv run python -m bridge_db --promote-handoff 42      # reviewed handoff promotio
   `create_handoff` is stricter than the rollout dial:
   it always requires an exact channel-bound `claude_ai` principal and always clamps
   requested operator trust. Review and promote an exact pending row with
-  `--promote-handoff <id>` (TTY-only) before Codex pickup.
+  `--promote-handoff <id>` (TTY-only) before either Claude Code or Codex pickup;
+  consuming MCP clients cannot self-confirm non-operator handoffs.
 
 ## Gotchas
 
