@@ -399,21 +399,22 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """Clear a handoff by project name (mark as done). Called by /end after completing project work.
 
-        Claimant gate (INV-13): 'pending' rows (never claimed) are always
+        Identity gate: the claimed caller must exactly match the channel-bound
+        principal in every rollout mode. Claimant gate (INV-13): 'pending' rows
+        (never claimed) are always
         clearable — /finish and /bank clear opportunistically by project name
         from sessions that never claimed, and that contract is preserved.
         'active' rows are clearable only when claimed_by is NULL (legacy
-        pre-v13 rows) or equals the gate identity (bound principal, falling
-        back to the claimed caller). Refusals are reported, not raised:
+        pre-v13 rows) or equals that verified identity. Refusals are reported, not raised:
         ok stays True and the response carries refused_ids/refused_count —
         deliberately asymmetric with pick_up_handoff's hard refusals, to match
         this tool's opportunistic no-op contract.
 
-        Scope honesty: all cc windows share one principal, so this gate only
-        protects cross-role clears (cc <-> codex); under live 'warn' auth it
-        is accident-safety, not adversarial protection.
+        Scope honesty: all cc windows share one principal, so the claimant gate
+        protects cross-role clears (cc <-> codex), not same-role session ownership.
         """
         require_caller(ctx, caller, tool="clear_handoff")
+        require_bound_caller(ctx, caller, tool="clear_handoff")
         if caller not in ("cc", "codex"):
             raise ToolError(
                 f"Only 'cc' or 'codex' may clear handoffs; caller was '{caller}'"
@@ -433,7 +434,9 @@ def register(mcp: FastMCP) -> None:
             match_sql = "project_name = ?"
             match_params = (project_name,)
 
-        gate_identity = get_principal(ctx) or caller
+        # Strict binding above makes the verified principal and claimed caller
+        # identical for every reachable mutation.
+        gate_identity = caller
 
         cursor = await db.execute(
             f"""

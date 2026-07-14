@@ -158,7 +158,7 @@ async def test_cleared_rows_stay_excluded_from_all(
         caller="claude_ai", project_name="DoneProj", ctx=ctx
     )
     cleared = await handoff_fns["clear_handoff"](
-        caller="cc", project_name="DoneProj", ctx=ctx
+        caller="cc", project_name="DoneProj", ctx=make_ctx(db, principal="cc")
     )
     assert cleared["cleared"] is True
     both = await handoff_fns["get_pending_handoffs"](status="all", ctx=ctx)

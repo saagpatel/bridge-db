@@ -40,6 +40,15 @@ def fns(db: aiosqlite.Connection) -> dict[str, Any]:
         return await pick_up_handoff(**kwargs)
 
     cap.fns["pick_up_handoff"] = pick_up_as_enrolled_caller
+    clear_handoff = cap.fns["clear_handoff"]
+
+    async def clear_as_enrolled_caller(**kwargs: Any) -> dict[str, Any]:
+        """Model the clearing principal's transport binding."""
+        caller = str(kwargs.get("caller"))
+        kwargs["ctx"] = make_ctx(db, principal=caller)
+        return await clear_handoff(**kwargs)
+
+    cap.fns["clear_handoff"] = clear_as_enrolled_caller
     return cap.fns
 
 
@@ -483,6 +492,47 @@ async def test_clear_handoff_missing_project_returns_ok(
     )
     assert result["ok"] is True
     assert result["cleared"] is False
+
+
+@pytest.mark.parametrize(
+    ("auth_mode", "principal", "error"),
+    [
+        ("off", None, "Unauthenticated connection"),
+        ("warn", "codex", "bound to 'codex'"),
+    ],
+)
+async def test_clear_handoff_requires_bound_owner_in_every_auth_mode(
+    db: aiosqlite.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+    auth_mode: str,
+    principal: str | None,
+    error: str,
+) -> None:
+    """BDB-DS-006-R1: a caller field cannot authorize a pending-row clear."""
+    monkeypatch.setattr(config, "AUTH_MODE", auth_mode)
+    cap = CaptureMCP()
+    mod.register(cap)
+    created = await cap.fns["create_handoff"](
+        caller="claude_ai",
+        project_name="StrictClear",
+        ctx=make_ctx(db, principal="claude_ai"),
+    )
+
+    with pytest.raises(ToolError, match=error):
+        await cap.fns["clear_handoff"](
+            caller="cc",
+            project_name="StrictClear",
+            ctx=make_ctx(db, principal=principal),
+        )
+
+    cursor = await db.execute(
+        "SELECT status, cleared_at FROM pending_handoffs WHERE id = ?",
+        (created["handoff_id"],),
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["cleared_at"] is None
 
 
 async def test_clear_handoff_rejects_claude_ai(
