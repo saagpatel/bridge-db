@@ -102,21 +102,13 @@ def _activity_since_condition(
     since: str, *, table_alias: str | None = None
 ) -> tuple[str, list[str]]:
     prefix = f"{table_alias}." if table_alias else ""
-    return (
-        f"({prefix}timestamp >= ? OR {prefix}created_at >= ?)",
-        [since, _created_at_since_threshold(since)],
-    )
+    return (f"{prefix}created_at >= ?", [_created_at_since_threshold(since)])
 
 
-def _activity_signal_sort_key(entry: dict[str, Any]) -> tuple[str, str, int]:
-    timestamp = (
-        entry["last_ts"]
-        if entry["kind"] == "lifecycle_aggregate"
-        else entry["timestamp"]
-    )
+def _activity_signal_sort_key(entry: dict[str, Any]) -> tuple[str, int]:
     created_at = entry["created_at"]
     activity_id = entry.get("latest_activity_id", entry.get("id", 0))
-    return (timestamp, created_at, int(activity_id or 0))
+    return (created_at, int(activity_id or 0))
 
 
 def _summarize_trust(counts: dict[str, int]) -> str:
@@ -436,7 +428,7 @@ def register(mcp: FastMCP) -> None:
             SELECT id, source, timestamp, project_name, summary, branch, tags, created_at, canonical_key, source_trust
             FROM activity_log
             {where}
-            ORDER BY timestamp DESC, created_at DESC, id DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT ?
             """,
             params,
@@ -537,8 +529,7 @@ def register(mcp: FastMCP) -> None:
                 }
                 continue
 
-            if (row["timestamp"], row["created_at"], row["id"]) > (
-                current["last_ts"],
+            if (row["created_at"], row["id"]) > (
                 current["created_at"],
                 current["latest_activity_id"],
             ):
@@ -564,7 +555,7 @@ def register(mcp: FastMCP) -> None:
             SELECT id, source, timestamp, project_name, summary, branch, tags, created_at, canonical_key, source_trust
             FROM activity_log
             {substantive_where}
-            ORDER BY timestamp DESC, created_at DESC, id DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT ?
             """,
             substantive_params,
@@ -583,7 +574,7 @@ def register(mcp: FastMCP) -> None:
             SELECT id, source, timestamp, project_name, summary, branch, tags, created_at, canonical_key, source_trust
             FROM activity_log
             {ledger_where}
-            ORDER BY timestamp DESC, created_at DESC, id DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT ?
             """,
             [*params, *protected_params, config.LEDGER_SIGNAL_LIMIT],
@@ -663,7 +654,7 @@ def register(mcp: FastMCP) -> None:
                 a.sync_note
             FROM activity_log AS a
             {where}
-            ORDER BY a.timestamp DESC
+            ORDER BY a.created_at DESC, a.id DESC
             LIMIT ?
             """,
             params,

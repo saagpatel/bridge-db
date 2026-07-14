@@ -627,7 +627,7 @@ async def collect_status_summary(
     for source in _ACTIVITY_SOURCES:
         cursor = await db.execute(
             "SELECT timestamp, project_name FROM activity_log "
-            "WHERE source = ? ORDER BY timestamp DESC, created_at DESC, id DESC LIMIT 1",
+            "WHERE source = ? ORDER BY created_at DESC, id DESC LIMIT 1",
             (source,),
         )
         activity_row = await cursor.fetchone()

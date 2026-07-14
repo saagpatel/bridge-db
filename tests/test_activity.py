@@ -225,6 +225,58 @@ async def test_get_recent_activity_breaks_created_at_ties_by_id(
     assert [entry["project_name"] for entry in recent] == ["NewTie", "OldTie"]
 
 
+async def test_caller_timestamp_cannot_control_shared_activity_recency(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    """BDB-DS-059-R1: event time is data, never shared recency authority."""
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="cc",
+        project_name="ForgedFuture",
+        summary="older write with attacker-selected event time",
+        tags=["SHIPPED", "LEDGER"],
+        timestamp="9999-12-31T23:59:59Z",
+        ctx=ctx,
+    )
+    await fns["log_activity"](
+        caller="cc",
+        project_name="CurrentEvidence",
+        summary="newer server-recorded write",
+        tags=["SHIPPED", "LEDGER"],
+        timestamp="2026-07-14T12:00:00Z",
+        ctx=ctx,
+    )
+    await db.execute(
+        "UPDATE activity_log SET created_at = ? WHERE project_name = ?",
+        ("2026-07-13T12:00:00Z", "ForgedFuture"),
+    )
+    await db.execute(
+        "UPDATE activity_log SET created_at = ? WHERE project_name = ?",
+        ("2026-07-14T12:00:00Z", "CurrentEvidence"),
+    )
+    await db.commit()
+
+    recent = await fns["get_recent_activity"](limit=2, ctx=ctx)
+    shipped = await fns["get_shipped_events"](limit=2, ctx=ctx)
+    signal = await fns["get_activity_signal"](limit=2, ctx=ctx)
+    since = await fns["get_recent_activity"](since="2026-07-14", ctx=ctx)
+
+    assert [row["project_name"] for row in recent] == [
+        "CurrentEvidence",
+        "ForgedFuture",
+    ]
+    assert [row["project_name"] for row in shipped] == [
+        "CurrentEvidence",
+        "ForgedFuture",
+    ]
+    assert [row["project_name"] for row in signal[:2]] == [
+        "CurrentEvidence",
+        "ForgedFuture",
+    ]
+    assert [row["project_name"] for row in since] == ["CurrentEvidence"]
+    assert recent[1]["timestamp"] == "9999-12-31T23:59:59Z"
+
+
 async def test_get_recent_activity_invalid_source_raises(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
@@ -257,6 +309,11 @@ async def test_get_activity_signal_compresses_session_boundaries(
         project_name="evals",
         summary="Built LLM judge",
         tags=["eval"],
+    )
+    await db.execute(
+        "UPDATE activity_log SET created_at = CASE "
+        "WHEN summary = 'Built LLM judge' THEN '2026-06-18T00:00:00Z' "
+        "ELSE timestamp END"
     )
     await db.commit()
 
@@ -303,6 +360,11 @@ async def test_get_activity_signal_keeps_substantive_rows_visible_under_noise(
         project_name="evals",
         summary="Substantive eval result",
         tags=["eval"],
+    )
+    await db.execute(
+        "UPDATE activity_log SET created_at = CASE "
+        "WHEN summary = 'Substantive eval result' THEN '2026-06-18T00:00:00Z' "
+        "ELSE timestamp END"
     )
     await db.commit()
 

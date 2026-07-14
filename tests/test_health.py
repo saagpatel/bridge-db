@@ -363,6 +363,32 @@ async def test_status_returns_compact_operator_summary(
     assert result["latest_activity"]["cc"] == "2026-04-17 (bridge-db)"
 
 
+async def test_status_latest_activity_uses_server_recorded_time(
+    db: aiosqlite.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BDB-DS-059-R1: status cannot be pinned by logical event time."""
+    await _make_status_health_ready(tmp_path, monkeypatch)
+    await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary, tags, created_at) "
+        "VALUES ('cc', '9999-12-31T23:59:59Z', 'ForgedFuture', 'older', '[]', "
+        "'2026-07-13T12:00:00Z')"
+    )
+    await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary, tags, created_at) "
+        "VALUES ('cc', '2026-07-14T12:00:00Z', 'CurrentEvidence', 'newer', '[]', "
+        "'2026-07-14T12:00:00Z')"
+    )
+    await db.commit()
+
+    result = await mod.collect_status_summary(db, now=FIXED_NOW)
+
+    assert result["latest_activity"]["cc"] == (
+        "2026-07-14T12:00:00Z (CurrentEvidence)"
+    )
+
+
 FIXED_NOW = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
 
 

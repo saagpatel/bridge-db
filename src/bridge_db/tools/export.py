@@ -190,7 +190,7 @@ async def build_markdown(db: Any) -> str:
     # --- Recent CC Activity ---
     cursor = await db.execute(
         "SELECT timestamp, project_name, summary, branch, tags FROM activity_log "
-        "WHERE source='cc' ORDER BY timestamp DESC, created_at DESC, id DESC LIMIT 20"
+        "WHERE source='cc' ORDER BY created_at DESC, id DESC LIMIT 20"
     )
     cc_activity_rows = await cursor.fetchall()
     cc_activity_lines = _render_activity_rows(cc_activity_rows)
@@ -216,7 +216,7 @@ async def build_markdown(db: Any) -> str:
     # --- Recent Codex Activity ---
     cursor = await db.execute(
         "SELECT timestamp, project_name, summary, branch, tags FROM activity_log "
-        "WHERE source='codex' ORDER BY timestamp DESC, created_at DESC, id DESC LIMIT 20"
+        "WHERE source='codex' ORDER BY created_at DESC, id DESC LIMIT 20"
     )
     codex_activity_rows = await cursor.fetchall()
     codex_activity_lines = _render_activity_rows(codex_activity_rows)
@@ -236,7 +236,7 @@ async def build_markdown(db: Any) -> str:
     for source, heading in _EXTRA_SOURCES.items():
         cursor = await db.execute(
             "SELECT timestamp, project_name, summary, branch, tags FROM activity_log "
-            "WHERE source=? ORDER BY timestamp DESC, created_at DESC, id DESC LIMIT 20",
+            "WHERE source=? ORDER BY created_at DESC, id DESC LIMIT 20",
             (source,),
         )
         extra_rows = await cursor.fetchall()
@@ -249,7 +249,7 @@ async def build_markdown(db: Any) -> str:
     cursor = await db.execute(
         "SELECT timestamp, project_name, summary, branch, tags FROM activity_log "
         f"WHERE {protected_sql} "  # noqa: S608
-        "ORDER BY timestamp DESC, created_at DESC, id DESC LIMIT 15",
+        "ORDER BY created_at DESC, id DESC LIMIT 15",
         protected_params,
     )
     ledger_rows = await cursor.fetchall()

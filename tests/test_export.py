@@ -619,6 +619,45 @@ async def test_export_renders_pinned_ledger_section(
     assert "durable milestone" in md
 
 
+async def test_export_recency_uses_server_recorded_time(
+    db: aiosqlite.Connection, all_fns: dict[str, Any]
+) -> None:
+    """BDB-DS-059-R1: future event time cannot occupy the export window."""
+    await insert_activity_row(
+        db,
+        source="cc",
+        timestamp="9999-12-31T23:59:59Z",
+        project_name="ForgedFuture",
+        summary="older server write",
+        tags=[],
+    )
+    await db.execute(
+        "UPDATE activity_log SET created_at = ? WHERE project_name = ?",
+        ("2026-07-13T12:00:00Z", "ForgedFuture"),
+    )
+    for index in range(20):
+        project = f"CurrentEvidence-{index:02d}"
+        await insert_activity_row(
+            db,
+            source="cc",
+            timestamp="2026-07-14T12:00:00Z",
+            project_name=project,
+            summary="activity",
+            tags=[],
+        )
+        await db.execute(
+            "UPDATE activity_log SET created_at = ? WHERE project_name = ?",
+            ("2026-07-14T12:00:00Z", project),
+        )
+    await db.commit()
+
+    md = await _build_markdown(db)
+    recent = md.split("## Recent Claude Code Activity\n", 1)[1].split("\n## ", 1)[0]
+
+    assert "ForgedFuture" not in recent
+    assert all(f"CurrentEvidence-{index:02d}" in recent for index in range(20))
+
+
 async def test_export_pinned_ledger_caps_cross_source_rows_newest_first(
     db: aiosqlite.Connection, all_fns: dict[str, Any]
 ) -> None:
