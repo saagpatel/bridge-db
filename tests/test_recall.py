@@ -47,7 +47,7 @@ async def _seed_one_of_each(cap: CaptureMCP, db: Any) -> None:
         branch="feat/semantic-memory",
         tags=["test"],
         timestamp="2026-04-17",
-        ctx=ctx,
+        ctx=make_ctx(db, principal="cc"),
     )
     # Snapshot
     await cap.fns["save_snapshot"](
@@ -109,7 +109,7 @@ async def test_recall_hits_carry_source_trust(capture: CaptureMCP, db: Any) -> N
         project_name="bridge-db",
         summary="Quokka activity",
         source_trust="agent",
-        ctx=ctx,
+        ctx=make_ctx(db, principal="cc"),
     )
     await capture.fns["save_snapshot"](
         caller="cc", data={"note": "Quokka snapshot"}, source_trust="ingested", ctx=ctx
@@ -373,7 +373,7 @@ async def test_recall_or_semantics_returns_partial_matches(
     """
     monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", tmp_path / "recall.jsonl")
 
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="cc")
     # Two activity rows that share NO tokens. Either should surface on a 2-token query.
     await capture.fns["log_activity"](
         caller="cc",
@@ -413,7 +413,7 @@ async def test_recall_and_first_precision_narrows_results(
     and broader single-term rows are excluded. OR is only the fallback when AND
     finds nothing (pinned by test_recall_or_semantics_returns_partial_matches)."""
     monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", tmp_path / "recall.jsonl")
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="cc")
     await capture.fns["log_activity"](
         caller="cc",
         project_name="precise-row",
@@ -446,7 +446,7 @@ async def test_recall_finds_activity_by_tag(
     """Activity tags are indexed, so a distinctive tag value is recall-able even
     when it appears nowhere in the project name, summary, or branch."""
     monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", tmp_path / "recall.jsonl")
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="cc")
     await capture.fns["log_activity"](
         caller="cc",
         project_name="taggy-project",

@@ -54,7 +54,7 @@ async def test_export_contains_all_section_headings(
 async def test_export_includes_activity_entries(
     db: aiosqlite.Connection, all_fns: dict[str, Any]
 ) -> None:
-    mctx = make_ctx(db)
+    mctx = make_ctx(db, principal="cc")
     await all_fns["log_activity"](
         caller="cc",
         project_name="bridge-db",
@@ -162,20 +162,19 @@ async def test_export_frontmatter_present(db: aiosqlite.Connection) -> None:
 async def test_export_includes_additional_source_activity_sections(
     db: aiosqlite.Connection, all_fns: dict[str, Any]
 ) -> None:
-    mctx = make_ctx(db, principal="claude_ai")
     await all_fns["log_activity"](
         caller="notion_os",
         project_name="Notion Sync",
         summary="synced portfolio updates",
         timestamp="2026-04-15",
-        ctx=mctx,
+        ctx=make_ctx(db, principal="notion_os"),
     )
     await all_fns["log_activity"](
         caller="personal_ops",
         project_name="personal-ops",
         summary="processed inbox triage",
         timestamp="2026-04-15",
-        ctx=mctx,
+        ctx=make_ctx(db, principal="personal_ops"),
     )
 
     md = await _build_markdown(db)
@@ -242,14 +241,14 @@ async def test_export_workflow_reflects_multi_tool_bridge_state(
             summary="validated Phase 4 hardening plan",
             tags=["SHIPPED"],
             timestamp="2026-04-15",
-            ctx=mctx,
+            ctx=make_ctx(db, principal="cc"),
         )
         await all_fns["log_activity"](
             caller="codex",
             project_name="bridge-db",
             summary="captured architectural decision",
             timestamp="2026-04-15",
-            ctx=mctx,
+            ctx=make_ctx(db, principal="codex"),
         )
         await all_fns["export_bridge_markdown"](ctx=mctx)
     finally:
@@ -371,7 +370,7 @@ Fallback capability context
             project_name="bridge-db",
             summary="validated startup sync fallback path",
             timestamp="2026-04-15",
-            ctx=mctx,
+            ctx=make_ctx(db, principal="cc"),
         )
         await all_fns["export_bridge_markdown"](ctx=mctx)
     finally:
@@ -447,7 +446,7 @@ Prefers MCP when available
             project_name="personal-ops",
             summary="checked bridge handoff inbox",
             timestamp="2026-04-17",
-            ctx=mctx,
+            ctx=make_ctx(db, principal="personal_ops"),
         )
         status_result = await cap.fns["status"](ctx=mctx)
         await cap.fns["export_bridge_markdown"](ctx=mctx)

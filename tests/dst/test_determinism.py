@@ -84,7 +84,7 @@ async def _run_scenario(db_path: Path, seed: int) -> tuple[str, bytes]:
             summary="sim scenario step",
             timestamp="2030-01-01",
             tags=[],
-            ctx=ctx,
+            ctx=make_ctx(db, principal="cc"),
         )
 
         await sim.execute(

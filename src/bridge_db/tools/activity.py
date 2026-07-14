@@ -316,8 +316,12 @@ def register(mcp: FastMCP) -> None:
         sometimes(
             "attribution_divergence", principal is not None and principal != caller
         )
+        # Activity authorship is a durable cross-principal trust boundary, not
+        # a rollout-compatible write. The channel identity must match even when
+        # lower-risk tools still run with auth off or warn.
+        require_bound_caller(ctx, caller, tool="log_activity")
         source_trust, source_trust_clamped = clamp_source_trust(
-            source_trust, caller=caller, tool="log_activity"
+            source_trust, caller=caller, tool="log_activity", strict=True
         )
         db = get_db(ctx)
         # UTC via the clock seam: the old local-time default here both leaked

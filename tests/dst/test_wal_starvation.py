@@ -70,7 +70,7 @@ async def _leaker(sim: SimConnection, project: str) -> dict[str, Any]:
     """One log_activity call from a buggy caller: on the injected failure it
     neither rolls back nor closes — the tool-return probe is INV-10."""
     fns = activity_fns()
-    ctx = make_ctx(cast(aiosqlite.Connection, sim))
+    ctx = make_ctx(cast(aiosqlite.Connection, sim), principal="cc")
     injected = False
     try:
         await fns["log_activity"](
@@ -95,7 +95,7 @@ async def _activity_writer(
         db_path, sim_clock, rng, trace, scheduler=scheduler, writer_id=writer_id
     )
     fns = activity_fns()
-    ctx = make_ctx(cast(aiosqlite.Connection, sim))
+    ctx = make_ctx(cast(aiosqlite.Connection, sim), principal=caller)
     try:
         for round_no in range(2):
             await fns["log_activity"](

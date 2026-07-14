@@ -36,7 +36,7 @@ async def test_log_activity_default_timestamp_uses_clock_seam(
             caller="cc",
             project_name="SeamProject",
             summary="default-timestamp write",
-            ctx=make_ctx(db),
+            ctx=make_ctx(db, principal="cc"),
         )
     finally:
         clock.reset()

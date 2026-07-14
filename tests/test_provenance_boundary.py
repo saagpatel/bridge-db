@@ -48,7 +48,7 @@ def _assert_boundary(boundary: dict[str, Any], expected_trust: str) -> None:
 async def test_get_recent_activity_carries_instruction_boundary(
     db: aiosqlite.Connection, a_fns: dict[str, Any]
 ) -> None:
-    ctx = make_ctx(db, principal="claude_ai")
+    ctx = make_ctx(db, principal="cc")
     await a_fns["log_activity"](caller="cc", project_name="P", summary="did work", ctx=ctx)
     rows = await a_fns["get_recent_activity"](ctx=ctx)
     assert rows, "expected at least one activity row"
@@ -59,7 +59,7 @@ async def test_get_recent_activity_carries_instruction_boundary(
 async def test_get_activity_signal_carries_instruction_boundary(
     db: aiosqlite.Connection, a_fns: dict[str, Any]
 ) -> None:
-    ctx = make_ctx(db, principal="claude_ai")
+    ctx = make_ctx(db, principal="cc")
     # A non-session-boundary cc summary is a substantive entry (not a lifecycle
     # aggregate), so it flows through the per-row payload that needs the boundary.
     await a_fns["log_activity"](caller="cc", project_name="P", summary="substantive work", ctx=ctx)
@@ -73,7 +73,7 @@ async def test_get_activity_signal_carries_instruction_boundary(
 async def test_get_activity_signal_lifecycle_aggregate_carries_trust_summary(
     db: aiosqlite.Connection, a_fns: dict[str, Any]
 ) -> None:
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="cc")
     await a_fns["log_activity"](
         caller="cc",
         project_name="P",
@@ -101,7 +101,7 @@ async def test_get_activity_signal_lifecycle_aggregate_carries_trust_summary(
 async def test_get_shipped_events_carries_instruction_boundary(
     db: aiosqlite.Connection, a_fns: dict[str, Any]
 ) -> None:
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="cc")
     await a_fns["log_activity"](
         caller="cc",
         project_name="P",

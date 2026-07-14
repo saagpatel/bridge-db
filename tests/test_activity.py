@@ -20,6 +20,22 @@ from bridge_db.tools import activity as mod
 def fns(db: aiosqlite.Connection) -> dict[str, Any]:
     cap = CaptureMCP()
     mod.register(cap)
+    raw_log_activity = cap.fns["log_activity"]
+
+    async def bound_log_activity(**kwargs: Any) -> Any:
+        """Default activity tests exercise a legitimate channel-bound writer."""
+        caller = kwargs["caller"]
+        ctx = kwargs.get("ctx")
+        principal = getattr(
+            getattr(getattr(ctx, "request_context", None), "lifespan_context", None),
+            "principal",
+            None,
+        )
+        if principal is None:
+            kwargs["ctx"] = make_ctx(db, principal=caller)
+        return await raw_log_activity(**kwargs)
+
+    cap.fns["log_activity"] = bound_log_activity
     return cap.fns
 
 
@@ -46,20 +62,23 @@ async def test_log_activity_inserts_row(
     assert json.loads(rows[0]["tags"]) == ["SHIPPED"]
 
 
-async def test_log_activity_counts_attribution_divergence(
-    db: aiosqlite.Connection, fns: dict[str, Any]
+async def test_log_activity_rejects_attribution_divergence_even_in_warn_mode(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """INV-9 reachability: a row whose claimed source diverges from the
-    channel-bound principal is legal outside enforce mode but must count."""
+    """BDB-DS-001-R1: rollout mode cannot authorize forged authorship."""
+    monkeypatch.setattr(config, "AUTH_MODE", "warn")
+    cap = CaptureMCP()
+    mod.register(cap)
     diverged = make_ctx(db, principal="cc")
-    await fns["log_activity"](
-        caller="codex", project_name="P", summary="s", ctx=diverged
-    )
+    with pytest.raises(ToolError, match="bound to 'cc'"):
+        await cap.fns["log_activity"](
+            caller="codex", project_name="P", summary="s", ctx=diverged
+        )
     assert sometimes_counts().get("attribution_divergence") == 1
-
-    matching = make_ctx(db, principal="cc")
-    await fns["log_activity"](caller="cc", project_name="P", summary="s", ctx=matching)
-    assert sometimes_counts().get("attribution_divergence") == 1  # unchanged
+    cursor = await db.execute("SELECT COUNT(*) FROM activity_log")
+    count_row = await cursor.fetchone()
+    assert count_row is not None
+    assert count_row[0] == 0
 
 
 async def test_log_activity_persists_and_echoes_source_trust(
@@ -73,7 +92,8 @@ async def test_log_activity_persists_and_echoes_source_trust(
         caller="cc", project_name="B", summary="s", ctx=ctx
     )
 
-    assert asserted["source_trust"] == "operator"
+    assert asserted["source_trust"] == "agent"
+    assert asserted["source_trust_clamped"] is True
     assert defaulted["source_trust"] == "agent"
 
     cursor = await db.execute(
@@ -81,7 +101,7 @@ async def test_log_activity_persists_and_echoes_source_trust(
     )
     rows: list[aiosqlite.Row] = await cursor.fetchall()  # type: ignore[assignment]
     trust = {r["project_name"]: r["source_trust"] for r in rows}
-    assert trust["A"] == "operator"
+    assert trust["A"] == "agent"
     assert trust["B"] == "agent"
 
 
@@ -1693,6 +1713,29 @@ async def test_log_activity_enforce_rejects_caller_mismatch(
         )
 
 
+async def test_log_activity_auth_off_rejects_unbound_forgery(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BDB-DS-001-R1: default-off mode cannot bypass strict activity binding."""
+    monkeypatch.setattr(config, "AUTH_MODE", "off")
+    cap = CaptureMCP()
+    mod.register(cap)
+
+    with pytest.raises(ToolError, match="Unauthenticated connection"):
+        await cap.fns["log_activity"](
+            caller="cc",
+            project_name="Forged",
+            summary="unbound forged authorship",
+            source_trust="operator",
+            ctx=make_ctx(db),
+        )
+
+    cursor = await db.execute("SELECT COUNT(*) FROM activity_log")
+    count_row = await cursor.fetchone()
+    assert count_row is not None
+    assert count_row[0] == 0
+
+
 async def test_log_activity_enforce_allows_matching_principal(
     db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1711,7 +1754,7 @@ async def test_log_activity_enforce_allows_matching_principal(
     assert result["ok"] is True
 
 
-async def test_log_activity_warn_allows_mismatch(
+async def test_log_activity_warn_rejects_mismatch(
     db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from bridge_db import config as bridge_config
@@ -1720,13 +1763,13 @@ async def test_log_activity_warn_allows_mismatch(
     monkeypatch.setattr(bridge_config, "AUTH_MODE", "warn")
     cap = CaptureMCP()
     activity_module.register(cap)
-    result = await cap.fns["log_activity"](
-        caller="cc",
-        project_name="TestProject",
-        summary="mismatched but warned",
-        ctx=make_ctx(db, principal="codex"),
-    )
-    assert result["ok"] is True
+    with pytest.raises(ToolError, match="bound to 'codex'"):
+        await cap.fns["log_activity"](
+            caller="cc",
+            project_name="TestProject",
+            summary="mismatched but warned",
+            ctx=make_ctx(db, principal="codex"),
+        )
 
 
 async def test_log_activity_clamps_operator_label_in_db(
