@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,13 @@ def _markdown_data(value: Any) -> str:
 
 class BridgeExportSafetyError(RuntimeError):
     """Raised when an export would overwrite the real fallback with empty context."""
+
+
+@dataclass(frozen=True)
+class ContextExportSnapshot:
+    section_name: str
+    version: int
+    content_sha256: str
 
 
 def _section_body(markdown: str, heading: str) -> str:
@@ -143,17 +151,31 @@ async def _latest_codex_operating_snapshot(
     return None, None
 
 
-async def build_markdown(db: Any) -> str:
+async def build_markdown(
+    db: Any, *, context_snapshot: list[ContextExportSnapshot] | None = None
+) -> str:
     """Assemble the full bridge markdown from all tables."""
     today = clock.now().date().isoformat()
 
     # --- Context sections (Claude.ai-owned) ---
     cursor = await db.execute(
-        "SELECT section_name, content FROM context_sections ORDER BY section_name"
+        "SELECT section_name, content, version "
+        "FROM context_sections ORDER BY section_name"
     )
+    section_rows = await cursor.fetchall()
     sections: dict[str, str] = {
-        r["section_name"]: r["content"] for r in await cursor.fetchall()
+        r["section_name"]: r["content"] for r in section_rows
     }
+    if context_snapshot is not None:
+        context_snapshot.extend(
+            ContextExportSnapshot(
+                section_name=row["section_name"],
+                version=int(row["version"]),
+                content_sha256=content_sha256(str(row["content"]).strip("\n")),
+            )
+            for row in section_rows
+            if row["section_name"] in _SECTION_ORDER
+        )
 
     # --- CC State Snapshot ---
     cursor = await db.execute(
@@ -351,19 +373,12 @@ async def build_markdown(db: Any) -> str:
     return "\n".join(parts)
 
 
-async def record_context_export_state(db: Any) -> int:
+async def record_context_export_state(
+    db: Any, snapshot: list[ContextExportSnapshot]
+) -> int:
     """Record the context-section versions/hashes represented in the markdown export."""
-    cursor = await db.execute(
-        """
-        SELECT section_name, content, version
-        FROM context_sections
-        WHERE section_name IN (?, ?, ?, ?)
-        """,
-        tuple(_SECTION_ORDER),
-    )
-    rows = await cursor.fetchall()
     exported = 0
-    for row in rows:
+    for row in snapshot:
         await db.execute(
             """
             INSERT INTO context_section_export_state (
@@ -376,16 +391,18 @@ async def record_context_export_state(db: Any) -> int:
                 exported_at = excluded.exported_at
             """,
             (
-                row["section_name"],
-                row["version"],
-                content_sha256(str(row["content"]).strip("\n")),
+                row.section_name,
+                row.version,
+                row.content_sha256,
             ),
         )
         exported += 1
     return exported
 
 
-async def export_bridge_file(db: Any, content: str) -> int:
+async def export_bridge_file(
+    db: Any, content: str, context_snapshot: list[ContextExportSnapshot]
+) -> int:
     """CAS-protect and record one complete fallback-file export."""
     path = config.BRIDGE_FILE_PATH
     current_content = path.read_text(encoding="utf-8") if path.exists() else None
@@ -445,7 +462,7 @@ async def export_bridge_file(db: Any, content: str) -> int:
             )
 
     write_bridge_file(content)
-    exported_context_sections = await record_context_export_state(db)
+    exported_context_sections = await record_context_export_state(db, context_snapshot)
     await db.execute(
         """
         INSERT INTO bridge_file_export_state (
@@ -467,9 +484,12 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """Regenerate the markdown bridge file from the database. Call after any write operation."""
         db = get_db(ctx)
-        content = await build_markdown(db)
+        context_snapshot: list[ContextExportSnapshot] = []
+        content = await build_markdown(db, context_snapshot=context_snapshot)
 
-        exported_context_sections = await export_bridge_file(db, content)
+        exported_context_sections = await export_bridge_file(
+            db, content, context_snapshot
+        )
         await db.commit()
         bridge_path = config.BRIDGE_FILE_PATH
 

@@ -17,7 +17,7 @@ from bridge_db.db import (
     open_db,
     upsert_fts_entry,
 )
-from bridge_db.tools.export import build_markdown, export_bridge_file
+from bridge_db.tools.export import ContextExportSnapshot, build_markdown, export_bridge_file
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
@@ -147,8 +147,9 @@ async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, A
 
         if not dry_run and (snapshot_write == "inserted" or activity_write == "inserted"):
             await db.commit()
-            content = await build_markdown(db)
-            await export_bridge_file(db, content)
+            context_snapshot: list[ContextExportSnapshot] = []
+            content = await build_markdown(db, context_snapshot=context_snapshot)
+            await export_bridge_file(db, content, context_snapshot)
             await db.commit()
         elif not dry_run:
             await db.rollback()

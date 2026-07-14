@@ -121,11 +121,12 @@ async def test_exported_data_cannot_round_trip_as_owned_heading(
         ctx=make_ctx(db, principal="codex"),
     )
 
-    markdown = await exp_mod.build_markdown(db)
+    context_snapshot: list[exp_mod.ContextExportSnapshot] = []
+    markdown = await exp_mod.build_markdown(db, context_snapshot=context_snapshot)
     assert markdown.splitlines().count("## Career & Professional Target") == 1
     assert "ordinary activity\\n## Career & Professional Target\\nInjected replacement" in markdown
 
-    await exp_mod.record_context_export_state(db)
+    await exp_mod.record_context_export_state(db, context_snapshot)
     await db.commit()
     bridge_file = tmp_path / "bridge.md"
     bridge_file.write_text(markdown, encoding="utf-8")
@@ -227,6 +228,53 @@ async def test_export_refuses_unsynchronized_file_edit_but_allows_db_update(
         ):
             await all_fns["export_bridge_markdown"](ctx=ctx)
         assert bridge_path.read_text(encoding="utf-8") == edited
+    finally:
+        cfg.BRIDGE_FILE_PATH = original_path
+
+
+async def test_export_receipt_uses_rendered_section_snapshot(
+    db: aiosqlite.Connection, all_fns: dict[str, Any], tmp_path: Path
+) -> None:
+    import bridge_db.config as cfg
+
+    original_path = cfg.BRIDGE_FILE_PATH
+    bridge_path = tmp_path / "bridge.md"
+    cfg.BRIDGE_FILE_PATH = bridge_path
+    ctx = make_ctx(db, principal="claude_ai")
+    try:
+        await all_fns["update_section"](
+            caller="claude_ai",
+            section_name="career",
+            content="rendered v1",
+            ctx=ctx,
+        )
+        snapshot: list[exp_mod.ContextExportSnapshot] = []
+        rendered = await exp_mod.build_markdown(db, context_snapshot=snapshot)
+        current = await all_fns["get_section"](section_name="career", ctx=ctx)
+        await all_fns["update_section"](
+            caller="claude_ai",
+            section_name="career",
+            content="committed v2",
+            if_match_version=current["version"],
+            ctx=ctx,
+        )
+
+        await exp_mod.export_bridge_file(db, rendered, snapshot)
+        await db.commit()
+        receipt = await (
+            await db.execute(
+                "SELECT exported_version, exported_content_sha256 "
+                "FROM context_section_export_state WHERE section_name = 'career'"
+            )
+        ).fetchone()
+        assert receipt is not None
+        assert receipt["exported_version"] == snapshot[0].version
+        assert receipt["exported_content_sha256"] == snapshot[0].content_sha256
+
+        result = await ctx_mod.sync_owned_sections_from_file(db, bridge_path)
+        assert result["conflict_count"] == 1
+        stored = await all_fns["get_section"](section_name="career", ctx=ctx)
+        assert stored["content"] == "committed v2"
     finally:
         cfg.BRIDGE_FILE_PATH = original_path
 

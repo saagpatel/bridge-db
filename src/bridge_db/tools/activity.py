@@ -226,12 +226,14 @@ async def _export_bridge_markdown_after_processing(db: Any) -> None:
     """Keep the fallback bridge file current after shipped-event state changes."""
     try:
         from bridge_db.tools.export import (
+            ContextExportSnapshot,
             build_markdown,
             export_bridge_file,
         )
 
-        content = await build_markdown(db)
-        await export_bridge_file(db, content)
+        context_snapshot: list[ContextExportSnapshot] = []
+        content = await build_markdown(db, context_snapshot=context_snapshot)
+        await export_bridge_file(db, content, context_snapshot)
         await db.commit()
         logger.info("auto-export triggered after shipped-event processing")
     except Exception:
