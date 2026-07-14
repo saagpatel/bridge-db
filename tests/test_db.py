@@ -26,6 +26,7 @@ async def test_schema_creates_all_tables(db: aiosqlite.Connection) -> None:
     tables = {row[0] for row in await cursor.fetchall()}
     assert tables == {
         "activity_log",
+        "bridge_file_export_state",
         "content_index",
         "context_section_export_state",
         "context_sections",

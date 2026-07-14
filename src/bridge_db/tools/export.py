@@ -385,6 +385,81 @@ async def record_context_export_state(db: Any) -> int:
     return exported
 
 
+async def export_bridge_file(db: Any, content: str) -> int:
+    """CAS-protect and record one complete fallback-file export."""
+    path = config.BRIDGE_FILE_PATH
+    current_content = path.read_text(encoding="utf-8") if path.exists() else None
+    cursor = await db.execute(
+        "SELECT exported_content_sha256 FROM bridge_file_export_state WHERE singleton = 1"
+    )
+    state = await cursor.fetchone()
+    expected_hash = state["exported_content_sha256"] if state is not None else None
+
+    if current_content is not None and expected_hash is not None:
+        if content_sha256(current_content) != expected_hash:
+            raise BridgeExportSafetyError(
+                "Refusing to overwrite the fallback bridge file because it changed "
+                "since the last export; import or merge the file edits first."
+            )
+    elif current_content is not None:
+        # One-time v15 bootstrap: old databases have per-owned-section export
+        # hashes but no whole-file hash. Accept the current file only when every
+        # recorded editable section still matches its last exported image.
+        cursor = await db.execute(
+            "SELECT section_name, exported_content_sha256 "
+            "FROM context_section_export_state"
+        )
+        section_states = await cursor.fetchall()
+        safe_bootstrap = current_content == content
+        if not safe_bootstrap:
+            from bridge_db.tools.context import parse_owned_sections
+
+            try:
+                parsed = parse_owned_sections(current_content)
+            except Exception as exc:
+                raise BridgeExportSafetyError(
+                    "Refusing to bootstrap export state from an ambiguous bridge file"
+                ) from exc
+            if not section_states:
+                cursor = await db.execute(
+                    "SELECT section_name, content FROM context_sections"
+                )
+                section_states = [
+                    {
+                        "section_name": row["section_name"],
+                        "exported_content_sha256": content_sha256(
+                            str(row["content"]).strip("\n")
+                        ),
+                    }
+                    for row in await cursor.fetchall()
+                ]
+            safe_bootstrap = all(
+                content_sha256(parsed.get(row["section_name"], ""))
+                == row["exported_content_sha256"]
+                for row in section_states
+            ) and bool(section_states)
+        if not safe_bootstrap:
+            raise BridgeExportSafetyError(
+                "Refusing to overwrite an untracked fallback bridge file; import "
+                "or merge its owned-section edits first."
+            )
+
+    write_bridge_file(content)
+    exported_context_sections = await record_context_export_state(db)
+    await db.execute(
+        """
+        INSERT INTO bridge_file_export_state (
+            singleton, exported_content_sha256, exported_at
+        ) VALUES (1, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(singleton) DO UPDATE SET
+            exported_content_sha256 = excluded.exported_content_sha256,
+            exported_at = excluded.exported_at
+        """,
+        (content_sha256(content),),
+    )
+    return exported_context_sections
+
+
 def register(mcp: FastMCP) -> None:
     @mcp.tool()
     async def export_bridge_markdown(
@@ -394,8 +469,7 @@ def register(mcp: FastMCP) -> None:
         db = get_db(ctx)
         content = await build_markdown(db)
 
-        write_bridge_file(content)
-        exported_context_sections = await record_context_export_state(db)
+        exported_context_sections = await export_bridge_file(db, content)
         await db.commit()
         bridge_path = config.BRIDGE_FILE_PATH
 

@@ -16,7 +16,7 @@ from bridge_db import config
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # A migration post-hook runs after its DDL, before the version bump+commit
 # (e.g. FTS repopulation). Its return value is ignored.
@@ -39,6 +39,12 @@ CREATE TABLE IF NOT EXISTS context_section_export_state (
     exported_content_sha256 TEXT NOT NULL,
     exported_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     FOREIGN KEY(section_name) REFERENCES context_sections(section_name) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS bridge_file_export_state (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    exported_content_sha256 TEXT NOT NULL,
+    exported_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
 CREATE TABLE IF NOT EXISTS write_conflicts (
@@ -458,6 +464,14 @@ ALTER TABLE pending_handoffs ADD COLUMN claimed_by TEXT;
 # a clean no-op that still converges to v14.
 _MIGRATION_V13_TO_V14 = "-- v13 → v14: all changes run in the _migrate_shipped_state_to_columns post-hook.\n"
 
+_MIGRATION_V14_TO_V15 = """
+CREATE TABLE IF NOT EXISTS bridge_file_export_state (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    exported_content_sha256 TEXT NOT NULL,
+    exported_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+"""
+
 # Column definitions for the v14 ADD COLUMN step. Kept character-identical to the
 # activity_log block in _SCHEMA_DDL so a fresh install and a migrated DB converge
 # (see tests/test_schema_convergence_concurrency.py). NOTE: the synced/policy
@@ -666,6 +680,7 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         (12, _MIGRATION_V11_TO_V12, None),
         (13, _MIGRATION_V12_TO_V13, None),
         (14, _MIGRATION_V13_TO_V14, _migrate_shipped_state_to_columns),
+        (15, _MIGRATION_V14_TO_V15, None),
     ]
     for target, ddl, post_hook in migrations:
         if current_version >= target:

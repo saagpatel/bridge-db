@@ -227,13 +227,11 @@ async def _export_bridge_markdown_after_processing(db: Any) -> None:
     try:
         from bridge_db.tools.export import (
             build_markdown,
-            record_context_export_state,
-            write_bridge_file,
+            export_bridge_file,
         )
 
         content = await build_markdown(db)
-        write_bridge_file(content)
-        await record_context_export_state(db)
+        await export_bridge_file(db, content)
         await db.commit()
         logger.info("auto-export triggered after shipped-event processing")
     except Exception:

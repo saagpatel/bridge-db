@@ -192,6 +192,45 @@ async def test_export_records_context_section_export_state(
     assert row["exported_content_sha256"]
 
 
+async def test_export_refuses_unsynchronized_file_edit_but_allows_db_update(
+    db: aiosqlite.Connection, all_fns: dict[str, Any], tmp_path: Path
+) -> None:
+    import bridge_db.config as cfg
+
+    original_path = cfg.BRIDGE_FILE_PATH
+    bridge_path = tmp_path / "bridge.md"
+    cfg.BRIDGE_FILE_PATH = bridge_path
+    ctx = make_ctx(db, principal="claude_ai")
+    try:
+        await all_fns["update_section"](
+            caller="claude_ai",
+            section_name="career",
+            content="export base",
+            ctx=ctx,
+        )
+        await all_fns["export_bridge_markdown"](ctx=ctx)
+
+        await all_fns["log_activity"](
+            caller="cc",
+            project_name="ExportCAS",
+            summary="new database value",
+            ctx=make_ctx(db, principal="cc"),
+        )
+        await all_fns["export_bridge_markdown"](ctx=ctx)
+        legitimate_export = bridge_path.read_text(encoding="utf-8")
+        assert "new database value" in legitimate_export
+
+        edited = legitimate_export.replace("export base", "unsynchronized file edit")
+        bridge_path.write_text(edited, encoding="utf-8")
+        with pytest.raises(
+            exp_mod.BridgeExportSafetyError, match="changed since the last export"
+        ):
+            await all_fns["export_bridge_markdown"](ctx=ctx)
+        assert bridge_path.read_text(encoding="utf-8") == edited
+    finally:
+        cfg.BRIDGE_FILE_PATH = original_path
+
+
 async def test_export_frontmatter_present(db: aiosqlite.Connection) -> None:
     md = await _build_markdown(db)
     assert "---" in md
