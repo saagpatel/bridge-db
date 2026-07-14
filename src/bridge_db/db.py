@@ -347,10 +347,10 @@ ALTER TABLE pending_handoffs ADD COLUMN canonical_key TEXT;
 # Migration v6 → v7: add the source_trust provenance label to the four
 # instruction-bearing tables. Additive ADD COLUMN — SQLite permits a column CHECK
 # when the constant default satisfies it (it does), so no rename/recreate.
-# Conservative backfill: pre-existing context_sections + pending_handoffs rows are
-# owner-authored history → 'operator'; activity_log + system_snapshots history keeps
-# the 'agent' default. source_trust is DB-only and not FTS-indexed, so content_index
-# is untouched (no repopulate_content_index).
+# Provenance-free history cannot prove operator review. Pre-existing context and
+# handoff rows therefore become 'ingested'; activity and snapshot history keeps
+# the non-privileged 'agent' default. source_trust is not FTS-indexed, so
+# content_index is untouched (no repopulate_content_index).
 _MIGRATION_V6_TO_V7 = """
 ALTER TABLE pending_handoffs ADD COLUMN source_trust TEXT NOT NULL DEFAULT 'agent'
     CHECK(source_trust IN ('operator', 'agent', 'ingested'));
@@ -360,8 +360,8 @@ ALTER TABLE context_sections ADD COLUMN source_trust TEXT NOT NULL DEFAULT 'agen
     CHECK(source_trust IN ('operator', 'agent', 'ingested'));
 ALTER TABLE system_snapshots ADD COLUMN source_trust TEXT NOT NULL DEFAULT 'agent'
     CHECK(source_trust IN ('operator', 'agent', 'ingested'));
-UPDATE context_sections SET source_trust = 'operator';
-UPDATE pending_handoffs SET source_trust = 'operator';
+UPDATE context_sections SET source_trust = 'ingested';
+UPDATE pending_handoffs SET source_trust = 'ingested';
 """
 
 

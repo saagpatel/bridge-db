@@ -708,13 +708,13 @@ async def test_migration_v6_to_v7_adds_source_trust(tmp_path: Path) -> None:
         assert row is not None
         assert row[0] == SCHEMA_VERSION
 
-        # Owner-authored history → 'operator'.
+        # Provenance-free history stays below operator authority.
         for table in ("context_sections", "pending_handoffs"):
             cursor = await migrated.execute(f"SELECT source_trust FROM {table}")
             r = await cursor.fetchone()
             assert r is not None
-            assert r["source_trust"] == "operator", (
-                f"{table} backfill should be 'operator'"
+            assert r["source_trust"] == "ingested", (
+                f"{table} backfill should be 'ingested'"
             )
 
         # Agent-authored history keeps the default.
@@ -769,7 +769,7 @@ async def test_migration_v6_to_v7_is_idempotent(tmp_path: Path) -> None:
         cursor = await second.execute("SELECT source_trust FROM context_sections")
         r = await cursor.fetchone()
         assert r is not None
-        assert r["source_trust"] == "operator"
+        assert r["source_trust"] == "ingested"
     finally:
         await second.close()
 
