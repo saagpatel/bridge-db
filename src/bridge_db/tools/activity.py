@@ -10,7 +10,12 @@ from pydantic import Field
 
 from bridge_db import clock, config
 from bridge_db.audit import log_audit
-from bridge_db.auth import clamp_source_trust, get_principal, require_caller
+from bridge_db.auth import (
+    clamp_source_trust,
+    get_principal,
+    require_bound_caller,
+    require_caller,
+)
 from bridge_db.db import (
     get_db,
     insert_activity_row,
@@ -773,7 +778,8 @@ def register(mcp: FastMCP) -> None:
                 description=(
                     "Terminal sync disposition. 'synced' = receipt-backed "
                     "downstream proof (requires downstream_system + "
-                    "downstream_ref, adds PROCESSED). A policy value "
+                    "downstream_ref, a bound caller matching the event source, "
+                    "and adds PROCESSED). A policy value "
                     "(unsynced_by_policy, no_durable_target, "
                     "superseded_without_receipt, declined_mapping) = non-receipt "
                     "decision (requires reason, does not claim sync)."
@@ -818,9 +824,9 @@ def register(mcp: FastMCP) -> None:
         ``sync_*`` columns):
 
         - ``disposition='synced'`` is the receipt-backed proof path: it REQUIRES
-          ``downstream_system`` + ``downstream_ref``, adds the ``PROCESSED`` tag,
-          and records the downstream reference. Only this path claims a durable
-          downstream sync.
+          ``downstream_system`` + ``downstream_ref`` and a channel-bound caller
+          matching the event source, adds the ``PROCESSED`` tag, and records the
+          downstream reference. Only this path claims a durable downstream sync.
         - A policy ``disposition`` (unsynced_by_policy / no_durable_target /
           superseded_without_receipt / declined_mapping) is a non-receipt
           decision: it REQUIRES a ``reason``, does NOT add ``PROCESSED``, and does
@@ -862,7 +868,8 @@ def register(mcp: FastMCP) -> None:
 
         db = get_db(ctx)
         cursor = await db.execute(
-            "SELECT tags, project_name, sync_disposition, sync_reason, sync_policy_ref "
+            "SELECT source, tags, project_name, sync_disposition, sync_reason, "
+            "sync_policy_ref "
             "FROM activity_log WHERE id = ?",
             (activity_id,),
         )
@@ -873,6 +880,28 @@ def register(mcp: FastMCP) -> None:
         current_tags: list[str] = json.loads(row["tags"])
         if "SHIPPED" not in current_tags:
             raise ToolError(f"Activity entry {activity_id} is not tagged SHIPPED")
+
+        # A synced receipt is terminal execution proof, not a general policy
+        # decision. Bind it to the authenticated event owner even while the
+        # broader auth rollout remains in compatibility mode.
+        if is_synced:
+            require_bound_caller(ctx, caller, tool="record_disposition")
+            if row["source"] != caller:
+                log_audit(
+                    "record_disposition",
+                    caller,
+                    row["project_name"],
+                    ok=False,
+                    detail=(
+                        f"activity_id={activity_id} disposition=synced "
+                        f"decision=refused reason=source_owner_mismatch "
+                        f"event_source={row['source']}"
+                    ),
+                )
+                raise ToolError(
+                    f"Activity entry {activity_id} is owned by '{row['source']}'; "
+                    f"caller '{caller}' cannot record its synced receipt"
+                )
 
         current_disposition = row["sync_disposition"]
         if not is_synced and current_disposition == _SYNCED_DISPOSITION:
