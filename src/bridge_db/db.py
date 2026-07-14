@@ -3,7 +3,8 @@
 import hashlib
 import json
 import logging
-import shutil
+import os
+import sqlite3
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -537,13 +538,14 @@ async def _table_exists(db: aiosqlite.Connection, name: str) -> bool:
 
 
 async def _backup_db_file(db: aiosqlite.Connection, label: str) -> None:
-    """Write a one-time consistent file copy of the main DB before a destructive
+    """Write a one-time verified logical backup before a destructive
     migration step, so a botched or interrupted migration is repairable.
 
     No-op for an in-memory DB (no file path). Idempotent: if the backup already
     exists (e.g. from a prior interrupted attempt) the pristine copy is kept
-    rather than overwritten with partially-migrated state. Commits and TRUNCATE-
-    checkpoints first so the copied main file is self-contained (WAL flushed in).
+    rather than overwritten with partially-migrated state. SQLite's online
+    backup API includes committed WAL-resident state without requiring a
+    successful checkpoint.
     """
     cursor = await db.execute("PRAGMA database_list")
     main_path = next(
@@ -553,12 +555,51 @@ async def _backup_db_file(db: aiosqlite.Connection, label: str) -> None:
     if not main_path:
         return
     backup = Path(f"{main_path}.{label}.bak")
+    manifest = Path(f"{backup}.sha256")
+    version_row = await (await db.execute("PRAGMA user_version")).fetchone()
+    expected_version = int(version_row[0]) if version_row is not None else -1
+
+    def validate(path: Path, digest_path: Path) -> None:
+        if not digest_path.exists():
+            raise RuntimeError(
+                f"migration backup {path} has no verification manifest; "
+                "refusing destructive migration"
+            )
+        expected_digest = digest_path.read_text(encoding="utf-8").strip()
+        actual_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if expected_digest != actual_digest:
+            raise RuntimeError(
+                f"migration backup {path} failed digest verification; "
+                "refusing destructive migration"
+            )
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as check:
+            integrity = check.execute("PRAGMA integrity_check").fetchone()
+            backup_version = int(check.execute("PRAGMA user_version").fetchone()[0])
+        if integrity is None or integrity[0] != "ok" or backup_version != expected_version:
+            raise RuntimeError(
+                f"migration backup {path} failed SQLite/version verification; "
+                "refusing destructive migration"
+            )
+
     if backup.exists():
+        validate(backup, manifest)
         logger.info("migration backup already present at %s; keeping it", backup)
         return
     await db.commit()
-    await checkpoint_wal(db)
-    shutil.copy2(main_path, backup)
+    temporary = Path(f"{backup}.tmp")
+    temporary.unlink(missing_ok=True)
+    target = sqlite3.connect(temporary)
+    try:
+        await db.backup(target)
+    finally:
+        target.close()
+    temporary_manifest = Path(f"{manifest}.tmp")
+    temporary_manifest.write_text(
+        hashlib.sha256(temporary.read_bytes()).hexdigest() + "\n", encoding="utf-8"
+    )
+    validate(temporary, temporary_manifest)
+    os.replace(temporary, backup)
+    os.replace(temporary_manifest, manifest)
     logger.info("migration backup written to %s", backup)
 
 

@@ -1,5 +1,6 @@
 """Tests for DB schema creation, PRAGMAs, and migration idempotency."""
 
+import hashlib
 from pathlib import Path
 
 import aiosqlite
@@ -1046,7 +1047,40 @@ async def test_migration_v13_to_v14_collapses_shipped_tables_losslessly(
 
     # A pre-migration backup of the DB is left beside it so the irreversible
     # DROP of the child tables is repairable.
-    assert (tmp_path / "v13.db.pre-v14.bak").exists()
+    backup_path = tmp_path / "v13.db.pre-v14.bak"
+    manifest_path = tmp_path / "v13.db.pre-v14.bak.sha256"
+    assert backup_path.exists()
+    assert manifest_path.read_text(encoding="utf-8").strip() == hashlib.sha256(
+        backup_path.read_bytes()
+    ).hexdigest()
+    backup_db = await aiosqlite.connect(backup_path)
+    try:
+        receipt_count = await (
+            await backup_db.execute("SELECT COUNT(*) FROM shipped_sync_receipts")
+        ).fetchone()
+        disposition_count = await (
+            await backup_db.execute("SELECT COUNT(*) FROM shipped_event_dispositions")
+        ).fetchone()
+        assert receipt_count is not None and receipt_count[0] == 1
+        assert disposition_count is not None and disposition_count[0] == 1
+    finally:
+        await backup_db.close()
+
+
+async def test_migration_backup_without_manifest_blocks_destructive_step(
+    tmp_path: Path,
+) -> None:
+    from bridge_db.db import _backup_db_file  # pyright: ignore[reportPrivateUsage]
+
+    db_path = tmp_path / "manifest-check.db"
+    db = await open_db(db_path)
+    backup_path = Path(f"{db_path}.probe.bak")
+    backup_path.write_bytes(db_path.read_bytes())
+    try:
+        with pytest.raises(RuntimeError, match="no verification manifest"):
+            await _backup_db_file(db, "probe")
+    finally:
+        await db.close()
 
 
 async def test_migration_v13_to_v14_is_crash_safe_after_partial_ddl(
