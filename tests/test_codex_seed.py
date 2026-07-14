@@ -100,7 +100,7 @@ async def test_codex_seed_apply_is_idempotent(
     assert first["snapshot_write"] == "inserted"
     assert first["activity_write"] == "inserted"
     assert second["snapshot_write"] == "skipped_identical"
-    assert second["activity_write"] == "skipped_duplicate"
+    assert second["activity_write"] == "skipped_identical"
     assert bridge_path.exists()
 
     db = await open_db(db_path)
@@ -121,7 +121,7 @@ async def test_codex_seed_apply_is_idempotent(
 
 
 @pytest.mark.asyncio
-async def test_codex_seed_skips_duplicate_baseline_activity_for_same_day_project(
+async def test_codex_seed_refuses_conflicting_baseline_activity_atomically(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db_path = tmp_path / "bridge.db"
@@ -136,8 +136,9 @@ async def test_codex_seed_skips_duplicate_baseline_activity_for_same_day_project
     second = await apply_manifest(make_variant_manifest(), dry_run=False)
 
     assert first["activity_write"] == "inserted"
-    assert second["activity_write"] == "skipped_duplicate"
-    assert second["snapshot_write"] == "inserted"
+    assert second["ok"] is False
+    assert second["activity_write"] == "conflict"
+    assert second["snapshot_write"] == "blocked_conflict"
 
     db = await open_db(db_path)
     try:
@@ -147,6 +148,21 @@ async def test_codex_seed_skips_duplicate_baseline_activity_for_same_day_project
         row = await cursor.fetchone()
         assert row is not None
         assert row[0] == 1
+        snapshot_cursor = await db.execute(
+            "SELECT COUNT(*) FROM system_snapshots WHERE system='codex'"
+        )
+        snapshot_row = await snapshot_cursor.fetchone()
+        assert snapshot_row is not None
+        assert snapshot_row[0] == 1
+        activity_cursor = await db.execute(
+            "SELECT summary FROM activity_log WHERE source='codex' "
+            "AND timestamp='2026-04-14' AND project_name='bridge-baseline-seed'"
+        )
+        activity_row = await activity_cursor.fetchone()
+        assert activity_row is not None
+        assert activity_row["summary"] == (
+            "Seeded Codex baseline from reconciled truth."
+        )
     finally:
         await db.close()
 

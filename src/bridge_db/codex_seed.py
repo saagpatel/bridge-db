@@ -55,15 +55,14 @@ async def _latest_codex_snapshot_payload(db: Any) -> dict[str, Any] | None:
     return json.loads(row["data"])
 
 
-async def _baseline_activity_exists(db: Any, entry: dict[str, Any]) -> bool:
+async def _baseline_activity_state(db: Any, entry: dict[str, Any]) -> str:
     cursor = await db.execute(
         """
-        SELECT 1
+        SELECT summary, branch, tags, source_trust
         FROM activity_log
         WHERE source = ?
           AND timestamp = ?
           AND project_name = ?
-        LIMIT 1
         """,
         (
             entry["caller"],
@@ -71,7 +70,24 @@ async def _baseline_activity_exists(db: Any, entry: dict[str, Any]) -> bool:
             entry["project_name"],
         ),
     )
-    return await cursor.fetchone() is not None
+    rows = list(await cursor.fetchall())
+    if not rows:
+        return "missing"
+    if len(rows) != 1:
+        return "conflict"
+    row = rows[0]
+    try:
+        stored_tags = json.loads(row["tags"])
+    except (json.JSONDecodeError, TypeError):
+        return "conflict"
+    expected_tags = entry.get("tags", [])
+    identical = (
+        row["summary"] == entry["summary"]
+        and row["branch"] == entry.get("branch")
+        and stored_tags == expected_tags
+        and row["source_trust"] == "agent"
+    )
+    return "identical" if identical else "conflict"
 
 
 async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, Any]:
@@ -80,7 +96,18 @@ async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, A
         snapshot_payload = manifest["snapshot_payload"]
         baseline_activity = manifest["baseline_activity"]
         snapshot_write = "skipped_identical"
-        activity_write = "skipped_duplicate"
+        activity_write = "skipped_identical"
+
+        activity_state = await _baseline_activity_state(db, baseline_activity)
+        if activity_state == "conflict":
+            await db.rollback()
+            return {
+                "ok": False,
+                "dry_run": dry_run,
+                "snapshot_write": "blocked_conflict",
+                "activity_write": "conflict",
+                "bridge_file": str(config.BRIDGE_FILE_PATH),
+            }
 
         current_snapshot = await _latest_codex_snapshot_payload(db)
         if current_snapshot is None or _fingerprint_snapshot(
@@ -113,8 +140,7 @@ async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, A
                 )
                 await gc_fts_orphans(db, "snapshot")
 
-        activity_exists = await _baseline_activity_exists(db, baseline_activity)
-        if not activity_exists:
+        if activity_state == "missing":
             activity_write = "would_insert" if dry_run else "inserted"
             if not dry_run:
                 cursor = await db.execute(
@@ -127,7 +153,7 @@ async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, A
                         baseline_activity["timestamp"],
                         baseline_activity["project_name"],
                         baseline_activity["summary"],
-                        None,
+                        baseline_activity.get("branch"),
                         json.dumps(baseline_activity.get("tags", [])),
                     ),
                 )
@@ -140,7 +166,7 @@ async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, A
                         fts_text_for_activity(
                             baseline_activity["project_name"],
                             baseline_activity["summary"],
-                            None,
+                            baseline_activity.get("branch"),
                             baseline_activity.get("tags", []),
                         ),
                     )
