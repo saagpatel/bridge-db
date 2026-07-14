@@ -175,11 +175,12 @@ row's single terminal sync disposition onto the `activity_log` `sync_*` columns
 (schema v14). `disposition='synced'` REQUIRES `downstream_system` +
 `downstream_ref` and an exact channel-bound caller matching the activity row's
 `source`; it records the downstream reference and adds `PROCESSED` — the only
-path that claims a durable downstream sync. Cross-source verifiers require a
-future explicit delegation contract and cannot claim the source caller. A policy `disposition`
+path that claims a durable downstream sync. A policy `disposition`
 (`unsynced_by_policy` / `no_durable_target` / `superseded_without_receipt` /
-`declined_mapping`) REQUIRES a `reason`, does not add `PROCESSED`, and does not
-claim sync. A row already carrying `synced` proof cannot be downgraded to a
+`declined_mapping`) also requires the bound source owner plus a `reason`, does
+not add `PROCESSED`, and does not claim sync. Cross-source receipt verification
+or policy adjudication requires a future explicit delegation contract and
+cannot claim the source caller. A row already carrying `synced` proof cannot be downgraded to a
 policy disposition. Dispositioned rows do not re-appear on repeat sync runs:
 `get_shipped_events(unprocessed_only=True)` excludes both `PROCESSED` rows and
 any row with a `sync_disposition`.
@@ -310,8 +311,8 @@ All principals may use read-side tools for bridge-owned state:
 
 | Principal | Write capabilities | Boundaries |
 |---|---|---|
-| `codex` | `log_activity(caller="codex")`, `save_snapshot(caller="codex")`, `record_cost(caller="codex")`, source-owned `record_disposition(caller="codex", disposition="synced")`, policy dispositions, and `pick_up_handoff`/`clear_handoff` where their gates allow it | Owns Codex truth and verification; must not write or refresh `cc` snapshots or Claude.ai sections |
-| `cc` | `log_activity(caller="cc")`, `save_snapshot(caller="cc")`, `record_cost(caller="cc")`, source-owned `record_disposition(caller="cc", disposition="synced")`, policy dispositions, and `pick_up_handoff`/`clear_handoff` where their gates allow it | Owns Claude Code state and session telemetry; must not write Codex snapshots or Claude.ai sections |
+| `codex` | `log_activity(caller="codex")`, `save_snapshot(caller="codex")`, `record_cost(caller="codex")`, source-owned `record_disposition(caller="codex")`, and `pick_up_handoff`/`clear_handoff` where their gates allow it | Owns Codex truth and verification; must not write or refresh `cc` snapshots or Claude.ai sections |
+| `cc` | `log_activity(caller="cc")`, `save_snapshot(caller="cc")`, `record_cost(caller="cc")`, source-owned `record_disposition(caller="cc")`, and `pick_up_handoff`/`clear_handoff` where their gates allow it | Owns Claude Code state and session telemetry; must not write Codex snapshots or Claude.ai sections |
 | `claude_ai` | `update_section` for `career`, `speaking`, `research`, and `capabilities`; channel-bound `create_handoff(caller="claude_ai")`; compatibility file edits to those four sections followed by `sync_from_file` | Advisory and dispatch surface; MCP handoffs cannot mint operator trust and must not act as local execution proof |
 | `notion_os` | `log_activity(caller="notion_os")`, `record_cost(caller="notion_os")`, `record_disposition(caller="notion_os")` | Owns Notion-side receipts/activity it actually verified; must not infer project mappings beyond `notion_sync` |
 | `personal_ops` | `log_activity(caller="personal_ops")`, `record_cost(caller="personal_ops")`, `record_disposition(caller="personal_ops")` | Owns operator-facing coordination receipts; must not replace repo-local or bridge-db verification |

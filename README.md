@@ -266,8 +266,9 @@ be bound to the same principal stored in the activity row's `source`. A
 different principal cannot finalize that event, even if it verified a
 downstream object. Cross-source verification requires a future explicit
 delegation contract; it must not be represented by borrowing the event owner's
-caller value. This ownership rule is intentionally limited to `synced` receipts;
-policy-disposition authorization is a separate contract.
+caller value. The same ownership rule applies to policy dispositions because
+they terminally waive the source's downstream obligation. Cross-source policy
+adjudication also requires an explicit delegation contract.
 
 For non-receipt handling, use `record_disposition` with a policy `disposition`
 (`unsynced_by_policy` / `no_durable_target` / `superseded_without_receipt` /

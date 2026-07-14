@@ -779,7 +779,8 @@ def register(mcp: FastMCP) -> None:
                     "Terminal sync disposition. 'synced' = receipt-backed "
                     "downstream proof (requires downstream_system + "
                     "downstream_ref, a bound caller matching the event source, "
-                    "and adds PROCESSED). A policy value "
+                    "and adds PROCESSED). A policy value also requires the bound "
+                    "event owner. "
                     "(unsynced_by_policy, no_durable_target, "
                     "superseded_without_receipt, declined_mapping) = non-receipt "
                     "decision (requires reason, does not claim sync)."
@@ -829,8 +830,9 @@ def register(mcp: FastMCP) -> None:
           downstream reference. Only this path claims a durable downstream sync.
         - A policy ``disposition`` (unsynced_by_policy / no_durable_target /
           superseded_without_receipt / declined_mapping) is a non-receipt
-          decision: it REQUIRES a ``reason``, does NOT add ``PROCESSED``, and does
-          not claim sync — it records why the event is not receipt-backed.
+          decision: it REQUIRES a channel-bound caller matching the event source
+          and a ``reason``, does NOT add ``PROCESSED``, and does not claim sync —
+          it records why the event is not receipt-backed.
 
         Guarantees carried over from the trio: a SHIPPED row can never be marked
         resolved without either downstream proof or an explicit reasoned policy
@@ -881,27 +883,27 @@ def register(mcp: FastMCP) -> None:
         if "SHIPPED" not in current_tags:
             raise ToolError(f"Activity entry {activity_id} is not tagged SHIPPED")
 
-        # A synced receipt is terminal execution proof, not a general policy
-        # decision. Bind it to the authenticated event owner even while the
-        # broader auth rollout remains in compatibility mode.
-        if is_synced:
-            require_bound_caller(ctx, caller, tool="record_disposition")
-            if row["source"] != caller:
-                log_audit(
-                    "record_disposition",
-                    caller,
-                    row["project_name"],
-                    ok=False,
-                    detail=(
-                        f"activity_id={activity_id} disposition=synced "
-                        f"decision=refused reason=source_owner_mismatch "
-                        f"event_source={row['source']}"
-                    ),
-                )
-                raise ToolError(
-                    f"Activity entry {activity_id} is owned by '{row['source']}'; "
-                    f"caller '{caller}' cannot record its synced receipt"
-                )
+        # Every disposition terminalizes the source owner's downstream
+        # obligation. Bind both receipt proof and policy waivers to that owner,
+        # even while lower-risk writes retain compatibility auth modes.
+        require_bound_caller(ctx, caller, tool="record_disposition")
+        if row["source"] != caller:
+            log_audit(
+                "record_disposition",
+                caller,
+                row["project_name"],
+                ok=False,
+                detail=(
+                    f"activity_id={activity_id} disposition={choice} "
+                    f"decision=refused reason=source_owner_mismatch "
+                    f"event_source={row['source']}"
+                ),
+            )
+            action = "synced receipt" if is_synced else "policy disposition"
+            raise ToolError(
+                f"Activity entry {activity_id} is owned by '{row['source']}'; "
+                f"caller '{caller}' cannot record its {action}"
+            )
 
         current_disposition = row["sync_disposition"]
         if not is_synced and current_disposition == _SYNCED_DISPOSITION:

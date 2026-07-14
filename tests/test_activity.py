@@ -736,9 +736,9 @@ async def test_record_disposition_policy_is_non_receipt(
     db: aiosqlite.Connection,
     fns: dict[str, Any],
 ) -> None:
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="codex")
     await fns["log_activity"](
-        caller="cc",
+        caller="codex",
         project_name="fable-outputs",
         summary="local artifact",
         tags=["SHIPPED"],
@@ -1104,7 +1104,7 @@ async def test_record_disposition_synced_rejects_bound_caller_mismatch(
         )
 
 
-async def test_record_disposition_policy_preserves_cross_source_workflow(
+async def test_record_disposition_policy_rejects_cross_source_principal(
     db: aiosqlite.Connection,
     fns: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
@@ -1121,24 +1121,12 @@ async def test_record_disposition_policy_preserves_cross_source_workflow(
     row = await cursor.fetchone()
     assert row is not None
 
-    result = await fns["record_disposition"](
-        caller="codex",
-        activity_id=row["id"],
-        disposition="no_durable_target",
-        reason="operator policy decision",
-        ctx=make_ctx(db, principal="codex"),
-    )
-
-    assert result["ok"] is True
-    assert result["processed_added"] is False
-
     with pytest.raises(ToolError, match="owned by 'cc'"):
         await fns["record_disposition"](
             caller="codex",
             activity_id=row["id"],
-            disposition="synced",
-            downstream_system="notion",
-            downstream_ref="cross-source-upgrade",
+            disposition="no_durable_target",
+            reason="attacker policy decision",
             ctx=make_ctx(db, principal="codex"),
         )
 
@@ -1149,8 +1137,71 @@ async def test_record_disposition_policy_preserves_cross_source_workflow(
     stored = await cursor.fetchone()
     assert stored is not None
     assert json.loads(stored["tags"]) == ["SHIPPED"]
-    assert stored["sync_disposition"] == "no_durable_target"
-    assert stored["sync_reason"] == "operator policy decision"
+    assert stored["sync_disposition"] is None
+    assert stored["sync_reason"] is None
+
+    events = await fns["get_shipped_events"](
+        unprocessed_only=True, ctx=make_ctx(db, principal="codex")
+    )
+    assert [event["id"] for event in events] == [row["id"]]
+
+
+async def test_record_disposition_policy_allows_bound_source_owner(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", "enforce")
+    ctx = make_ctx(db, principal="cc")
+    await fns["log_activity"](
+        caller="cc",
+        project_name="PolicyDecision",
+        summary="shipped",
+        tags=["SHIPPED"],
+        ctx=ctx,
+    )
+    cursor = await db.execute("SELECT id FROM activity_log")
+    row = await cursor.fetchone()
+    assert row is not None
+
+    result = await fns["record_disposition"](
+        caller="cc",
+        activity_id=row["id"],
+        disposition="no_durable_target",
+        reason="owner policy decision",
+        ctx=ctx,
+    )
+
+    assert result["ok"] is True
+    assert result["processed_added"] is False
+    assert result["decided_by"] == "cc"
+
+
+async def test_record_disposition_policy_requires_bound_source_owner(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", "off")
+    await fns["log_activity"](
+        caller="codex",
+        project_name="PolicyDecision",
+        summary="shipped",
+        tags=["SHIPPED"],
+        ctx=make_ctx(db),
+    )
+    cursor = await db.execute("SELECT id FROM activity_log")
+    row = await cursor.fetchone()
+    assert row is not None
+
+    with pytest.raises(ToolError, match="Unauthenticated connection"):
+        await fns["record_disposition"](
+            caller="codex",
+            activity_id=row["id"],
+            disposition="no_durable_target",
+            reason="unbound policy decision",
+            ctx=make_ctx(db),
+        )
 
 
 async def test_record_disposition_rejects_non_shipped_event(
@@ -1644,9 +1695,13 @@ async def test_log_activity_clamps_operator_label_in_db(
 async def test_unprocessed_only_excludes_dispositioned_rows(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="codex")
     await fns["log_activity"](
-        caller="cc", project_name="A", summary="shipped", tags=["SHIPPED"], ctx=ctx
+        caller="codex",
+        project_name="A",
+        summary="shipped",
+        tags=["SHIPPED"],
+        ctx=ctx,
     )
     cursor = await db.execute("SELECT id FROM activity_log")
     row = await cursor.fetchone()
