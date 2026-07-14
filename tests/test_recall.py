@@ -100,6 +100,10 @@ async def test_recall_hits_carry_source_trust(capture: CaptureMCP, db: Any) -> N
         source_trust="operator",
         ctx=ctx,
     )
+    await db.execute(
+        "UPDATE context_sections SET source_trust = 'operator' "
+        "WHERE section_name = 'career'"
+    )
     await capture.fns["log_activity"](
         caller="cc",
         project_name="bridge-db",

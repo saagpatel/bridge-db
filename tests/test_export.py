@@ -89,7 +89,7 @@ async def test_export_includes_pending_handoffs(
 async def test_export_includes_section_content(
     db: aiosqlite.Connection, all_fns: dict[str, Any]
 ) -> None:
-    mctx = make_ctx(db)
+    mctx = make_ctx(db, principal="claude_ai")
     await all_fns["update_section"](
         caller="claude_ai",
         section_name="career",
@@ -126,7 +126,7 @@ async def test_export_records_context_section_export_state(
     original = cfg.BRIDGE_FILE_PATH
     cfg.BRIDGE_FILE_PATH = tmp_path / "bridge.md"
     try:
-        ctx = make_ctx(db)
+        ctx = make_ctx(db, principal="claude_ai")
         await all_fns["update_section"](
             caller="claude_ai",
             section_name="career",

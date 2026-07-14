@@ -74,7 +74,7 @@ Write tools enforce `caller` ownership, so systems can only write the slices of 
 
 Instruction-bearing rows carry a `source_trust` label — `operator`, `agent`, or `ingested` — recording who authored the content. It lives only in the DB (schema v7+, on `pending_handoffs`, `activity_log`, `context_sections`, `system_snapshots`) and is **never serialized into the markdown export**, which would otherwise launder provenance.
 
-- **Writers** set it via an optional `source_trust` param; the conservative default is `agent`. `create_handoff` always requires a channel-bound `claude_ai` principal, even when the global auth rollout mode is `off`, and an MCP request for `operator` trust is clamped to `agent`. `update_section` preserves an existing section's label on a content-only re-sync.
+- **Writers** set it via an optional `source_trust` param; the conservative default is `agent`. `create_handoff` and `update_section` require exact channel-bound owners even when the global auth rollout mode is `off`, and MCP requests for `operator` trust are clamped to `agent`. Every accepted section content change receives fresh provenance; it never inherits operator trust from an older version.
 - **The gate** lives at the one dangerous transition — `pick_up_handoff` moving a handoff `pending → active`:
   - `operator`-trust → picks up in one call (`cc` and `codex`).
   - `cc` + non-`operator` → returns `requires_confirmation` and does **not** transition; re-invoke with `confirm=True` to proceed.

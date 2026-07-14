@@ -39,12 +39,8 @@ NOTIFICATION_SOURCE_ALIASES: dict[CallerID, str] = {
     "personal_ops": "personal-ops",
 }
 
-# Known context sections and their registered steward.
-# Context-section writes are OPEN to every caller (no per-caller gate); this map
-# is the section-name registry (unknown names are rejected) and supplies the
-# `owner` shown on reads. Keys are the section_name values stored in
-# context_sections. To restrict a section again, reintroduce a caller gate in
-# tools/context.update_section.
+# Known context sections and their authorized steward. update_section requires
+# the channel-bound caller to match this map; unknown names are rejected.
 SECTION_OWNERS: dict[str, CallerID] = {
     "career": "claude_ai",
     "speaking": "claude_ai",

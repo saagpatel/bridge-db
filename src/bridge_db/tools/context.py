@@ -10,7 +10,12 @@ from pydantic import Field
 
 from bridge_db import config
 from bridge_db.audit import log_audit
-from bridge_db.auth import clamp_source_trust, get_principal, require_caller
+from bridge_db.auth import (
+    clamp_source_trust,
+    get_principal,
+    require_bound_caller,
+    require_caller,
+)
 from bridge_db.db import (
     content_sha256,
     fts_text_for_section,
@@ -73,9 +78,8 @@ async def _upsert_section(
     if_match_updated_at: str | None = None,
     if_match_version: int | None = None,
 ) -> dict[str, Any]:
-    # source_trust is COALESCEd: a fresh row with no assertion takes 'agent'; a
-    # content-only update (source_trust=None) preserves the row's existing label
-    # rather than relabelling operator-authored sections on a routine re-sync.
+    # Provenance is rebound on every content change. A missing assertion becomes
+    # 'agent'; it never inherits operator trust from an older content version.
     #
     # if_match_version is the real CAS token. if_match_updated_at remains a
     # compatibility guard for existing callers and is enforced when supplied.
@@ -99,7 +103,7 @@ async def _upsert_section(
             UPDATE context_sections SET
                 content = ?,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-                source_trust = COALESCE(?, source_trust),
+                source_trust = COALESCE(?, 'agent'),
                 version = version + 1
             WHERE {" AND ".join(conditions)}
             """,  # noqa: S608 — conditions are assembled from fixed predicates only.
@@ -403,9 +407,9 @@ def register(mcp: FastMCP) -> None:
         source_trust: Annotated[
             SourceTrust | None,
             Field(
-                description="Provenance to set: 'operator', 'agent', or 'ingested' — an "
-                "explicit value always wins (it can relabel an existing section). Omit to "
-                "preserve the section's current label ('agent' on first write)."
+                description="Provenance for this content version. MCP writes cannot set "
+                "operator trust; 'operator' is clamped to 'agent'. Omit for the "
+                "agent-authored default, or use 'ingested' for imported content."
             ),
         ] = None,
         if_match_updated_at: Annotated[
@@ -436,24 +440,40 @@ def register(mcp: FastMCP) -> None:
         ] = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
-        """Upsert a context section. Open to every caller; SECTION_OWNERS records the
-        section's steward (returned as `owner` for display). New sections need no CAS
-        token; a write to an existing section without if_match_version (or
-        if_match_updated_at) is rejected unconditionally with a missing_cas receipt."""
+        """Upsert a steward-owned context section with content-bound provenance.
+
+        New sections need no CAS token. Existing sections require
+        if_match_version (or if_match_updated_at); missing or stale tokens return
+        a durable conflict receipt.
+        """
         require_caller(ctx, caller, tool="update_section")
-        # source_trust may be None here; None passes through the clamp and
-        # preserves the stored label via COALESCE in _upsert_section.
-        source_trust, source_trust_clamped = clamp_source_trust(
-            source_trust, caller=caller, tool="update_section"
-        )
         owner = SECTION_OWNERS.get(section_name)
         if owner is None:
             raise ToolError(
                 f"Unknown section '{section_name}'. Known sections: {sorted(SECTION_OWNERS.keys())}"
             )
-        # Context sections are open to every caller — no per-caller ownership gate.
-        # `owner` stays the registered steward (for display); the optimistic-
-        # concurrency guard + write-conflict receipts below prevent clobbering.
+        require_bound_caller(ctx, caller, tool="update_section")
+        if caller != owner:
+            log_audit(
+                "update_section",
+                caller,
+                None,
+                ok=False,
+                detail=(
+                    f"section={section_name} decision=refused "
+                    f"reason=section_owner_mismatch owner={owner}"
+                ),
+            )
+            raise ToolError(
+                f"Section '{section_name}' is owned by '{owner}'; "
+                f"caller '{caller}' cannot update it"
+            )
+
+        source_trust, source_trust_clamped = clamp_source_trust(
+            source_trust, caller=caller, tool="update_section", strict=True
+        )
+        if source_trust is None:
+            source_trust = "agent"
 
         db = get_db(ctx)
         result = await _upsert_section(
@@ -505,9 +525,6 @@ def register(mcp: FastMCP) -> None:
                 ),
             }
         await db.commit()
-        # Echo the label actually stored (not the param): on a preserve-update the
-        # stored value is the pre-existing label, not the None that was passed in.
-        #
         # Echo semantics: this post-commit re-read reports CURRENT row state at
         # response time, not necessarily this write's image — on the shared
         # connection a concurrent writer can land between the commit above and

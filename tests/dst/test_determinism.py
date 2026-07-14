@@ -62,7 +62,7 @@ async def _run_scenario(db_path: Path, seed: int) -> tuple[str, bytes]:
         )
         section = await fns["get_section"](section_name="career", ctx=ctx)
         await fns["update_section"](
-            caller="cc",
+            caller="claude_ai",
             section_name="career",
             content="sim CAS write",
             if_match_version=section["version"],
@@ -70,7 +70,7 @@ async def _run_scenario(db_path: Path, seed: int) -> tuple[str, bytes]:
         )
         # Stale CAS on purpose: drives rollback + write_conflicts receipt.
         stale = await fns["update_section"](
-            caller="codex",
+            caller="claude_ai",
             section_name="career",
             content="sim stale write",
             if_match_version=section["version"],

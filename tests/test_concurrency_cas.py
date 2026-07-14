@@ -44,7 +44,7 @@ async def test_update_section_if_match_success(
     db: aiosqlite.Connection, c_fns: dict[str, Any]
 ) -> None:
     """A write whose if_match equals the current updated_at succeeds."""
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="claude_ai")
     await c_fns["update_section"](
         caller="claude_ai", section_name="career", content="v1", ctx=ctx
     )
@@ -65,7 +65,7 @@ async def test_update_section_if_match_success(
 async def test_update_section_if_match_version_success_increments_version(
     db: aiosqlite.Connection, c_fns: dict[str, Any]
 ) -> None:
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="claude_ai")
     await c_fns["update_section"](
         caller="claude_ai", section_name="career", content="v1", ctx=ctx
     )
@@ -92,7 +92,7 @@ async def test_update_section_if_match_conflict_preserves_concurrent_write(
     """A stale if_match must NOT overwrite a concurrent update — the silent
     lost-update is converted into an explicit conflict, and the concurrent
     writer's content survives."""
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="claude_ai")
     await c_fns["update_section"](
         caller="claude_ai", section_name="career", content="v1", ctx=ctx
     )
@@ -126,7 +126,7 @@ async def test_update_section_if_match_conflict_preserves_concurrent_write(
 async def test_update_section_version_cas_catches_same_second_conflict(
     db: aiosqlite.Connection, c_fns: dict[str, Any]
 ) -> None:
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="claude_ai")
     await c_fns["update_section"](
         caller="claude_ai", section_name="career", content="v1", ctx=ctx
     )
@@ -167,7 +167,7 @@ async def test_update_section_without_if_match_rejected(
     behavior 2026-07-12 when the warn/enforce canary was cut): a blind
     write against an existing section is rejected with a durable receipt
     instead of silently displacing committed work."""
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="claude_ai")
     await c_fns["update_section"](
         caller="claude_ai", section_name="career", content="v1", ctx=ctx
     )
@@ -188,7 +188,7 @@ async def test_update_section_new_section_insert_needs_no_cas(
 ) -> None:
     """A brand-new section has nothing to CAS against: the first write
     succeeds without if_match_version or if_match_updated_at."""
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="claude_ai")
     result = await c_fns["update_section"](
         caller="claude_ai", section_name="career", content="v1", ctx=ctx
     )
@@ -202,7 +202,7 @@ async def test_update_section_new_section_insert_needs_no_cas(
 async def test_get_write_conflicts_reads_section_conflict_receipts(
     db: aiosqlite.Connection, c_fns: dict[str, Any]
 ) -> None:
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="claude_ai")
     await c_fns["update_section"](
         caller="claude_ai", section_name="career", content="v1", ctx=ctx
     )

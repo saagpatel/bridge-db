@@ -80,7 +80,7 @@ async def _blind_writer(
         db_path, sim_clock, rng, trace, scheduler=scheduler, writer_id=writer_id
     )
     fns = context_fns()
-    ctx = make_ctx(cast(aiosqlite.Connection, sim))
+    ctx = make_ctx(cast(aiosqlite.Connection, sim), principal=caller)
     try:
         read = await fns["get_section"](section_name=SECTION, ctx=ctx)
         result = await fns["update_section"](
@@ -111,7 +111,7 @@ async def _cas_writer(
         db_path, sim_clock, rng, trace, scheduler=scheduler, writer_id=writer_id
     )
     fns = context_fns()
-    ctx = make_ctx(cast(aiosqlite.Connection, sim))
+    ctx = make_ctx(cast(aiosqlite.Connection, sim), principal=caller)
     try:
         read = await fns["get_section"](section_name=SECTION, ctx=ctx)
         result = await fns["update_section"](
@@ -135,7 +135,7 @@ async def _seed_baseline(
 ) -> None:
     setup = await open_sim_db(db_path, sim_clock, rng, trace)
     fns = context_fns()
-    setup_ctx = make_ctx(cast(aiosqlite.Connection, setup))
+    setup_ctx = make_ctx(cast(aiosqlite.Connection, setup), principal="claude_ai")
     seeded = await fns["update_section"](
         caller="claude_ai",
         section_name=SECTION,
@@ -163,10 +163,10 @@ async def run_blind_vs_cas(base: Path, seed: int) -> dict[str, Any]:
         scheduler = SimScheduler(rng, trace)
         writers = {
             "blind": _blind_writer(
-                "blind", db_path, sim_clock, rng, trace, scheduler, "cc"
+                "blind", db_path, sim_clock, rng, trace, scheduler, "claude_ai"
             ),
             "cas": _cas_writer(
-                "cas", db_path, sim_clock, rng, trace, scheduler, "codex"
+                "cas", db_path, sim_clock, rng, trace, scheduler, "claude_ai"
             ),
         }
         async with asyncio.timeout(30):
@@ -223,8 +223,12 @@ async def run_cas_vs_cas(base: Path, seed: int) -> dict[str, Any]:
         await _seed_baseline(db_path, sim_clock, rng, trace)
         scheduler = SimScheduler(rng, trace)
         writers = {
-            "a": _cas_writer("a", db_path, sim_clock, rng, trace, scheduler, "cc"),
-            "b": _cas_writer("b", db_path, sim_clock, rng, trace, scheduler, "codex"),
+            "a": _cas_writer(
+                "a", db_path, sim_clock, rng, trace, scheduler, "claude_ai"
+            ),
+            "b": _cas_writer(
+                "b", db_path, sim_clock, rng, trace, scheduler, "claude_ai"
+            ),
         }
         async with asyncio.timeout(30):
             results = await scheduler.run(writers)

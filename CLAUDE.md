@@ -48,6 +48,11 @@ uv run python -m bridge_db --promote-handoff 42      # reviewed handoff promotio
   `BRIDGE_DB_CONTEXT_CAS_MODE` canary that gated this behind `warn`/`enforce`
   was cut 2026-07-12 after a live-caller audit found zero blind writers).
   New-section inserts need no CAS token.
+- Context ownership/provenance: `update_section` always requires an exact
+  channel-bound registered steward (`claude_ai` for the four owned narrative
+  sections, `cc` for `portfolio`). Every accepted MCP content version is
+  relabeled `agent` by default (or explicit `ingested`); operator trust is
+  restored only through the exact-version `--promote-section` ceremony.
 - Export-state CAS: `export_bridge_markdown` records context section
   version/hash; `sync_from_file` refuses stale fallback-file imports and records
   `write_conflicts` receipts.

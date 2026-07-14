@@ -221,8 +221,11 @@ mcp__bridge_db__update_section(
 mcp__bridge_db__export_bridge_markdown()  # keep file in sync for Codex fallback
 ```
 
-The `update_section` tool enforces ownership — only `caller="claude_ai"` can write
-these sections. CC and Codex calls with these section names will receive a ToolError.
+The `update_section` tool enforces ownership with an exact channel-bound caller,
+independent of the global auth rollout mode. Only `caller="claude_ai"` can write
+these sections; `portfolio` is separately owned by `cc`. Every accepted MCP
+content version defaults to `source_trust="agent"` and cannot inherit an older
+operator label. CC and Codex calls with Claude.ai section names receive a ToolError.
 If the section changed since `current` was read, `update_section` returns
 `ok=False`, `conflict=True`, and a `receipt_id`; re-read, merge deliberately, and
 retry with the new version. A write to an existing section without
@@ -287,6 +290,7 @@ Regardless of how Claude.ai accesses bridge-db, these ownership rules hold:
 | Section | Writer | Readable by |
 |---|---|---|
 | career, speaking, research, capabilities | claude_ai only | all |
+| portfolio | cc only | all |
 | cc_snapshot, cc_activity | cc only | all |
 | codex_snapshot, codex_activity | codex only | all |
 | pending_handoffs | claude_ai (create), cc/codex (pick up and clear) | all |
