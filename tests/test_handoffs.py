@@ -31,6 +31,15 @@ def fns(db: aiosqlite.Connection) -> dict[str, Any]:
         return await create_handoff(**kwargs)
 
     cap.fns["create_handoff"] = create_as_enrolled_caller
+    pick_up_handoff = cap.fns["pick_up_handoff"]
+
+    async def pick_up_as_enrolled_caller(**kwargs: Any) -> dict[str, Any]:
+        """Model the consuming principal's transport binding."""
+        caller = str(kwargs.get("caller"))
+        kwargs["ctx"] = make_ctx(db, principal=caller)
+        return await pick_up_handoff(**kwargs)
+
+    cap.fns["pick_up_handoff"] = pick_up_as_enrolled_caller
     return cap.fns
 
 
@@ -984,8 +993,7 @@ async def test_pick_up_handoff_codex_principal_cannot_spoof_cc_caller_in_warn(
 ) -> None:
     """A codex-bound connection cannot dodge the Codex refusal by claiming caller='cc'.
 
-    In warn mode require_caller only audits a caller/principal mismatch, so the
-    provenance gate must key on the bound principal, not the claimed caller.
+    Strict pickup binding rejects the identity mismatch before provenance or state.
     """
     from conftest import CaptureMCP, make_ctx
 
@@ -1006,7 +1014,7 @@ async def test_pick_up_handoff_codex_principal_cannot_spoof_cc_caller_in_warn(
     assert created["source_trust"] == "agent"
 
     # A codex-BOUND connection claims caller='cc' and tries to pick up.
-    with pytest.raises(ToolError, match="non-operator"):
+    with pytest.raises(ToolError, match="bound to 'codex'"):
         await cap.fns["pick_up_handoff"](
             caller="cc",
             handoff_id=handoff_id,
@@ -1023,13 +1031,10 @@ async def test_pick_up_handoff_codex_principal_cannot_spoof_cc_caller_in_warn(
     assert row["picked_up_at"] is None
 
 
-async def test_pick_up_handoff_off_mode_unbound_gates_on_claimed_caller(
+async def test_pick_up_handoff_off_mode_rejects_unbound_claimant(
     db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Legacy/off path: with no principal bound, the gate falls back to the claimed caller.
-
-    The claimed cc identity still cannot self-approve a non-operator handoff.
-    """
+    """BDB-DS-005-R1: auth-off cannot turn the caller field into claimant proof."""
     from conftest import CaptureMCP, make_ctx
 
     from bridge_db import config as bridge_config
@@ -1047,11 +1052,11 @@ async def test_pick_up_handoff_off_mode_unbound_gates_on_claimed_caller(
     handoff_id = created["handoff_id"]
     assert created["source_trust"] == "agent"
 
-    with pytest.raises(ToolError, match="promote.*operator"):
+    with pytest.raises(ToolError, match="Unauthenticated connection"):
         await cap.fns["pick_up_handoff"](
             caller="cc",
             handoff_id=handoff_id,
-            ctx=make_ctx(db),  # unbound → gate_identity falls back to caller='cc'
+            ctx=make_ctx(db),
         )
 
     cursor = await db.execute(

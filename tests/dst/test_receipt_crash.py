@@ -92,7 +92,7 @@ async def _crashy_claim_writer(
         faults=faults,
     )
     fns = handoff_fns()
-    ctx = make_ctx(cast(aiosqlite.Connection, sim))
+    ctx = make_ctx(cast(aiosqlite.Connection, sim), principal=caller)
     try:
         result = await fns["pick_up_handoff"](
             caller=caller, handoff_id=handoff_id, ctx=ctx
@@ -139,7 +139,7 @@ async def _recovery_retry(
         writer_id=writer_id,
     )
     fns = handoff_fns()
-    ctx = make_ctx(cast(aiosqlite.Connection, sim))
+    ctx = make_ctx(cast(aiosqlite.Connection, sim), principal=caller)
     try:
         await fns["pick_up_handoff"](caller=caller, handoff_id=handoff_id, ctx=ctx)
         return "won"

@@ -208,6 +208,7 @@ def register(mcp: FastMCP) -> None:
         handoffs pick up in one call.
         """
         require_caller(ctx, caller, tool="pick_up_handoff")
+        require_bound_caller(ctx, caller, tool="pick_up_handoff")
         if caller not in ("cc", "codex"):
             raise ToolError(
                 f"Only 'cc' or 'codex' may pick up handoffs; caller was '{caller}'"
@@ -266,9 +267,9 @@ def register(mcp: FastMCP) -> None:
         trust = row["source_trust"]
         project = row["project_name"]
 
-        # Attribute a successful claim to the channel-bound principal when one
-        # exists, falling back to the claimed caller only in legacy auth-off mode.
-        gate_identity = get_principal(ctx) or caller
+        # Strict binding above makes the verified principal and claimed caller
+        # identical for every reachable mutation.
+        gate_identity = caller
 
         # Provenance gate — the pending → active transition is the dangerous step.
         # The consuming MCP principal cannot supply its own approval evidence;

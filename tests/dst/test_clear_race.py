@@ -67,7 +67,7 @@ async def _clear_writer(
         db_path, sim_clock, rng, trace, scheduler=scheduler, writer_id="clear"
     )
     fns = handoff_fns()
-    ctx = make_ctx(cast(aiosqlite.Connection, sim))
+    ctx = make_ctx(cast(aiosqlite.Connection, sim), principal=caller)
     try:
         result = await fns["clear_handoff"](
             caller=caller, project_name=project_name, ctx=ctx
@@ -94,7 +94,7 @@ async def _claim_writer(
         db_path, sim_clock, rng, trace, scheduler=scheduler, writer_id="claim"
     )
     fns = handoff_fns()
-    ctx = make_ctx(cast(aiosqlite.Connection, sim))
+    ctx = make_ctx(cast(aiosqlite.Connection, sim), principal=caller)
     try:
         await fns["pick_up_handoff"](caller=caller, handoff_id=handoff_id, ctx=ctx)
         return {"outcome": "claim_won"}

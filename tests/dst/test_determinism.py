@@ -93,11 +93,13 @@ async def _run_scenario(db_path: Path, seed: int) -> tuple[str, bytes]:
         )
         await sim.commit()
         picked = await fns["pick_up_handoff"](
-            caller="cc", handoff_id=created["handoff_id"], ctx=ctx
+            caller="cc",
+            handoff_id=created["handoff_id"],
+            ctx=make_ctx(db, principal="cc"),
         )
         assert picked["ok"] is True
         cleared = await fns["clear_handoff"](
-            caller="cc", project_name="SimProj", ctx=ctx
+            caller="cc", project_name="SimProj", ctx=make_ctx(db, principal="cc")
         )
         assert cleared["cleared"] is True
     finally:

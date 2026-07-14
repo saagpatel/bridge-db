@@ -55,7 +55,7 @@ async def _claimant(
         db_path, sim_clock, rng, trace, scheduler=scheduler, writer_id="codex"
     )
     fns = handoff_fns()
-    ctx = make_ctx(cast(aiosqlite.Connection, sim))
+    ctx = make_ctx(cast(aiosqlite.Connection, sim), principal="codex")
     try:
         result = await fns["pick_up_handoff"](
             caller="codex", handoff_id=handoff_id, ctx=ctx

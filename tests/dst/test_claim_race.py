@@ -55,7 +55,7 @@ async def _claim_writer(
         db_path, sim_clock, rng, trace, scheduler=scheduler, writer_id=writer_id
     )
     fns = handoff_fns()
-    ctx = make_ctx(cast(aiosqlite.Connection, sim))
+    ctx = make_ctx(cast(aiosqlite.Connection, sim), principal=caller)
     try:
         result = await fns["pick_up_handoff"](
             caller=caller, handoff_id=handoff_id, ctx=ctx

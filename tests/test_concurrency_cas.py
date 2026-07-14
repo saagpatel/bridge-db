@@ -291,7 +291,7 @@ async def test_pick_up_handoff_rejects_concurrent_claim(
     handoff_id = created["handoff_id"]
 
     racer = _RaceOnPickupSelect(db, handoff_id)
-    racing_ctx = make_ctx(cast(aiosqlite.Connection, racer))
+    racing_ctx = make_ctx(cast(aiosqlite.Connection, racer), principal="cc")
     with pytest.raises(ToolError, match="another caller"):
         await h_fns["pick_up_handoff"](
             caller="cc", handoff_id=handoff_id, ctx=racing_ctx
@@ -336,7 +336,7 @@ async def test_pick_up_handoff_normal_path_still_works(
     )
     await db.commit()
     result = await h_fns["pick_up_handoff"](
-        caller="cc", handoff_id=created["handoff_id"], ctx=make_ctx(db)
+        caller="cc", handoff_id=created["handoff_id"], ctx=make_ctx(db, principal="cc")
     )
     assert result["ok"] is True
     assert result["status"] == "active"
