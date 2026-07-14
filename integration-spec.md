@@ -245,8 +245,8 @@ If the DB changed after the fallback file was exported, the file import is
 rejected for that section and recorded in `write_conflicts`; the DB row wins until
 an operator or client re-reads and merges.
 
-**With auth active (`BRIDGE_DB_AUTH_MODE` != `off`):** the file is an unauthenticated
-channel by design. Changed or new sections are imported as `source_trust='ingested'`
+The file is an unauthenticated channel in every auth mode. Changed or new
+sections are imported as `source_trust='ingested'`
 and reported in the `demoted` list of the return value. Sections whose content is
 identical to what is already in the DB are skipped and their existing label is
 preserved. The operator reviews demoted sections and promotes reviewed ones via

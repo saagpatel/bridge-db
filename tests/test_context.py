@@ -589,7 +589,7 @@ async def test_sync_preserves_label_when_content_unchanged(
     assert row["source_trust"] == "operator"
 
 
-async def test_sync_off_mode_keeps_legacy_label_preservation(
+async def test_sync_off_mode_demotes_changed_operator_content(
     db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from bridge_db import config as bridge_config
@@ -613,15 +613,13 @@ async def test_sync_off_mode_keeps_legacy_label_preservation(
     path = _write_bridge_file(tmp_path, "changed content")
     result = await sync_owned_sections_from_file(db=db, bridge_path=path)
 
-    assert result["demoted"] == []  # legacy path: no demotion bookkeeping
+    assert result["demoted"] == ["career"]
     cursor = await db.execute(
         "SELECT source_trust FROM context_sections WHERE section_name = 'career'"
     )
     row = await cursor.fetchone()
     assert row is not None
-    assert (
-        row["source_trust"] == "operator"
-    )  # documented legacy laundering, off-mode only
+    assert row["source_trust"] == "ingested"
 
 
 async def test_sync_unchanged_despite_trailing_newline_variance(

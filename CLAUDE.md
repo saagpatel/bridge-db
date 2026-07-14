@@ -55,9 +55,9 @@ uv run python -m bridge_db --promote-handoff 42      # reviewed handoff promotio
 - **Channel auth (Stage 1)**: each client's MCP spawn env carries `BRIDGE_DB_PRINCIPAL_TOKEN`;
   the server binds the connection to one principal at startup (`principals.json`, managed via
   `--enroll`). `BRIDGE_DB_AUTH_MODE` = `off` (legacy) | `warn` (allow + audit mismatches) |
-  `enforce` (reject); unrecognized values fail closed to `enforce`. With auth active:
-  no MCP write may mint `source_trust='operator'` (clamped to `agent`, audited), and
-  `sync_from_file` imports changed file content as `ingested` (promote via
+  `enforce` (reject); unrecognized values fail closed to `enforce`. With auth active,
+  no MCP write may mint `source_trust='operator'` (clamped to `agent`, audited).
+  In every auth mode, `sync_from_file` imports changed file content as `ingested` (promote via
   `--promote-section`, TTY-only). `create_handoff` is stricter than the rollout dial:
   it always requires an exact channel-bound `claude_ai` principal and always clamps
   requested operator trust. Review and promote an exact pending row with

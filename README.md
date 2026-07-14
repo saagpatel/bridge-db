@@ -100,7 +100,9 @@ inserts without CAS remain allowed, since there is nothing to CAS against.
 `export_bridge_markdown` records the exported version/hash for each rendered
 Claude.ai-owned context section. Later `sync_from_file` imports a changed
 fallback-file section only if the DB still matches that exported base. If the DB
-has advanced, the import is rejected and recorded in `write_conflicts`.
+has advanced, the import is rejected and recorded in `write_conflicts`. Every
+changed or new file section is labeled `ingested` regardless of auth rollout
+mode; unchanged content preserves its existing label.
 Exports to the real Claude.ai fallback path are also guarded against empty
 fixture-like output: bridge-db refuses to overwrite that file when all four core
 Claude.ai-owned sections would render as `_Not yet populated._`. Set

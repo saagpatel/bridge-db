@@ -10,7 +10,7 @@ from pydantic import Field
 
 from bridge_db import config
 from bridge_db.audit import log_audit
-from bridge_db.auth import auth_mode, clamp_source_trust, get_principal, require_caller
+from bridge_db.auth import clamp_source_trust, get_principal, require_caller
 from bridge_db.db import (
     content_sha256,
     fts_text_for_section,
@@ -243,16 +243,14 @@ async def _record_section_conflict(
 async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str, Any]:
     """Read the bridge file and upsert the Claude.ai-owned context sections.
 
-    With auth active (mode != 'off'), the file is an unauthenticated channel:
-    unchanged sections are skipped (label preserved), changed or new sections
-    are imported as source_trust='ingested' and reported in `demoted` so the
-    operator can review and promote via `--promote-section`. In 'off' mode the
-    legacy preserve-label upsert runs unchanged (rollback lever).
+    The file is an unauthenticated channel in every auth mode: unchanged
+    sections are skipped (label preserved), while changed or new sections are
+    imported as source_trust='ingested' and reported in `demoted` so the
+    operator can review and promote via `--promote-section`.
     """
     if not bridge_path.exists():
         raise ToolError(f"Bridge file not found: {bridge_path}")
 
-    auth_active = auth_mode() != "off"
     parsed_sections = parse_owned_sections(bridge_path.read_text(encoding="utf-8"))
     synced_sections: list[str] = []
     unchanged: list[str] = []
@@ -299,7 +297,7 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
                         operation="sync_from_file",
                         reason="stale_export_base",
                         attempted_content=content,
-                        attempted_source_trust="ingested" if auth_active else None,
+                        attempted_source_trust="ingested",
                         principal=None,
                         stale_version=int(exported["exported_version"]),
                         surface="markdown_sync",
@@ -335,7 +333,7 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
             section_name=section_name,
             owner="claude_ai",
             content=content,
-            source_trust="ingested" if auth_active else None,
+            source_trust="ingested",
             attempted_by="sync_from_file",
             operation="sync_from_file",
             receipt_surface="markdown_sync",
@@ -354,8 +352,7 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
                 }
             )
             continue
-        if auth_active:
-            demoted.append(section_name)
+        demoted.append(section_name)
 
         synced_sections.append(section_name)
 
