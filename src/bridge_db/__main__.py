@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import secrets
@@ -575,6 +576,134 @@ async def run_promote_section(section_name: str) -> bool:
     return True
 
 
+_HANDOFF_PROMOTION_FIELDS = (
+    "id",
+    "project_name",
+    "project_path",
+    "roadmap_file",
+    "phase",
+    "dispatched_from",
+    "dispatched_at",
+    "picked_up_at",
+    "cleared_at",
+    "canonical_key",
+    "source_trust",
+    "status",
+    "claimed_by",
+)
+
+
+def _handoff_promotion_digest(row: Any) -> str:
+    """Bind an operator review to the exact security-relevant handoff state."""
+    payload = {field: row[field] for field in _HANDOFF_PROMOTION_FIELDS}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+async def run_promote_handoff(handoff_id: int) -> bool:
+    """Atomically promote one reviewed pending handoff (operator TTY only)."""
+    from bridge_db import config
+    from bridge_db.audit import log_audit
+    from bridge_db.db import open_db
+
+    if handoff_id <= 0:
+        print("refused: handoff id must be a positive integer")
+        return False
+    if not _require_tty("promote-handoff"):
+        return False
+
+    db = await open_db(config.DB_PATH)
+    promoted_from: str | None = None
+    reviewed_digest: str | None = None
+    project_name: str | None = None
+    try:
+        cursor = await db.execute(
+            "SELECT id, project_name, project_path, roadmap_file, phase, "
+            "dispatched_from, dispatched_at, picked_up_at, cleared_at, "
+            "canonical_key, source_trust, status, claimed_by "
+            "FROM pending_handoffs WHERE id = ?",
+            (handoff_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            print(f"no stored handoff {handoff_id}")
+            return False
+        if row["status"] != "pending":
+            print(
+                f"refused: handoff {handoff_id} is {row['status']}, not pending"
+            )
+            return False
+        if row["source_trust"] == "operator":
+            print(f"handoff {handoff_id} is already operator-trusted")
+            return True
+
+        reviewed_digest = _handoff_promotion_digest(row)
+        project_name = cast(str, row["project_name"])
+        print(
+            "review handoff "
+            f"id={handoff_id} project={json.dumps(project_name)} "
+            f"phase={json.dumps(row['phase'])} source_trust={row['source_trust']} "
+            f"sha256={reviewed_digest}"
+        )
+        try:
+            confirmed = input("Promote this exact pending handoff to operator trust? [y/N] ")
+        except EOFError:
+            confirmed = ""
+        if confirmed.strip().lower() not in {"y", "yes"}:
+            print("promotion cancelled")
+            return False
+
+        # Re-read under a write lock and compare the complete reviewed state so
+        # the operator cannot approve one handoff image and promote another.
+        await db.execute("BEGIN IMMEDIATE")
+        cursor = await db.execute(
+            "SELECT id, project_name, project_path, roadmap_file, phase, "
+            "dispatched_from, dispatched_at, picked_up_at, cleared_at, "
+            "canonical_key, source_trust, status, claimed_by "
+            "FROM pending_handoffs WHERE id = ?",
+            (handoff_id,),
+        )
+        current = await cursor.fetchone()
+        if (
+            current is None
+            or current["status"] != "pending"
+            or _handoff_promotion_digest(current) != reviewed_digest
+        ):
+            await db.rollback()
+            print("refused: handoff changed after review; inspect it again")
+            return False
+
+        promoted_from = cast(str, current["source_trust"])
+        cursor = await db.execute(
+            "UPDATE pending_handoffs SET source_trust = 'operator' "
+            "WHERE id = ? AND status = 'pending' AND source_trust = ?",
+            (handoff_id, promoted_from),
+        )
+        if cursor.rowcount != 1:
+            await db.rollback()
+            print("refused: handoff changed before promotion")
+            return False
+        await db.commit()
+    finally:
+        await db.close()
+
+    log_audit(
+        "auth.promote_handoff",
+        "operator-cli",
+        project_name,
+        ok=True,
+        detail=(
+            f"handoff_id={handoff_id} {promoted_from}->operator "
+            f"sha256={reviewed_digest}"
+        ),
+    )
+    print(
+        f"promoted handoff {handoff_id}: {promoted_from} -> operator "
+        f"(sha256={reviewed_digest})"
+    )
+    return True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="bridge-db")
     parser.add_argument(
@@ -630,6 +759,12 @@ def main() -> None:
         metavar="SECTION",
         help="Set a context section's source_trust to 'operator' (operator TTY only)",
     )
+    parser.add_argument(
+        "--promote-handoff",
+        metavar="ID",
+        type=int,
+        help="Review and promote a pending handoff to operator trust (operator TTY only)",
+    )
     args, _ = parser.parse_known_args()
 
     if args.doctor:
@@ -663,6 +798,8 @@ def main() -> None:
         sys.exit(0 if run_list_principals() else 1)
     if args.promote_section:
         sys.exit(0 if asyncio.run(run_promote_section(args.promote_section)) else 1)
+    if args.promote_handoff is not None:
+        sys.exit(0 if asyncio.run(run_promote_handoff(args.promote_handoff)) else 1)
 
     from bridge_db.server import mcp
 

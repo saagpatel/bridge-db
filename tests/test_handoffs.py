@@ -11,6 +11,7 @@ from conftest import CaptureMCP, make_ctx
 from mcp.server.fastmcp.exceptions import ToolError
 
 from bridge_db import config
+from bridge_db.__main__ import run_promote_handoff
 from bridge_db.invariants import sometimes_counts
 from bridge_db.tools import handoffs as mod
 from bridge_db.tools.health import collect_status_summary
@@ -20,6 +21,15 @@ from bridge_db.tools.health import collect_status_summary
 def fns(db: aiosqlite.Connection) -> dict[str, Any]:
     cap = CaptureMCP()
     mod.register(cap)
+    create_handoff = cap.fns["create_handoff"]
+
+    async def create_as_enrolled_caller(**kwargs: Any) -> dict[str, Any]:
+        """Model the transport binding that enrolled MCP clients provide."""
+        caller = str(kwargs.get("caller"))
+        kwargs["ctx"] = make_ctx(db, principal=caller)
+        return await create_handoff(**kwargs)
+
+    cap.fns["create_handoff"] = create_as_enrolled_caller
     return cap.fns
 
 
@@ -48,6 +58,31 @@ async def _all_handoff_rows(db: aiosqlite.Connection) -> list[tuple[Any, ...]]:
     cursor = await db.execute("SELECT * FROM pending_handoffs ORDER BY id")
     rows = await cursor.fetchall()
     return [tuple(row) for row in rows]
+
+
+async def _create_handoff(
+    fns: dict[str, Any], db: aiosqlite.Connection, **kwargs: Any
+) -> dict[str, Any]:
+    """Create through the production boundary as the bound Claude.ai principal."""
+    kwargs.pop("caller", None)
+    kwargs.pop("ctx", None)
+    return await fns["create_handoff"](
+        caller="claude_ai",
+        ctx=make_ctx(db, principal="claude_ai"),
+        **kwargs,
+    )
+
+
+async def _promote_handoff_for_test(
+    db: aiosqlite.Connection, handoff_id: int
+) -> None:
+    """Seed the post-ceremony state for tests not concerned with the CLI ceremony."""
+    await db.execute(
+        "UPDATE pending_handoffs SET source_trust = 'operator' "
+        "WHERE id = ? AND status = 'pending'",
+        (handoff_id,),
+    )
+    await db.commit()
 
 
 async def test_create_handoff_requires_claude_ai(
@@ -80,7 +115,7 @@ async def test_create_handoff_inserts_pending(
     assert rows[0]["status"] == "pending"
 
 
-async def test_create_handoff_persists_and_echoes_source_trust(
+async def test_create_handoff_clamps_and_echoes_source_trust(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
     ctx = make_ctx(db)
@@ -94,7 +129,8 @@ async def test_create_handoff_persists_and_echoes_source_trust(
         caller="claude_ai", project_name="Defaulted", ctx=ctx
     )
 
-    assert asserted["source_trust"] == "operator"
+    assert asserted["source_trust"] == "agent"
+    assert asserted["source_trust_clamped"] is True
     assert ingested["source_trust"] == "ingested"
     assert defaulted["source_trust"] == "agent"
 
@@ -103,7 +139,7 @@ async def test_create_handoff_persists_and_echoes_source_trust(
     )
     rows: list[aiosqlite.Row] = await cursor.fetchall()  # type: ignore[assignment]
     trust = {r["project_name"]: r["source_trust"] for r in rows}
-    assert trust["Operatorish"] == "operator"
+    assert trust["Operatorish"] == "agent"
     assert trust["Ingestedish"] == "ingested"
     assert trust["Defaulted"] == "agent"
 
@@ -121,7 +157,7 @@ async def test_create_handoff_audit_carries_source_trust(
     ]
     create_events = [e for e in events if e["tool"] == "create_handoff"]
     assert create_events, "expected a create_handoff audit event"
-    assert create_events[-1]["detail"] == "source_trust=operator"
+    assert create_events[-1]["detail"] == "source_trust=agent"
 
 
 async def test_get_pending_handoffs_returns_pending_only(
@@ -157,7 +193,7 @@ async def test_get_pending_handoffs_surfaces_source_trust(
 
     pending = await fns["get_pending_handoffs"](ctx=ctx)
     trust = {h["project_name"]: h["source_trust"] for h in pending}
-    assert trust["Op"] == "operator"
+    assert trust["Op"] == "agent"
     assert trust["In"] == "ingested"
     assert trust["Ag"] == "agent"
     for handoff in pending:
@@ -173,6 +209,7 @@ async def test_pick_up_handoff(db: aiosqlite.Connection, fns: dict[str, Any]) ->
         caller="claude_ai", project_name="P", source_trust="operator", ctx=ctx
     )
     handoff_id = created["handoff_id"]
+    await _promote_handoff_for_test(db, handoff_id)
 
     # operator-trust handoff → fast path, picks up in one call.
     result = await fns["pick_up_handoff"](caller="cc", handoff_id=handoff_id, ctx=ctx)
@@ -363,6 +400,7 @@ async def test_pick_up_codex_operator_activates_one_call(
         caller="claude_ai", project_name="P", source_trust="operator", ctx=ctx
     )
     handoff_id = created["handoff_id"]
+    await _promote_handoff_for_test(db, handoff_id)
     result = await fns["pick_up_handoff"](
         caller="codex", handoff_id=handoff_id, ctx=ctx
     )
@@ -377,6 +415,38 @@ async def test_pick_up_codex_operator_activates_one_call(
     assert row["status"] == "active"
 
 
+async def test_bound_create_operator_promotion_then_codex_pickup(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = await fns["create_handoff"](
+        caller="claude_ai",
+        project_name="ReviewedForCodex",
+        source_trust="operator",
+        ctx=make_ctx(db),
+    )
+    assert created["source_trust"] == "agent"
+
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    def confirm(_prompt: str) -> str:
+        return "yes"
+
+    monkeypatch.setattr("builtins.input", confirm)
+    assert await run_promote_handoff(created["handoff_id"]) is True
+
+    picked = await fns["pick_up_handoff"](
+        caller="codex",
+        handoff_id=created["handoff_id"],
+        ctx=make_ctx(db, principal="codex"),
+    )
+    assert picked["status"] == "active"
+    assert picked["source_trust"] == "operator"
+
+
 async def test_pick_up_gate_writes_distinct_audit_events(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
@@ -388,6 +458,7 @@ async def test_pick_up_gate_writes_distinct_audit_events(
     operator = await fns["create_handoff"](
         caller="claude_ai", project_name="Opish", source_trust="operator", ctx=ctx
     )
+    await _promote_handoff_for_test(db, operator["handoff_id"])
 
     await fns["pick_up_handoff"](caller="cc", handoff_id=agent["handoff_id"], ctx=ctx)
     with pytest.raises(ToolError):
@@ -492,6 +563,7 @@ async def test_handoff_lifecycle_across_pending_pickup_and_clear(
         source_trust="operator",
         ctx=ctx,
     )
+    await _promote_handoff_for_test(db, first["handoff_id"])
     second = await fns["create_handoff"](
         caller="claude_ai",
         project_name="BridgeExport",
@@ -558,6 +630,7 @@ async def test_clear_refuses_other_roles_active_claim(
         source_trust="operator",
         ctx=ctx,
     )
+    await _promote_handoff_for_test(db, created["handoff_id"])
     await fns["pick_up_handoff"](
         caller="codex", handoff_id=created["handoff_id"], ctx=ctx
     )
@@ -592,6 +665,7 @@ async def test_clear_allows_own_active_claim(
         source_trust="operator",
         ctx=ctx,
     )
+    await _promote_handoff_for_test(db, created["handoff_id"])
     await fns["pick_up_handoff"](
         caller="codex", handoff_id=created["handoff_id"], ctx=ctx
     )
@@ -639,6 +713,7 @@ async def test_clear_allows_legacy_null_claimant_active(
         source_trust="operator",
         ctx=ctx,
     )
+    await _promote_handoff_for_test(db, created["handoff_id"])
     await fns["pick_up_handoff"](
         caller="codex", handoff_id=created["handoff_id"], ctx=ctx
     )
@@ -668,6 +743,7 @@ async def test_pick_up_records_claimant(
         source_trust="operator",
         ctx=ctx,
     )
+    await _promote_handoff_for_test(db, created["handoff_id"])
     picked = await fns["pick_up_handoff"](
         caller="codex", handoff_id=created["handoff_id"], ctx=ctx
     )
@@ -694,6 +770,7 @@ async def test_status_freshness_classifies_stale_handoffs_without_mutating_rows(
         source_trust="operator",
         ctx=ctx,
     )
+    await _promote_handoff_for_test(db, active["handoff_id"])
     await fns["pick_up_handoff"](
         caller="codex", handoff_id=active["handoff_id"], ctx=ctx
     )
@@ -813,6 +890,102 @@ async def test_create_handoff_enforce_rejects_unbound_connection(
             project_name="TestProject",
             ctx=make_ctx(db, principal=None),
         )
+
+
+async def test_create_handoff_off_rejects_unbound_before_write(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sensitive dispatch sink must not inherit auth's legacy off-mode bypass."""
+    monkeypatch.setattr(config, "AUTH_MODE", "off")
+    cap = CaptureMCP()
+    mod.register(cap)
+
+    with pytest.raises(ToolError, match="Unauthenticated connection"):
+        await cap.fns["create_handoff"](
+            caller="claude_ai",
+            project_name="ForgedOperatorDispatch",
+            source_trust="operator",
+            ctx=make_ctx(db, principal=None),
+        )
+
+    assert await _all_handoff_rows(db) == []
+    events = [
+        json.loads(line)
+        for line in config.AUDIT_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event["tool"] for event in events] == ["auth.mismatch"]
+    assert events[0]["caller"] is None
+    assert events[0]["ok"] is False
+
+
+async def test_create_handoff_off_rejects_bound_principal_mismatch(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", "off")
+    cap = CaptureMCP()
+    mod.register(cap)
+
+    with pytest.raises(ToolError, match="bound to 'codex'"):
+        await cap.fns["create_handoff"](
+            caller="claude_ai",
+            project_name="ForgedOperatorDispatch",
+            source_trust="operator",
+            ctx=make_ctx(db, principal="codex"),
+        )
+
+    assert await _all_handoff_rows(db) == []
+
+
+async def test_create_handoff_off_clamps_operator_for_bound_claude_ai(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", "off")
+    cap = CaptureMCP()
+    mod.register(cap)
+
+    result = await cap.fns["create_handoff"](
+        caller="claude_ai",
+        project_name="ReviewedButNotAttested",
+        source_trust="operator",
+        ctx=make_ctx(db, principal="claude_ai"),
+    )
+
+    assert result["source_trust"] == "agent"
+    assert result["source_trust_clamped"] is True
+    cursor = await db.execute(
+        "SELECT source_trust FROM pending_handoffs WHERE id = ?",
+        (result["handoff_id"],),
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["source_trust"] == "agent"
+    events = [
+        json.loads(line)
+        for line in config.AUDIT_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event["tool"] for event in events[:2]] == [
+        "auth.trust_clamped",
+        "create_handoff",
+    ]
+
+
+async def test_create_handoff_off_allows_bound_agent_dispatch(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", "off")
+    cap = CaptureMCP()
+    mod.register(cap)
+
+    result = await cap.fns["create_handoff"](
+        caller="claude_ai",
+        project_name="LegitimateDispatch",
+        source_trust="agent",
+        ctx=make_ctx(db, principal="claude_ai"),
+    )
+
+    assert result["ok"] is True
+    assert result["source_trust"] == "agent"
+    assert result["source_trust_clamped"] is False
 
 
 async def test_clear_handoff_canonical_does_not_overmatch_other_projects(
@@ -938,7 +1111,7 @@ async def test_pick_up_handoff_off_mode_unbound_gates_on_claimed_caller(
     created = await cap.fns["create_handoff"](
         caller="claude_ai",
         project_name="P",
-        ctx=make_ctx(db),  # principal defaults to None (unbound)
+        ctx=make_ctx(db, principal="claude_ai"),
     )
     handoff_id = created["handoff_id"]
     assert created["source_trust"] == "agent"

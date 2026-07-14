@@ -42,7 +42,7 @@ async def _run_scenario(db_path: Path, seed: int) -> tuple[str, bytes]:
     sim = await open_sim_db(db_path, sim_clock, rng, trace)
     db = cast(aiosqlite.Connection, sim)
     fns = _tool_fns()
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="claude_ai")
 
     clock.install(sim_clock.now)
     try:
@@ -129,7 +129,7 @@ async def test_sim_time_reaches_sql_defaults(tmp_path: Path) -> None:
     sim = await open_sim_db(tmp_path / "leak.db", sim_clock, rng, trace)
     db = cast(aiosqlite.Connection, sim)
     fns = _tool_fns()
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="claude_ai")
 
     clock.install(sim_clock.now)
     try:

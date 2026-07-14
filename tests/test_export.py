@@ -73,7 +73,7 @@ async def test_export_includes_activity_entries(
 async def test_export_includes_pending_handoffs(
     db: aiosqlite.Connection, all_fns: dict[str, Any]
 ) -> None:
-    mctx = make_ctx(db)
+    mctx = make_ctx(db, principal="claude_ai")
     await all_fns["create_handoff"](
         caller="claude_ai",
         project_name="MyProject",
@@ -108,7 +108,7 @@ async def test_export_writes_to_file(
     original = cfg.BRIDGE_FILE_PATH
     cfg.BRIDGE_FILE_PATH = tmp_path / "bridge.md"
 
-    mctx = make_ctx(db)
+    mctx = make_ctx(db, principal="claude_ai")
     result = await all_fns["export_bridge_markdown"](ctx=mctx)
     assert result["ok"] is True
     assert cfg.BRIDGE_FILE_PATH.exists()
@@ -162,7 +162,7 @@ async def test_export_frontmatter_present(db: aiosqlite.Connection) -> None:
 async def test_export_includes_additional_source_activity_sections(
     db: aiosqlite.Connection, all_fns: dict[str, Any]
 ) -> None:
-    mctx = make_ctx(db)
+    mctx = make_ctx(db, principal="claude_ai")
     await all_fns["log_activity"](
         caller="notion_os",
         project_name="Notion Sync",
@@ -194,7 +194,7 @@ async def test_export_workflow_reflects_multi_tool_bridge_state(
     original_bridge_path = cfg.BRIDGE_FILE_PATH
     cfg.BRIDGE_FILE_PATH = bridge_path
 
-    mctx = make_ctx(db)
+    mctx = make_ctx(db, principal="claude_ai")
     try:
         await all_fns["update_section"](
             caller="claude_ai",
@@ -267,7 +267,7 @@ async def test_export_workflow_reflects_multi_tool_bridge_state(
 async def test_export_uses_latest_codex_operating_snapshot(
     db: aiosqlite.Connection, all_fns: dict[str, Any]
 ) -> None:
-    mctx = make_ctx(db)
+    mctx = make_ctx(db, principal="claude_ai")
     await all_fns["save_snapshot"](
         caller="codex",
         data={
@@ -354,7 +354,7 @@ Fallback capability context
     original_bridge_path = cfg.BRIDGE_FILE_PATH
     cfg.BRIDGE_FILE_PATH = bridge_path
 
-    mctx = make_ctx(db)
+    mctx = make_ctx(db, principal="claude_ai")
     try:
         sync_result = await all_fns["sync_from_file"](ctx=mctx)
         assert sync_result["count"] == 4
@@ -422,7 +422,7 @@ Prefers MCP when available
     health_mod.register(cap)
     snap_mod.register(cap)
 
-    mctx = make_ctx(db)
+    mctx = make_ctx(db, principal="claude_ai")
     try:
         await cap.fns["sync_from_file"](ctx=mctx)
         await cap.fns["create_handoff"](

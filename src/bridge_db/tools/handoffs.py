@@ -8,7 +8,12 @@ from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db.audit import log_audit
-from bridge_db.auth import clamp_source_trust, get_principal, require_caller
+from bridge_db.auth import (
+    clamp_source_trust,
+    get_principal,
+    require_bound_caller,
+    require_caller,
+)
 from bridge_db.db import (
     fts_text_for_handoff,
     get_db,
@@ -49,20 +54,23 @@ def register(mcp: FastMCP) -> None:
         source_trust: Annotated[
             SourceTrust,
             Field(
-                description="Provenance: 'operator' (operator-asserted), 'agent' "
-                "(Claude-authored, default), or 'ingested' (external)"
+                description="Requested provenance. 'operator' is always clamped to "
+                "'agent' at this MCP boundary; use the TTY-gated promotion CLI "
+                "after reviewing the stored pending handoff."
             ),
         ] = "agent",
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
-        """Create a project handoff for Claude Code or Codex to pick up. Only claude_ai may dispatch."""
-        require_caller(ctx, caller, tool="create_handoff")
+        """Create an agent-trust handoff from a channel-bound Claude.ai client."""
+        # Handoff creation is an instruction-bearing dispatch boundary. It must
+        # not inherit the global auth rollout bypass or mint operator trust.
+        require_bound_caller(ctx, caller, tool="create_handoff")
         if caller != "claude_ai":
             raise ToolError(
                 f"Only 'claude_ai' may create handoffs; caller was '{caller}'"
             )
         source_trust, source_trust_clamped = clamp_source_trust(
-            source_trust, caller=caller, tool="create_handoff"
+            source_trust, caller=caller, tool="create_handoff", strict=True
         )
 
         db = get_db(ctx)
@@ -284,7 +292,8 @@ def register(mcp: FastMCP) -> None:
                 )
                 raise ToolError(
                     f"Codex cannot pick up a non-operator-trust handoff (source_trust='{trust}'). "
-                    "Promote it to operator trust before picking up with Codex."
+                    "Review and promote it with `python -m bridge_db --promote-handoff "
+                    f"{handoff_id}` before picking up with Codex."
                 )
             if not confirm:  # gate_identity is 'cc' (or an unbound caller)
                 log_audit(

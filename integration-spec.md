@@ -80,10 +80,11 @@ Register bridge-db in Claude Desktop's MCP config:
 }
 ```
 
-Once `BRIDGE_DB_AUTH_MODE` leaves `off`, the `env` block above is required: the
-`claude_ai` enrollment token (from `--enroll claude_ai`) goes in
-`BRIDGE_DB_PRINCIPAL_TOKEN`, and `BRIDGE_DB_AUTH_MODE` sets the rollout dial. In
-`off` mode the env block may be omitted and legacy behavior is fully preserved.
+The `claude_ai` enrollment token (from `--enroll claude_ai`) goes in
+`BRIDGE_DB_PRINCIPAL_TOKEN`, and `BRIDGE_DB_AUTH_MODE` sets the rollout dial.
+Most write tools retain the staged `off` / `warn` / `enforce` behavior, but
+`create_handoff` always requires this exact channel binding, including in `off`
+mode, because dispatch crosses a sensitive execution boundary.
 
 This gives Claude.ai access to all 26 MCP tools under `mcp__bridge_db__*`, including
 the read-only `health` and `status` diagnostics, the file-import helper `sync_from_file`,
@@ -110,6 +111,19 @@ mcp__bridge_db__create_handoff(
     phase="Phase 2",             # optional
 )
 ```
+
+The MCP call stores `agent` trust even if the request asks for `operator`. For a
+Codex-bound pickup, the operator reviews and promotes the exact pending row in an
+interactive terminal before pickup:
+
+```bash
+uv run python -m bridge_db --promote-handoff <handoff-id>
+```
+
+The ceremony displays the row identity and digest, then rechecks the complete
+reviewed state under a write lock. It refuses a row that changed or left
+`pending` after review. Claude Code may continue to use its existing explicit
+confirmation path for non-operator handoffs.
 
 Claude Code's `/start` skill already reads `mcp__bridge_db__get_pending_handoffs()` —
 it now runs `mcp__bridge_db__sync_from_file()` first, then reads pending handoffs.
@@ -296,7 +310,7 @@ All principals may use read-side tools for bridge-owned state:
 |---|---|---|
 | `codex` | `log_activity(caller="codex")`, `save_snapshot(caller="codex")`, `record_cost(caller="codex")`, `record_disposition(caller="codex")`, `pick_up_handoff`/`clear_handoff` where the handoff gate allows it | Owns Codex truth and verification; must not write or refresh `cc` snapshots or Claude.ai sections |
 | `cc` | `log_activity(caller="cc")`, `save_snapshot(caller="cc")`, `record_cost(caller="cc")`, `record_disposition(caller="cc")`, `pick_up_handoff`/`clear_handoff` where the handoff gate allows it | Owns Claude Code state and session telemetry; must not write Codex snapshots or Claude.ai sections |
-| `claude_ai` | `update_section` for `career`, `speaking`, `research`, and `capabilities`; `create_handoff(caller="claude_ai")`; compatibility file edits to those four sections followed by `sync_from_file` | Advisory and dispatch surface; must not write Codex/CC snapshots or act as local execution proof |
+| `claude_ai` | `update_section` for `career`, `speaking`, `research`, and `capabilities`; channel-bound `create_handoff(caller="claude_ai")`; compatibility file edits to those four sections followed by `sync_from_file` | Advisory and dispatch surface; MCP handoffs cannot mint operator trust and must not act as local execution proof |
 | `notion_os` | `log_activity(caller="notion_os")`, `record_cost(caller="notion_os")`, `record_disposition(caller="notion_os")` | Owns Notion-side receipts/activity it actually verified; must not infer project mappings beyond `notion_sync` |
 | `personal_ops` | `log_activity(caller="personal_ops")`, `record_cost(caller="personal_ops")`, `record_disposition(caller="personal_ops")` | Owns operator-facing coordination receipts; must not replace repo-local or bridge-db verification |
 

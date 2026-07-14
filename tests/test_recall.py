@@ -30,7 +30,7 @@ async def capture(db: Any) -> CaptureMCP:
 
 async def _seed_one_of_each(cap: CaptureMCP, db: Any) -> None:
     """Populate one row per source type so scope + happy-path tests have data."""
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="claude_ai")
 
     # Section
     await cap.fns["update_section"](
@@ -92,7 +92,7 @@ async def test_recall_happy_path(
 async def test_recall_hits_carry_source_trust(capture: CaptureMCP, db: Any) -> None:
     """Every recall source-type branch surfaces its row's source_trust. Distinct
     values across section/activity/snapshot/handoff catch a per-branch column drop."""
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="claude_ai")
     await capture.fns["update_section"](
         caller="claude_ai",
         section_name="career",
@@ -110,9 +110,14 @@ async def test_recall_hits_carry_source_trust(capture: CaptureMCP, db: Any) -> N
     await capture.fns["save_snapshot"](
         caller="cc", data={"note": "Quokka snapshot"}, source_trust="ingested", ctx=ctx
     )
-    await capture.fns["create_handoff"](
+    handoff = await capture.fns["create_handoff"](
         caller="claude_ai", project_name="Quokka", source_trust="operator", ctx=ctx
     )
+    await db.execute(
+        "UPDATE pending_handoffs SET source_trust = 'operator' WHERE id = ?",
+        (handoff["handoff_id"],),
+    )
+    await db.commit()
 
     results = await capture.fns["recall"](query="Quokka", limit=10, scope="all", ctx=ctx)
     by_type = {hit["source_type"]: hit for hit in results}

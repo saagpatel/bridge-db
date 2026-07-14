@@ -166,6 +166,32 @@ def test_require_caller_enforce_unbound_raises(monkeypatch: pytest.MonkeyPatch) 
     assert audit_events()[0]["tool"] == "auth.mismatch"
 
 
+@pytest.mark.parametrize("mode", ["off", "warn", "enforce"])
+def test_require_bound_caller_rejects_unbound_in_every_mode(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", mode)
+    with pytest.raises(ToolError, match="Unauthenticated connection"):
+        auth.require_bound_caller(_FakeCtx(None), "claude_ai", tool="create_handoff")
+    event = audit_events()[0]
+    assert event["tool"] == "auth.mismatch"
+    assert event["caller"] is None
+    assert "mode=strict" in str(event["detail"])
+
+
+def test_require_bound_caller_rejects_mismatch_and_accepts_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", "off")
+    with pytest.raises(ToolError, match="bound to 'codex'"):
+        auth.require_bound_caller(
+            _FakeCtx("codex"), "claude_ai", tool="create_handoff"
+        )
+    assert audit_events()[0]["caller"] == "codex"
+
+    auth.require_bound_caller(_FakeCtx("claude_ai"), "claude_ai", tool="create_handoff")
+
+
 @pytest.mark.parametrize("mode", ["warn", "enforce"])
 def test_clamp_blocks_operator_in_active_modes(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
     monkeypatch.setattr(config, "AUTH_MODE", mode)
@@ -192,6 +218,16 @@ def test_clamp_inactive_in_off_mode(monkeypatch: pytest.MonkeyPatch) -> None:
         "operator",
         False,
     )
+
+
+def test_strict_clamp_blocks_operator_in_off_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", "off")
+    assert auth.clamp_source_trust(
+        "operator", caller="claude_ai", tool="create_handoff", strict=True
+    ) == ("agent", True)
+    assert audit_events()[0]["tool"] == "auth.trust_clamped"
 
 
 async def test_app_lifespan_binds_principal_from_env(

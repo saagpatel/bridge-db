@@ -2,6 +2,7 @@
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -18,6 +19,7 @@ from bridge_db.__main__ import (
     run_enroll,
     run_list_principals,
     run_log_session_boundary,
+    run_promote_handoff,
     run_promote_section,
     run_rebuild_content_index,
     run_reconcile_canonical_keys,
@@ -723,6 +725,107 @@ async def test_promote_section_sets_operator_label(
     row = await cursor.fetchone()
     assert row is not None
     assert row["source_trust"] == "operator"
+
+
+@pytest.mark.asyncio
+async def test_promote_handoff_confirms_exact_pending_row(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cursor = await db.execute(
+        "INSERT INTO pending_handoffs "
+        "(project_name, project_path, phase, source_trust) VALUES (?, ?, ?, ?)",
+        ("ReviewedProject", "/tmp/reviewed", "Phase 2", "agent"),
+    )
+    handoff_id = cursor.lastrowid
+    assert handoff_id is not None
+    await db.commit()
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    def confirm(_prompt: str) -> str:
+        return "yes"
+
+    monkeypatch.setattr("builtins.input", confirm)
+
+    assert await run_promote_handoff(handoff_id) is True
+
+    cursor = await db.execute(
+        "SELECT status, source_trust FROM pending_handoffs WHERE id = ?",
+        (handoff_id,),
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["source_trust"] == "operator"
+    events = [
+        json.loads(line)
+        for line in config.AUDIT_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    ]
+    assert events[-1]["tool"] == "auth.promote_handoff"
+    assert events[-1]["caller"] == "operator-cli"
+    assert f"handoff_id={handoff_id}" in events[-1]["detail"]
+    assert "sha256=" in events[-1]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_promote_handoff_rejects_state_changed_after_review(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cursor = await db.execute(
+        "INSERT INTO pending_handoffs (project_name, phase, source_trust) "
+        "VALUES (?, ?, ?)",
+        ("RacedProject", "Phase 1", "agent"),
+    )
+    handoff_id = cursor.lastrowid
+    assert handoff_id is not None
+    await db.commit()
+    db_path = tmp_path / "test.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    def mutate_then_confirm(_prompt: str) -> str:
+        with sqlite3.connect(db_path) as concurrent:
+            concurrent.execute(
+                "UPDATE pending_handoffs SET phase = ? WHERE id = ?",
+                ("Phase changed", handoff_id),
+            )
+        return "yes"
+
+    monkeypatch.setattr("builtins.input", mutate_then_confirm)
+    assert await run_promote_handoff(handoff_id) is False
+
+    cursor = await db.execute(
+        "SELECT phase, source_trust FROM pending_handoffs WHERE id = ?",
+        (handoff_id,),
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["phase"] == "Phase changed"
+    assert row["source_trust"] == "agent"
+
+
+@pytest.mark.asyncio
+async def test_promote_handoff_refuses_without_tty(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cursor = await db.execute(
+        "INSERT INTO pending_handoffs (project_name, source_trust) VALUES (?, ?)",
+        ("NoTTY", "agent"),
+    )
+    handoff_id = cursor.lastrowid
+    assert handoff_id is not None
+    await db.commit()
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+    assert await run_promote_handoff(handoff_id) is False
+    cursor = await db.execute(
+        "SELECT source_trust FROM pending_handoffs WHERE id = ?",
+        (handoff_id,),
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["source_trust"] == "agent"
 
 
 def test_enroll_rotation_replaces_old_hash(

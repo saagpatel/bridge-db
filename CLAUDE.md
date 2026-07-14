@@ -21,6 +21,7 @@ uv run python -m bridge_db --enroll cc            # enroll/rotate a principal (T
 uv run python -m bridge_db --list-principals      # show enrolled principals
 uv run python -m bridge_db --revoke-principal cc  # revoke a principal (TTY only)
 uv run python -m bridge_db --promote-section career  # operator label promotion (TTY only)
+uv run python -m bridge_db --promote-handoff 42      # reviewed handoff promotion (TTY only)
 ```
 
 ## Architecture
@@ -57,7 +58,10 @@ uv run python -m bridge_db --promote-section career  # operator label promotion 
   `enforce` (reject); unrecognized values fail closed to `enforce`. With auth active:
   no MCP write may mint `source_trust='operator'` (clamped to `agent`, audited), and
   `sync_from_file` imports changed file content as `ingested` (promote via
-  `--promote-section`, TTY-only).
+  `--promote-section`, TTY-only). `create_handoff` is stricter than the rollout dial:
+  it always requires an exact channel-bound `claude_ai` principal and always clamps
+  requested operator trust. Review and promote an exact pending row with
+  `--promote-handoff <id>` (TTY-only) before Codex pickup.
 
 ## Gotchas
 
@@ -127,6 +131,7 @@ uv run python -m bridge_db --dogfood # read-only observability dogfood pass
 uv run python -m bridge_db --rebuild-content-index  # repair FTS recall index drift
 uv run python -m bridge_db --reconcile-canonical-keys  # backfill GHRA repo_full_name keys
 uv run python -m bridge_db --log-session-boundary bridge-db  # FTS-safe CC hook logging
+uv run python -m bridge_db --promote-handoff 42  # reviewed handoff promotion (TTY only)
 uv run python -m bridge_db          # start MCP server (stdio)
 uv run python -m bridge_db.migration  # migrate from bridge markdown
 ```

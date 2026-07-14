@@ -278,8 +278,16 @@ async def test_pick_up_handoff_rejects_concurrent_claim(
     status-guarded UPDATE matches 0 rows and the pickup is refused instead of
     silently double-claiming."""
     created = await h_fns["create_handoff"](
-        caller="claude_ai", project_name="P", source_trust="operator", ctx=make_ctx(db)
+        caller="claude_ai",
+        project_name="P",
+        source_trust="operator",
+        ctx=make_ctx(db, principal="claude_ai"),
     )
+    await db.execute(
+        "UPDATE pending_handoffs SET source_trust = 'operator' WHERE id = ?",
+        (created["handoff_id"],),
+    )
+    await db.commit()
     handoff_id = created["handoff_id"]
 
     racer = _RaceOnPickupSelect(db, handoff_id)
@@ -317,8 +325,16 @@ async def test_pick_up_handoff_normal_path_still_works(
 ) -> None:
     """The status guard must not regress the uncontended happy path."""
     created = await h_fns["create_handoff"](
-        caller="claude_ai", project_name="P", source_trust="operator", ctx=make_ctx(db)
+        caller="claude_ai",
+        project_name="P",
+        source_trust="operator",
+        ctx=make_ctx(db, principal="claude_ai"),
     )
+    await db.execute(
+        "UPDATE pending_handoffs SET source_trust = 'operator' WHERE id = ?",
+        (created["handoff_id"],),
+    )
+    await db.commit()
     result = await h_fns["pick_up_handoff"](
         caller="cc", handoff_id=created["handoff_id"], ctx=make_ctx(db)
     )

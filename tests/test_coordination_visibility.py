@@ -103,7 +103,7 @@ async def test_status_surfaces_open_conflicts_signal(
 async def test_default_pending_contract_unchanged(
     db: aiosqlite.Connection, handoff_fns: dict[str, Any]
 ) -> None:
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="claude_ai")
     await handoff_fns["create_handoff"](
         caller="claude_ai", project_name="VisibilityProj", ctx=ctx
     )
@@ -117,13 +117,16 @@ async def test_default_pending_contract_unchanged(
 async def test_active_filter_exposes_claimant(
     db: aiosqlite.Connection, handoff_fns: dict[str, Any]
 ) -> None:
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="claude_ai")
     created = await handoff_fns["create_handoff"](
         caller="claude_ai", project_name="ClaimedProj", ctx=ctx
     )
     # agent-trust handoff: cc pickup needs the explicit confirm step
     picked = await handoff_fns["pick_up_handoff"](
-        caller="cc", handoff_id=created["handoff_id"], confirm=True, ctx=ctx
+        caller="cc",
+        handoff_id=created["handoff_id"],
+        confirm=True,
+        ctx=make_ctx(db, principal="cc"),
     )
     assert picked["ok"] is True
     await handoff_fns["create_handoff"](
@@ -146,7 +149,7 @@ async def test_active_filter_exposes_claimant(
 async def test_cleared_rows_stay_excluded_from_all(
     db: aiosqlite.Connection, handoff_fns: dict[str, Any]
 ) -> None:
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="claude_ai")
     await handoff_fns["create_handoff"](
         caller="claude_ai", project_name="DoneProj", ctx=ctx
     )

@@ -83,6 +83,28 @@ def get_principal(ctx: Any) -> str | None:
         return None
 
 
+def require_bound_caller(ctx: Any, caller: str, tool: str) -> None:
+    """Require an exact channel-bound principal regardless of rollout mode.
+
+    Sensitive sinks use this instead of ``require_caller`` so the global
+    compatibility dial cannot disable their identity boundary. Mismatch audit
+    attribution comes from the bound principal, never the request's claim.
+    """
+    principal = get_principal(ctx)
+    if principal == caller:
+        return
+    detail = f"tool={tool} principal={principal or 'unbound'} caller={caller} mode=strict"
+    log_audit("auth.mismatch", principal, None, ok=False, detail=detail)
+    logger.warning("auth mismatch: %s", detail)
+    if principal is None:
+        raise ToolError(
+            "Unauthenticated connection: no BRIDGE_DB_PRINCIPAL_TOKEN bound. "
+            "Enroll with `python -m bridge_db --enroll <caller>` and set the "
+            "token in this client's MCP spawn env."
+        )
+    raise ToolError(f"Caller mismatch: connection bound to '{principal}', cannot act as '{caller}'")
+
+
 def require_caller(ctx: Any, caller: str, tool: str) -> None:
     """Cross-check the claimed caller against the connection-bound principal.
 
@@ -111,25 +133,31 @@ def require_caller(ctx: Any, caller: str, tool: str) -> None:
 
 @overload
 def clamp_source_trust(
-    requested: SourceTrust, caller: str, tool: str
+    requested: SourceTrust, caller: str, tool: str, *, strict: bool = False
 ) -> tuple[SourceTrust, bool]: ...
 
 
 @overload
-def clamp_source_trust(requested: None, caller: str, tool: str) -> tuple[None, bool]: ...
+def clamp_source_trust(
+    requested: None, caller: str, tool: str, *, strict: bool = False
+) -> tuple[None, bool]: ...
 
 
 def clamp_source_trust(
-    requested: SourceTrust | None, caller: str, tool: str
+    requested: SourceTrust | None,
+    caller: str,
+    tool: str,
+    *,
+    strict: bool = False,
 ) -> tuple[SourceTrust | None, bool]:
     """Block MCP-side minting of the 'operator' label.
 
     Returns (stored_value, clamped). Active in warn and enforce modes; 'off'
-    preserves legacy behavior so the rollback lever stays total. Operator
-    labels are minted only via the TTY-gated CLI (--promote-section) or
-    pre-existing rows.
+    preserves legacy behavior unless ``strict`` is true for a sensitive sink.
+    Operator labels are minted only via a TTY-gated CLI or pre-existing rows
+    wherever strict clamping applies.
     """
-    if auth_mode() == "off" or requested != "operator":
+    if (auth_mode() == "off" and not strict) or requested != "operator":
         return requested, False
     log_audit(
         "auth.trust_clamped",

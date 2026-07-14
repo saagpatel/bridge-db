@@ -74,14 +74,14 @@ Write tools enforce `caller` ownership, so systems can only write the slices of 
 
 Instruction-bearing rows carry a `source_trust` label — `operator`, `agent`, or `ingested` — recording who authored the content. It lives only in the DB (schema v7+, on `pending_handoffs`, `activity_log`, `context_sections`, `system_snapshots`) and is **never serialized into the markdown export**, which would otherwise launder provenance.
 
-- **Writers** set it via an optional `source_trust` param; the conservative default is `agent` (a Claude-dispatched write is agent-authored unless the operator asserts otherwise). `update_section` preserves an existing section's label on a content-only re-sync.
+- **Writers** set it via an optional `source_trust` param; the conservative default is `agent`. `create_handoff` always requires a channel-bound `claude_ai` principal, even when the global auth rollout mode is `off`, and an MCP request for `operator` trust is clamped to `agent`. `update_section` preserves an existing section's label on a content-only re-sync.
 - **The gate** lives at the one dangerous transition — `pick_up_handoff` moving a handoff `pending → active`:
   - `operator`-trust → picks up in one call (`cc` and `codex`).
   - `cc` + non-`operator` → returns `requires_confirmation` and does **not** transition; re-invoke with `confirm=True` to proceed.
-  - `codex` + non-`operator` → **refused** (Codex runs with `danger-full-access`; `confirm` cannot bypass it). Promote the handoff to `operator` trust first.
+  - `codex` + non-`operator` → **refused** (Codex runs with `danger-full-access`; `confirm` cannot bypass it). Review and promote the exact pending row first with `uv run python -m bridge_db --promote-handoff <id>` in an interactive terminal.
 - **Visibility:** `get_pending_handoffs`, `get_section`, `get_all_sections`, `get_recent_activity`, `get_activity_signal`, `get_shipped_events`, `get_latest_snapshot`, and `recall` hits carry `source_trust` plus `instruction_boundary` metadata that tells consumers returned content is stored data, not instructions. Lifecycle aggregates use a trust summary and `source_trust="mixed"` when rows differ. `status` reports `pending_handoffs_by_trust` and `health` a full per-table `source_trust_breakdown`. Each gate decision (`allowed` / `confirmation_required` / `refused`) is written to the audit log.
 
-> Consumers authoring an operator-directed handoff (e.g. the `vibe-code-handoff` skill) should pass `source_trust="operator"` on `create_handoff` so it picks up without confirmation.
+> MCP clients cannot mint operator provenance. An operator-directed handoff is created as `agent`, reviewed in an interactive terminal, and promoted with `uv run python -m bridge_db --promote-handoff <id>`. The promotion rechecks the exact reviewed row under a write lock and refuses changed or non-pending handoffs.
 
 ## CAS & Conflict Receipts
 
@@ -121,6 +121,7 @@ uv run python -m bridge_db --dogfood # read-only observability dogfood pass
 uv run python -m bridge_db --rebuild-content-index  # repair FTS recall index drift
 uv run python -m bridge_db --reconcile-canonical-keys  # backfill GHRA repo_full_name keys
 uv run python -m bridge_db --log-session-boundary bridge-db  # FTS-safe CC hook logging
+uv run python -m bridge_db --promote-handoff 42  # review/promote one pending handoff (TTY only)
 uv run python -m bridge_db          # start MCP server (stdio)
 uv run python -m bridge_db.migration  # migrate from bridge markdown
 ```

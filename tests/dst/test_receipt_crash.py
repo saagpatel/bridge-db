@@ -166,7 +166,7 @@ async def run_receipt_crash(base: Path, seed: int) -> dict[str, Any]:
 
     setup = await open_sim_db(db_path, sim_clock, rng, trace)
     fns = handoff_fns()
-    setup_ctx = make_ctx(cast(aiosqlite.Connection, setup))
+    setup_ctx = make_ctx(cast(aiosqlite.Connection, setup), principal="claude_ai")
     fired_before = sometimes_counts().get(_WINDOW_LABEL, 0)
 
     clock.install(sim_clock.now)
@@ -174,9 +174,14 @@ async def run_receipt_crash(base: Path, seed: int) -> dict[str, Any]:
         created = await fns["create_handoff"](
             caller="claude_ai",
             project_name="CrashProj",
-            source_trust="operator",  # auth off in tests: no clamping
+            source_trust="operator",
             ctx=setup_ctx,
         )
+        cast(Any, setup)._conn.execute(
+            "UPDATE pending_handoffs SET source_trust = 'operator' WHERE id = ?",
+            (created["handoff_id"],),
+        )
+        cast(Any, setup)._conn.commit()
         await setup.close()
 
         scheduler = SimScheduler(rng, trace)
