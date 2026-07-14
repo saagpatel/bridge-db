@@ -23,6 +23,13 @@ _VALID_SCOPES: frozenset[str] = frozenset(
     {"all", "section", "activity", "snapshot", "handoff"}
 )
 
+# Reject caller-controlled amplification before regex normalization, MATCH
+# expression construction, telemetry, or SQLite. Character and byte limits are
+# intentionally independent so multibyte input cannot consume a larger budget.
+MAX_QUERY_CHARS = 4096
+MAX_QUERY_BYTES = 8192
+MAX_QUERY_TOKENS = 64
+
 # Append-only JSONL recall telemetry, co-located with the audit log.
 # Raw query text is deliberately excluded from this operational record.
 # Used during the Phase -1 dogfood week to decide whether the vector layer
@@ -67,6 +74,18 @@ _STOPWORDS: frozenset[str] = frozenset(
         "with",
     }
 )
+
+
+def _validate_query_shape(query: str) -> None:
+    """Reject oversized recall input without logging caller-controlled text."""
+    if len(query) > MAX_QUERY_CHARS:
+        raise ToolError(
+            f"Recall query exceeds character limit ({MAX_QUERY_CHARS})"
+        )
+    if len(query.encode("utf-8")) > MAX_QUERY_BYTES:
+        raise ToolError(
+            f"Recall query exceeds UTF-8 byte limit ({MAX_QUERY_BYTES})"
+        )
 
 
 def _tokens_for_match(q: str) -> list[str]:
@@ -240,7 +259,11 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool()
     async def recall(
         query: Annotated[
-            str, Field(description="Free-form text to match against bridge-db content")
+            str,
+            Field(
+                description="Free-form text to match against bridge-db content",
+                max_length=MAX_QUERY_CHARS,
+            ),
         ],
         limit: Annotated[
             int, Field(description="Max results to return", ge=1, le=50)
@@ -276,8 +299,13 @@ def register(mcp: FastMCP) -> None:
                 f"Invalid scope '{scope}'. Allowed: {sorted(_VALID_SCOPES)}"
             )
 
+        _validate_query_shape(query)
         clamped_limit = max(1, min(limit, 50))
         tokens = _tokens_for_match(query)
+        if len(tokens) > MAX_QUERY_TOKENS:
+            raise ToolError(
+                f"Recall query exceeds token limit ({MAX_QUERY_TOKENS})"
+            )
 
         if not tokens:
             _log_recall(

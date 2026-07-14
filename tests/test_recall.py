@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from conftest import CaptureMCP, make_ctx
+from mcp.server.fastmcp.exceptions import ToolError
 
 from bridge_db.db import repopulate_content_index
 from bridge_db.tools import activity as activity_tools
@@ -259,6 +260,53 @@ def test_tokens_for_match_drops_stopwords_with_fallback() -> None:
     ]
     # An all-stopword query keeps its tokens rather than returning nothing to search.
     assert toks("why did we") == ["why", "did", "we"]
+
+
+async def test_recall_rejects_oversized_query_before_search_or_telemetry(
+    capture: CaptureMCP, db: Any, tmp_path: Any, monkeypatch: Any
+) -> None:
+    """BDB-DS-069-R1: caller input cannot amplify FTS or telemetry unboundedly."""
+    log_path = tmp_path / "recall.jsonl"
+    monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", log_path)
+
+    with pytest.raises(ToolError, match="character limit"):
+        await capture.fns["recall"](
+            query="x" * (recall_tool.MAX_QUERY_CHARS + 1),
+            ctx=make_ctx(db),
+        )
+    with pytest.raises(ToolError, match="UTF-8 byte limit"):
+        await capture.fns["recall"](
+            query="🙂" * ((recall_tool.MAX_QUERY_BYTES // 4) + 1),
+            ctx=make_ctx(db),
+        )
+    with pytest.raises(ToolError, match="token limit"):
+        await capture.fns["recall"](
+            query=" ".join(f"term{i}" for i in range(recall_tool.MAX_QUERY_TOKENS + 1)),
+            ctx=make_ctx(db),
+        )
+
+    assert not log_path.exists()
+
+
+async def test_recall_accepts_exact_query_resource_boundaries(
+    capture: CaptureMCP, db: Any, tmp_path: Any, monkeypatch: Any
+) -> None:
+    log_path = tmp_path / "recall.jsonl"
+    monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", log_path)
+    token_boundary = " ".join(
+        f"t{i}" for i in range(recall_tool.MAX_QUERY_TOKENS)
+    )
+    char_boundary = "x" * recall_tool.MAX_QUERY_CHARS
+    byte_boundary = "🙂" * (recall_tool.MAX_QUERY_BYTES // 4)
+
+    for query in (token_boundary, char_boundary, byte_boundary):
+        result = await capture.fns["recall"](query=query, ctx=make_ctx(db))
+        assert result == []
+
+    events = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert len(events) == 3
+    assert all("query" not in event for event in events)
+    assert all(event["query_empty"] is False for event in events)
 
 
 def test_match_candidates_and_first_then_or() -> None:
