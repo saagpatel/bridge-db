@@ -12,7 +12,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db import clock, config
-from bridge_db.audit import iter_jsonl
+from bridge_db.audit import iter_jsonl_reverse
 from bridge_db.db import get_db
 from bridge_db.instruction_boundary import instruction_boundary
 from bridge_db.models import CallerID
@@ -29,6 +29,7 @@ _VALID_SCOPES: frozenset[str] = frozenset(
 MAX_QUERY_CHARS = 4096
 MAX_QUERY_BYTES = 8192
 MAX_QUERY_TOKENS = 64
+RECALL_STATS_MAX_SCAN_BYTES = 1024 * 1024
 
 # Append-only JSONL recall telemetry, co-located with the audit log.
 # Raw query text is deliberately excluded from this operational record.
@@ -142,8 +143,13 @@ def _log_recall(
 
 
 def collect_recall_stats(days: int = 7) -> dict[str, Any]:
-    """Roll up recall query log usage over the last `days` days."""
+    """Roll up a bounded newest-byte horizon of recall telemetry."""
     cutoff = (clock.now() - timedelta(days=days)).isoformat().replace("+00:00", "Z")
+
+    try:
+        scan_truncated = RECALL_LOG_PATH.stat().st_size > RECALL_STATS_MAX_SCAN_BYTES
+    except OSError:
+        scan_truncated = False
 
     total = 0
     misses = 0
@@ -152,7 +158,9 @@ def collect_recall_stats(days: int = 7) -> dict[str, Any]:
     caller_counts: Counter[str] = Counter()
     caller_misses: Counter[str] = Counter()
 
-    for record in iter_jsonl(RECALL_LOG_PATH):
+    for record in iter_jsonl_reverse(
+        RECALL_LOG_PATH, max_bytes=RECALL_STATS_MAX_SCAN_BYTES
+    ):
         ts = record.get("ts")
         if not isinstance(ts, str) or ts < cutoff:
             continue
@@ -201,6 +209,8 @@ def collect_recall_stats(days: int = 7) -> dict[str, Any]:
         # raw query collection and cross-client redisclosure remain disabled.
         "top_queries": [],
         "query_text_collection": "disabled",
+        "scan_truncated": scan_truncated,
+        "scan_byte_limit": RECALL_STATS_MAX_SCAN_BYTES,
         "scope_breakdown": dict(scope_counter),
         "caller_breakdown": caller_breakdown,
     }

@@ -440,6 +440,40 @@ async def test_recall_stats_disables_legacy_top_query_output(
     assert result["top_queries"] == []
 
 
+async def test_recall_stats_enforces_visible_reverse_scan_budget(
+    capture: CaptureMCP, tmp_path: Any, monkeypatch: Any
+) -> None:
+    """BDB-DS-024-R1: historical bytes cannot force an unbounded stats scan."""
+    from datetime import UTC, datetime
+
+    log_path = tmp_path / "recall.jsonl"
+    monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", log_path)
+    monkeypatch.setattr(recall_tool, "RECALL_STATS_MAX_SCAN_BYTES", 256)
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    old_visible = {
+        "ts": now,
+        "query_empty": False,
+        "scope": "all",
+        "limit": 10,
+        "n_results": 1,
+        "caller": "cc",
+    }
+    new_visible = {**old_visible, "scope": "handoff", "caller": "codex"}
+    with open(log_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(old_visible) + "\n")
+        f.write("x" * 512 + "\n")
+        f.write(json.dumps(new_visible) + "\n")
+
+    result = await capture.fns["recall_stats"](days=7)
+
+    assert result["total_queries"] == 1
+    assert result["scope_breakdown"] == {"handoff": 1}
+    assert result["caller_breakdown"] == {
+        "codex": {"count": 1, "miss_rate": 0.0}
+    }
+    assert result["scan_truncated"] is True
+
+
 async def test_recall_or_semantics_returns_partial_matches(
     capture: CaptureMCP, db: Any, tmp_path: Any, monkeypatch: Any
 ) -> None:
