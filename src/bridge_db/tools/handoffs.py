@@ -440,7 +440,7 @@ def register(mcp: FastMCP) -> None:
 
         cursor = await db.execute(
             f"""
-            SELECT id, status, claimed_by
+            SELECT id, project_name, canonical_key, status, claimed_by
             FROM pending_handoffs
             WHERE {match_sql} AND status != 'cleared'
             ORDER BY dispatched_at DESC, id DESC
@@ -448,6 +448,7 @@ def register(mcp: FastMCP) -> None:
             match_params,
         )
         rows = await cursor.fetchall()
+        rows_by_id = {int(row["id"]): row for row in rows}
         if not rows:
             # Not an error — handoff may not exist; /end calls this opportunistically
             return {
@@ -512,6 +513,30 @@ def register(mcp: FastMCP) -> None:
                     for handoff_id in clearable_ids
                     if handoff_id not in race_refused_ids
                 ]
+        if clearable_ids:
+            for handoff_id in clearable_ids:
+                row = rows_by_id[handoff_id]
+                await db.execute(
+                    """
+                    INSERT INTO handoff_lifecycle_receipts (
+                        handoff_id, event_type, principal, claimed_caller,
+                        requested_project_name, canonical_key, match_basis,
+                        previous_status, previous_claimant
+                    ) VALUES (?, 'cleared', ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        handoff_id,
+                        caller,
+                        caller,
+                        project_name,
+                        row["canonical_key"],
+                        "exact"
+                        if row["project_name"] == project_name
+                        else "canonical_alias",
+                        row["status"],
+                        row["claimed_by"],
+                    ),
+                )
         await db.commit()
         sometimes("clear_refused_foreign_claim", bool(refused_ids))
 

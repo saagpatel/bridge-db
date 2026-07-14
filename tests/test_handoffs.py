@@ -449,6 +449,22 @@ async def test_clear_handoff_by_project_name(
     row = await cursor.fetchone()
     assert row is not None
     assert row["status"] == "cleared"
+    receipt = await (
+        await db.execute(
+            "SELECT handoff_id, event_type, principal, claimed_caller, "
+            "requested_project_name, match_basis, previous_status, previous_claimant "
+            "FROM handoff_lifecycle_receipts"
+        )
+    ).fetchone()
+    assert receipt is not None
+    assert receipt["handoff_id"] == result["handoff_id"]
+    assert receipt["event_type"] == "cleared"
+    assert receipt["principal"] == "cc"
+    assert receipt["claimed_caller"] == "cc"
+    assert receipt["requested_project_name"] == "MyProject"
+    assert receipt["match_basis"] == "exact"
+    assert receipt["previous_status"] == "pending"
+    assert receipt["previous_claimant"] is None
 
 
 async def test_clear_handoff_clears_all_matching_rows(
@@ -865,6 +881,16 @@ async def test_clear_handoff_matches_canonical_alias(
     row = await cursor.fetchone()
     assert row is not None
     assert row["status"] == "cleared"
+    receipt = await (
+        await db.execute(
+            "SELECT canonical_key, match_basis FROM handoff_lifecycle_receipts "
+            "WHERE handoff_id = ?",
+            (created["handoff_id"],),
+        )
+    ).fetchone()
+    assert receipt is not None
+    assert receipt["canonical_key"] == "saagpatel/IncidentManagement"
+    assert receipt["match_basis"] == "canonical_alias"
 
 
 async def test_create_handoff_enforce_rejects_unbound_connection(

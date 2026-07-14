@@ -17,7 +17,7 @@ from bridge_db import config
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # A migration post-hook runs after its DDL, before the version bump+commit
 # (e.g. FTS repopulation). Its return value is ignored.
@@ -58,6 +58,20 @@ CREATE TABLE IF NOT EXISTS bridge_projection_jobs (
     projected_content_sha256 TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS handoff_lifecycle_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    handoff_id INTEGER NOT NULL,
+    event_type TEXT NOT NULL CHECK(event_type IN ('cleared')),
+    principal TEXT NOT NULL,
+    claimed_caller TEXT NOT NULL,
+    requested_project_name TEXT NOT NULL,
+    canonical_key TEXT,
+    match_basis TEXT NOT NULL CHECK(match_basis IN ('exact', 'canonical_alias')),
+    previous_status TEXT NOT NULL,
+    previous_claimant TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
 CREATE TABLE IF NOT EXISTS write_conflicts (
@@ -499,6 +513,22 @@ CREATE TABLE IF NOT EXISTS bridge_projection_jobs (
 );
 """
 
+_MIGRATION_V16_TO_V17 = """
+CREATE TABLE IF NOT EXISTS handoff_lifecycle_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    handoff_id INTEGER NOT NULL,
+    event_type TEXT NOT NULL CHECK(event_type IN ('cleared')),
+    principal TEXT NOT NULL,
+    claimed_caller TEXT NOT NULL,
+    requested_project_name TEXT NOT NULL,
+    canonical_key TEXT,
+    match_basis TEXT NOT NULL CHECK(match_basis IN ('exact', 'canonical_alias')),
+    previous_status TEXT NOT NULL,
+    previous_claimant TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+"""
+
 # Column definitions for the v14 ADD COLUMN step. Kept character-identical to the
 # activity_log block in _SCHEMA_DDL so a fresh install and a migrated DB converge
 # (see tests/test_schema_convergence_concurrency.py). NOTE: the synced/policy
@@ -749,6 +779,7 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         (14, _MIGRATION_V13_TO_V14, _migrate_shipped_state_to_columns),
         (15, _MIGRATION_V14_TO_V15, None),
         (16, _MIGRATION_V15_TO_V16, None),
+        (17, _MIGRATION_V16_TO_V17, None),
     ]
     for target, ddl, post_hook in migrations:
         if current_version >= target:

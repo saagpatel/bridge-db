@@ -33,6 +33,7 @@ async def test_schema_creates_all_tables(db: aiosqlite.Connection) -> None:
         "context_section_export_state",
         "context_sections",
         "cost_records",
+        "handoff_lifecycle_receipts",
         "pending_handoffs",
         "session_classification",
         "session_costs",
