@@ -39,7 +39,7 @@ def recall_fns(db: aiosqlite.Connection) -> dict[str, Any]:
 async def test_snapshot_prune_emits_audit_line_and_count(
     db: aiosqlite.Connection, snapshot_fns: dict[str, Any]
 ) -> None:
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="cc")
     last: dict[str, Any] = {}
     for i in range(config.SNAPSHOT_RETENTION_PER_SYSTEM + 1):
         last = await snapshot_fns["save_snapshot"](
@@ -63,7 +63,9 @@ async def test_snapshot_save_under_limit_reports_zero_pruned_and_no_audit(
     db: aiosqlite.Connection, snapshot_fns: dict[str, Any]
 ) -> None:
     result = await snapshot_fns["save_snapshot"](
-        caller="cc", data={"active_projects": "only one"}, ctx=make_ctx(db)
+        caller="cc",
+        data={"active_projects": "only one"},
+        ctx=make_ctx(db, principal="cc"),
     )
     assert result["pruned_count"] == 0
     prune_events = [
@@ -79,7 +81,7 @@ async def test_snapshot_prune_respects_codex_families(
 ) -> None:
     """Family partitioning is retention semantics the audit line must not distort:
     an over-limit operating family prunes while consulted_node stays untouched."""
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="codex")
     operating = {
         "infrastructure": "x",
         "automation_digest": "y",

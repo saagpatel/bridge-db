@@ -136,7 +136,7 @@ async def test_get_pending_handoffs_carries_instruction_boundary(
 async def test_get_latest_snapshot_carries_instruction_boundary(
     db: aiosqlite.Connection, s_fns: dict[str, Any]
 ) -> None:
-    ctx = make_ctx(db)
+    ctx = make_ctx(db, principal="cc")
     await s_fns["save_snapshot"](caller="cc", data={"k": "v"}, ctx=ctx)
     snap = await s_fns["get_latest_snapshot"](system="cc", ctx=ctx)
     assert snap["source_trust"] == "agent"

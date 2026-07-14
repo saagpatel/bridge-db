@@ -54,7 +54,7 @@ async def _seed_one_of_each(cap: CaptureMCP, db: Any) -> None:
         caller="cc",
         data={"active_projects": "bridge-db FTS5 hardening", "lessons": "none yet"},
         snapshot_date="2026-04-17",
-        ctx=ctx,
+        ctx=make_ctx(db, principal="cc"),
     )
     # Handoff
     await cap.fns["create_handoff"](
@@ -112,7 +112,10 @@ async def test_recall_hits_carry_source_trust(capture: CaptureMCP, db: Any) -> N
         ctx=make_ctx(db, principal="cc"),
     )
     await capture.fns["save_snapshot"](
-        caller="cc", data={"note": "Quokka snapshot"}, source_trust="ingested", ctx=ctx
+        caller="cc",
+        data={"note": "Quokka snapshot"},
+        source_trust="ingested",
+        ctx=make_ctx(db, principal="cc"),
     )
     handoff = await capture.fns["create_handoff"](
         caller="claude_ai", project_name="Quokka", source_trust="operator", ctx=ctx

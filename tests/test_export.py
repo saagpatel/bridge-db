@@ -217,7 +217,7 @@ async def test_export_workflow_reflects_multi_tool_bridge_state(
                 "infrastructure": "- bridge-db MCP live",
             },
             snapshot_date="2026-04-15",
-            ctx=mctx,
+            ctx=make_ctx(db, principal="cc"),
         )
         await all_fns["save_snapshot"](
             caller="codex",
@@ -227,7 +227,7 @@ async def test_export_workflow_reflects_multi_tool_bridge_state(
                 "active_projects": "- bridge-db",
             },
             snapshot_date="2026-04-15",
-            ctx=mctx,
+            ctx=make_ctx(db, principal="codex"),
         )
         await all_fns["record_cost"](
             caller="cc",
@@ -266,7 +266,7 @@ async def test_export_workflow_reflects_multi_tool_bridge_state(
 async def test_export_uses_latest_codex_operating_snapshot(
     db: aiosqlite.Connection, all_fns: dict[str, Any]
 ) -> None:
-    mctx = make_ctx(db, principal="claude_ai")
+    mctx = make_ctx(db, principal="codex")
     await all_fns["save_snapshot"](
         caller="codex",
         data={
@@ -299,7 +299,7 @@ async def test_export_uses_latest_codex_operating_snapshot(
 async def test_export_uses_latest_cc_snapshot_when_created_at_ties(
     db: aiosqlite.Connection, all_fns: dict[str, Any]
 ) -> None:
-    mctx = make_ctx(db)
+    mctx = make_ctx(db, principal="cc")
     await all_fns["save_snapshot"](
         caller="cc",
         data={"active_projects": "OLD SNAPSHOT MARKER"},
@@ -439,7 +439,7 @@ Prefers MCP when available
                 "active_projects": "- bridge-db",
             },
             snapshot_date="2026-04-17",
-            ctx=mctx,
+            ctx=make_ctx(db, principal="codex"),
         )
         await cap.fns["log_activity"](
             caller="personal_ops",

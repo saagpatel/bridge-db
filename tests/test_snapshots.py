@@ -17,6 +17,22 @@ from bridge_db.tools import snapshots as snap_mod
 def snap_fns(db: aiosqlite.Connection) -> dict[str, Any]:
     cap = CaptureMCP()
     snap_mod.register(cap)
+    raw_save_snapshot = cap.fns["save_snapshot"]
+
+    async def bound_save_snapshot(**kwargs: Any) -> Any:
+        """Default snapshot tests exercise the caller's legitimate channel."""
+        caller = kwargs["caller"]
+        ctx = kwargs.get("ctx")
+        principal = getattr(
+            getattr(getattr(ctx, "request_context", None), "lifespan_context", None),
+            "principal",
+            None,
+        )
+        if principal is None:
+            kwargs["ctx"] = make_ctx(db, principal=caller)
+        return await raw_save_snapshot(**kwargs)
+
+    cap.fns["save_snapshot"] = bound_save_snapshot
     return cap.fns
 
 
@@ -48,13 +64,14 @@ async def test_save_snapshot_persists_and_echoes_source_trust(
     )
     defaulted = await snap_fns["save_snapshot"](caller="codex", data={"v": "2"}, ctx=ctx)
 
-    assert asserted["source_trust"] == "operator"
+    assert asserted["source_trust"] == "agent"
+    assert asserted["source_trust_clamped"] is True
     assert defaulted["source_trust"] == "agent"
 
     cursor = await db.execute("SELECT system, source_trust FROM system_snapshots ORDER BY id")
     rows: list[aiosqlite.Row] = await cursor.fetchall()  # type: ignore[assignment]
     trust = {r["system"]: r["source_trust"] for r in rows}
-    assert trust["cc"] == "operator"
+    assert trust["cc"] == "agent"
     assert trust["codex"] == "agent"
 
 
@@ -66,9 +83,8 @@ async def test_save_snapshot_default_date_uses_utc_calendar_day(
     snap_mod.register(cap)
 
     result = await cap.fns["save_snapshot"](
-        caller="codex", data={"v": "utc-default"}, ctx=make_ctx(db)
+        caller="codex", data={"v": "utc-default"}, ctx=make_ctx(db, principal="codex")
     )
-
     assert result["snapshot_date"] == "2026-06-21"
     cursor = await db.execute(
         "SELECT snapshot_date FROM system_snapshots WHERE system = 'codex'"
@@ -77,6 +93,27 @@ async def test_save_snapshot_default_date_uses_utc_calendar_day(
     assert row is not None
     assert row["snapshot_date"] == "2026-06-21"
 
+
+async def test_save_snapshot_auth_off_rejects_unbound_operator_forgery(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BDB-DS-003-R1: rollout off cannot bypass snapshot identity or trust."""
+    monkeypatch.setattr(config, "AUTH_MODE", "off")
+    cap = CaptureMCP()
+    snap_mod.register(cap)
+
+    with pytest.raises(ToolError, match="Unauthenticated connection"):
+        await cap.fns["save_snapshot"](
+            caller="codex",
+            data={"forged": True},
+            source_trust="operator",
+            ctx=make_ctx(db),
+        )
+
+    cursor = await db.execute("SELECT COUNT(*) FROM system_snapshots")
+    count_row = await cursor.fetchone()
+    assert count_row is not None
+    assert count_row[0] == 0
 
 async def test_save_snapshot_claude_ai_raises(
     db: aiosqlite.Connection, snap_fns: dict[str, Any]

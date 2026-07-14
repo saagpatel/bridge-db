@@ -10,7 +10,7 @@ from pydantic import Field
 
 from bridge_db import clock, config
 from bridge_db.audit import log_audit
-from bridge_db.auth import clamp_source_trust, require_caller
+from bridge_db.auth import clamp_source_trust, require_bound_caller, require_caller
 from bridge_db.db import (
     fts_text_for_snapshot,
     gc_fts_orphans,
@@ -114,8 +114,9 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """Save a system state snapshot. Auto-prunes to the 10 most recent per system."""
         require_caller(ctx, caller, tool="save_snapshot")
+        require_bound_caller(ctx, caller, tool="save_snapshot")
         source_trust, source_trust_clamped = clamp_source_trust(
-            source_trust, caller=caller, tool="save_snapshot"
+            source_trust, caller=caller, tool="save_snapshot", strict=True
         )
         system = SNAPSHOT_SYSTEM_MAP.get(caller)
         if system is None:
