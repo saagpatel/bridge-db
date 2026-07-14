@@ -127,3 +127,19 @@ async def test_audit_tail_skips_malformed_lines(fns: dict[str, Any], tmp_path: P
     results = await fns["audit_tail"]()
     projects = {r["project"] for r in results}
     assert projects == {"before", "after"}
+
+
+async def test_audit_tail_enforces_reverse_scan_byte_budget(
+    fns: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        audit_tool, "AUDIT_TAIL_MAX_SCAN_BYTES", 256, raising=False
+    )
+    audit.log_audit("log_activity", "cc", "outside-budget", ok=True)
+    with open(config.AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
+        f.write("x" * 512 + "\n")
+    audit.log_audit("log_activity", "cc", "inside-budget", ok=True)
+
+    results = await fns["audit_tail"](limit=10)
+
+    assert [record["project"] for record in results] == ["inside-budget"]

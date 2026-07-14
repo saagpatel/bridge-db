@@ -54,3 +54,39 @@ def iter_jsonl(path: Path) -> Iterator[dict[str, Any]]:
                 continue
             if isinstance(record, dict):
                 yield record
+
+
+def iter_jsonl_reverse(
+    path: Path, *, max_bytes: int
+) -> Iterator[dict[str, Any]]:
+    """Yield valid JSON objects newest-line-first within a fixed byte horizon.
+
+    The bounded binary read avoids materializing an unbounded append-only log.
+    A record cut by the start boundary is discarded rather than parsed as a
+    complete event; a missing final newline remains supported.
+    """
+    if max_bytes <= 0 or not path.exists():
+        return
+    try:
+        size = path.stat().st_size
+        start = max(0, size - max_bytes)
+        with open(path, "rb") as f:
+            starts_on_boundary = start == 0
+            if start > 0:
+                f.seek(start - 1)
+                starts_on_boundary = f.read(1) == b"\n"
+            f.seek(start)
+            data = f.read(size - start)
+    except OSError:
+        return
+
+    lines = data.splitlines()
+    if start > 0 and not starts_on_boundary and lines:
+        lines = lines[1:]
+    for raw_line in reversed(lines):
+        try:
+            record = json.loads(raw_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(record, dict):
+            yield record

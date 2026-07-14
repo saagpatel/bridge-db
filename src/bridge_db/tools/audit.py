@@ -1,15 +1,19 @@
 """Audit tail tool: read the audit JSONL log with simple filters."""
 
+import heapq
 import logging
+from collections.abc import Iterator
 from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 from bridge_db import config
-from bridge_db.audit import iter_jsonl
+from bridge_db.audit import iter_jsonl_reverse
 
 logger = logging.getLogger("bridge_db.tools.audit")
+
+AUDIT_TAIL_MAX_SCAN_BYTES = 1024 * 1024
 
 
 def collect_audit_tail(
@@ -20,23 +24,27 @@ def collect_audit_tail(
     since: str | None = None,
     ok: bool | None = None,
 ) -> list[dict[str, Any]]:
-    """Return recent audit events, newest first, with optional filters."""
-    matched: list[dict[str, Any]] = []
-    for record in iter_jsonl(config.AUDIT_LOG_PATH):
-        if caller is not None and record.get("caller") != caller:
-            continue
-        if tool is not None and record.get("tool") != tool:
-            continue
-        if ok is not None and record.get("ok") is not ok:
-            continue
-        if since is not None:
-            ts = record.get("ts")
-            if not isinstance(ts, str) or ts < since:
-                continue
-        matched.append(record)
+    """Return recent audit events from a bounded newest-file horizon."""
 
-    matched.sort(key=lambda r: r.get("ts") or "", reverse=True)
-    return matched[:limit]
+    def matching_records() -> Iterator[dict[str, Any]]:
+        for record in iter_jsonl_reverse(
+            config.AUDIT_LOG_PATH, max_bytes=AUDIT_TAIL_MAX_SCAN_BYTES
+        ):
+            if caller is not None and record.get("caller") != caller:
+                continue
+            if tool is not None and record.get("tool") != tool:
+                continue
+            if ok is not None and record.get("ok") is not ok:
+                continue
+            if since is not None:
+                ts = record.get("ts")
+                if not isinstance(ts, str) or ts < since:
+                    continue
+            yield record
+
+    return heapq.nlargest(
+        limit, matching_records(), key=lambda record: record.get("ts") or ""
+    )
 
 
 def register(mcp: FastMCP) -> None:
@@ -62,8 +70,9 @@ def register(mcp: FastMCP) -> None:
     ) -> list[dict[str, Any]]:
         """Return recent audit events, newest first, with optional filters.
 
-        Reads `config.AUDIT_LOG_PATH`. Missing file returns []. Malformed lines
-        are skipped. Timestamps are ISO8601 UTC; `since` compares as string,
-        which matches temporal order for that format.
+        Reads a bounded newest-byte horizon from `config.AUDIT_LOG_PATH`.
+        Missing file returns []; malformed or boundary-truncated lines are
+        skipped. Timestamps are ISO8601 UTC; `since` compares as string, which
+        matches temporal order for that format.
         """
         return collect_audit_tail(limit=limit, caller=caller, tool=tool, since=since, ok=ok)
