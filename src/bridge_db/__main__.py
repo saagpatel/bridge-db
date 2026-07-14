@@ -530,10 +530,10 @@ def run_list_principals() -> bool:
 
 
 async def run_promote_section(section_name: str) -> bool:
-    """Operator-only label promotion for a context section (TTY-gated)."""
+    """Atomically promote one exact reviewed context version (TTY-gated)."""
     from bridge_db import config
     from bridge_db.audit import log_audit
-    from bridge_db.db import open_db
+    from bridge_db.db import content_sha256, open_db
     from bridge_db.models import SECTION_OWNERS
 
     if section_name not in SECTION_OWNERS:
@@ -545,19 +545,71 @@ async def run_promote_section(section_name: str) -> bool:
         return False
 
     db = await open_db(config.DB_PATH)
+    promoted_from: str | None = None
+    reviewed_hash: str | None = None
+    reviewed_version: int | None = None
     try:
         cursor = await db.execute(
-            "SELECT source_trust, updated_at FROM context_sections WHERE section_name = ?",
+            "SELECT content, source_trust, updated_at, version "
+            "FROM context_sections WHERE section_name = ?",
             (section_name,),
         )
         row = await cursor.fetchone()
         if row is None:
             print(f"no stored section '{section_name}'")
             return False
-        await db.execute(
-            "UPDATE context_sections SET source_trust = 'operator' WHERE section_name = ?",
+        reviewed_hash = content_sha256(cast(str, row["content"]))
+        reviewed_version = cast(int, row["version"])
+        if row["source_trust"] == "operator":
+            print(
+                f"section '{section_name}' is already operator-trusted "
+                f"(version={reviewed_version} sha256={reviewed_hash})"
+            )
+            return True
+
+        print(
+            f"review section={section_name} version={reviewed_version} "
+            f"source_trust={row['source_trust']} updated_at={row['updated_at']} "
+            f"sha256={reviewed_hash}"
+        )
+        print("--- reviewed content ---")
+        print(cast(str, row["content"]))
+        print("--- end reviewed content ---")
+        try:
+            confirmed = input("Promote this exact section version to operator trust? [y/N] ")
+        except EOFError:
+            confirmed = ""
+        if confirmed.strip().lower() not in {"y", "yes"}:
+            print("promotion cancelled")
+            return False
+
+        await db.execute("BEGIN IMMEDIATE")
+        cursor = await db.execute(
+            "SELECT content, source_trust, updated_at, version "
+            "FROM context_sections WHERE section_name = ?",
             (section_name,),
         )
+        current = await cursor.fetchone()
+        if (
+            current is None
+            or current["version"] != reviewed_version
+            or current["source_trust"] != row["source_trust"]
+            or content_sha256(cast(str, current["content"])) != reviewed_hash
+        ):
+            await db.rollback()
+            print("refused: section changed after review; inspect it again")
+            return False
+
+        promoted_from = cast(str, current["source_trust"])
+        cursor = await db.execute(
+            "UPDATE context_sections SET source_trust = 'operator' "
+            "WHERE section_name = ? AND version = ? AND source_trust = ?",
+            (section_name, reviewed_version, promoted_from),
+        )
+        if cursor.rowcount != 1:
+            await db.rollback()
+            print("refused: section changed before promotion")
+            return False
         await db.commit()
     finally:
         await db.close()
@@ -567,11 +619,14 @@ async def run_promote_section(section_name: str) -> bool:
         "operator-cli",
         None,
         ok=True,
-        detail=f"section={section_name} {row['source_trust']}->operator",
+        detail=(
+            f"section={section_name} version={reviewed_version} "
+            f"{promoted_from}->operator sha256={reviewed_hash}"
+        ),
     )
     print(
-        f"promoted '{section_name}': {row['source_trust']} -> operator "
-        f"(content as of {row['updated_at']})"
+        f"promoted '{section_name}': {promoted_from} -> operator "
+        f"(version={reviewed_version} sha256={reviewed_hash})"
     )
     return True
 

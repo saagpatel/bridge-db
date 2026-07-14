@@ -102,7 +102,10 @@ Claude.ai-owned context section. Later `sync_from_file` imports a changed
 fallback-file section only if the DB still matches that exported base. If the DB
 has advanced, the import is rejected and recorded in `write_conflicts`. Every
 changed or new file section is labeled `ingested` regardless of auth rollout
-mode; unchanged content preserves its existing label.
+mode; unchanged content preserves its existing label. Promote reviewed content
+with `--promote-section <section>`: the TTY ceremony displays and confirms the
+exact version and digest, then rechecks it under a write lock before granting
+operator trust.
 Exports to the real Claude.ai fallback path are also guarded against empty
 fixture-like output: bridge-db refuses to overwrite that file when all four core
 Claude.ai-owned sections would render as `_Not yet populated._`. Set

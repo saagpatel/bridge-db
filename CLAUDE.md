@@ -58,7 +58,8 @@ uv run python -m bridge_db --promote-handoff 42      # reviewed handoff promotio
   `enforce` (reject); unrecognized values fail closed to `enforce`. With auth active,
   no MCP write may mint `source_trust='operator'` (clamped to `agent`, audited).
   In every auth mode, `sync_from_file` imports changed file content as `ingested` (promote via
-  `--promote-section`, TTY-only). `create_handoff` is stricter than the rollout dial:
+  `--promote-section`, TTY-only, with exact content/version/hash review and locked recheck).
+  `create_handoff` is stricter than the rollout dial:
   it always requires an exact channel-bound `claude_ai` principal and always clamps
   requested operator trust. Review and promote an exact pending row with
   `--promote-handoff <id>` (TTY-only) before Codex pickup.

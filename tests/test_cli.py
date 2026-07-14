@@ -718,6 +718,11 @@ async def test_promote_section_sets_operator_label(
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
 
+    def confirm(_prompt: str) -> str:
+        return "yes"
+
+    monkeypatch.setattr("builtins.input", confirm)
+
     assert await run_promote_section("career") is True
     cursor = await db.execute(
         "SELECT source_trust FROM context_sections WHERE section_name = 'career'"
@@ -725,6 +730,62 @@ async def test_promote_section_sets_operator_label(
     row = await cursor.fetchone()
     assert row is not None
     assert row["source_trust"] == "operator"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("increment_version", [True, False])
+async def test_promote_section_rejects_content_changed_after_review(
+    db: aiosqlite.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    increment_version: bool,
+) -> None:
+    from bridge_db.tools.context import (
+        _upsert_section,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    await _upsert_section(
+        db=db,
+        section_name="career",
+        owner="claude_ai",
+        content="reviewed content",
+        source_trust="ingested",
+        attempted_by="sync_from_file",
+        operation="sync_from_file",
+    )
+    await db.commit()
+    db_path = tmp_path / "test.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    def mutate_then_confirm(_prompt: str) -> str:
+        with sqlite3.connect(db_path) as concurrent:
+            if increment_version:
+                concurrent.execute(
+                    "UPDATE context_sections SET content = ?, source_trust = ?, "
+                    "version = version + 1 WHERE section_name = ?",
+                    ("replacement content", "ingested", "career"),
+                )
+            else:
+                concurrent.execute(
+                    "UPDATE context_sections SET content = ?, source_trust = ? "
+                    "WHERE section_name = ?",
+                    ("replacement content", "ingested", "career"),
+                )
+        return "yes"
+
+    monkeypatch.setattr("builtins.input", mutate_then_confirm)
+
+    assert await run_promote_section("career") is False
+    cursor = await db.execute(
+        "SELECT content, source_trust, version FROM context_sections "
+        "WHERE section_name = 'career'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["content"] == "replacement content"
+    assert row["source_trust"] == "ingested"
+    assert row["version"] == (2 if increment_version else 1)
 
 
 @pytest.mark.asyncio
