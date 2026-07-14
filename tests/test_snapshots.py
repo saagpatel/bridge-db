@@ -40,6 +40,22 @@ def snap_fns(db: aiosqlite.Connection) -> dict[str, Any]:
 def cost_fns(db: aiosqlite.Connection) -> dict[str, Any]:
     cap = CaptureMCP()
     cost_mod.register(cap)
+    raw_record_cost = cap.fns["record_cost"]
+
+    async def bound_record_cost(**kwargs: Any) -> Any:
+        """Default cost tests exercise the caller's legitimate channel."""
+        caller = kwargs["caller"]
+        ctx = kwargs.get("ctx")
+        principal = getattr(
+            getattr(getattr(ctx, "request_context", None), "lifespan_context", None),
+            "principal",
+            None,
+        )
+        if principal is None:
+            kwargs["ctx"] = make_ctx(db, principal=caller)
+        return await raw_record_cost(**kwargs)
+
+    cap.fns["record_cost"] = bound_record_cost
     return cap.fns
 
 
@@ -237,6 +253,36 @@ async def test_record_cost_upsert(db: aiosqlite.Connection, cost_fns: dict[str, 
     row2 = await cursor2.fetchone()
     assert row2 is not None
     assert row2["amount"] == 75.0
+
+
+async def test_record_cost_auth_off_rejects_cross_system_overwrite(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BDB-DS-004-R1: rollout off cannot authorize a forged cost owner."""
+    monkeypatch.setattr(config, "AUTH_MODE", "off")
+    cap = CaptureMCP()
+    cost_mod.register(cap)
+    await cap.fns["record_cost"](
+        caller="cc",
+        month="2026-04",
+        amount=55.0,
+        ctx=make_ctx(db, principal="cc"),
+    )
+
+    with pytest.raises(ToolError, match="bound to 'codex'"):
+        await cap.fns["record_cost"](
+            caller="cc",
+            month="2026-04",
+            amount=999.0,
+            ctx=make_ctx(db, principal="codex"),
+        )
+
+    cursor = await db.execute(
+        "SELECT amount FROM cost_records WHERE system = 'cc' AND month = '2026-04'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["amount"] == 55.0
 
 
 async def test_record_cost_bad_month_raises(

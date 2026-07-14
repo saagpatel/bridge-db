@@ -233,7 +233,7 @@ async def test_export_workflow_reflects_multi_tool_bridge_state(
             caller="cc",
             month="2026-04",
             amount=125.0,
-            ctx=mctx,
+            ctx=make_ctx(db, principal="cc"),
         )
         await all_fns["log_activity"](
             caller="cc",
