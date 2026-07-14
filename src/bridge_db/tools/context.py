@@ -48,6 +48,10 @@ def parse_owned_sections(markdown: str) -> dict[str, str]:
             heading = line[3:].strip()
             current_section = _SECTION_HEADING_MAP.get(heading)
             if current_section is not None:
+                if current_section in parsed:
+                    raise ToolError(
+                        f"Duplicate owned section heading is not allowed: {heading}"
+                    )
                 parsed[current_section] = []
             continue
 

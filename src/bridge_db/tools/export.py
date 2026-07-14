@@ -23,6 +23,26 @@ _HEADING_MAP = {
     "research": "## Active Research Themes",
     "capabilities": "## Claude.ai Capabilities Summary",
 }
+_MARKDOWN_DATA_ESCAPES = str.maketrans(
+    {
+        "\\": "\\\\",
+        "\n": "\\n",
+        "\r": "\\r",
+        "\v": "\\v",
+        "\f": "\\f",
+        "\x1c": "\\u001c",
+        "\x1d": "\\u001d",
+        "\x1e": "\\u001e",
+        "\x85": "\\u0085",
+        "\u2028": "\\u2028",
+        "\u2029": "\\u2029",
+    }
+)
+
+
+def _markdown_data(value: Any) -> str:
+    """Render stored data without allowing it to create document lines."""
+    return str(value).translate(_MARKDOWN_DATA_ESCAPES)
 
 
 class BridgeExportSafetyError(RuntimeError):
@@ -152,12 +172,12 @@ async def build_markdown(db: Any) -> str:
         cost_table = "| Month | Cost |\n|---|---|\n"
         total = 0.0
         for cr in cost_rows:
-            cost_table += f"| {cr['month']} | ${cr['amount']:.0f} |\n"
+            cost_table += f"| {_markdown_data(cr['month'])} | ${cr['amount']:.0f} |\n"
             total += cr["amount"]
         cost_table += f"| **Total** | **${total:.0f}** |\n"
 
         cc_snapshot_md = (
-            f"## Claude Code State Snapshot\nLast exported: {snap_date}\n\n"
+            f"## Claude Code State Snapshot\nLast exported: {_markdown_data(snap_date)}\n\n"
         )
         for key, label in [
             ("active_projects", "Active Projects"),
@@ -167,10 +187,13 @@ async def build_markdown(db: Any) -> str:
             ("infrastructure", "Infrastructure"),
         ]:
             if val := data.get(key):
-                cc_snapshot_md += f"### {label}\n{val}\n\n"
+                cc_snapshot_md += f"### {label}\n{_markdown_data(val)}\n\n"
         cc_snapshot_md += f"### Cost (ccusage)\n{cost_table}\n"
         if last := data.get("last_session"):
-            cc_snapshot_md += f"### Last Session ({snap_date})\n{last}\n"
+            cc_snapshot_md += (
+                f"### Last Session ({_markdown_data(snap_date)})\n"
+                f"{_markdown_data(last)}\n"
+            )
     else:
         cc_snapshot_md = "## Claude Code State Snapshot\n_No snapshot yet._\n"
 
@@ -180,10 +203,14 @@ async def build_markdown(db: Any) -> str:
         lines: list[str] = []
         for r in rows if newest_first else reversed(rows):
             tags: list[str] = json.loads(r["tags"])
-            tag_str = f" [{']['.join(tags)}]" if tags else ""
-            branch_str = f" ({r['branch']})" if r["branch"] else ""
+            tag_str = (
+                f" [{']['.join(_markdown_data(tag) for tag in tags)}]" if tags else ""
+            )
+            branch_str = f" ({_markdown_data(r['branch'])})" if r["branch"] else ""
             lines.append(
-                f"- [{r['timestamp']}]{tag_str} {r['project_name']}: {r['summary']}{branch_str}"
+                f"- [{_markdown_data(r['timestamp'])}]{tag_str} "
+                f"{_markdown_data(r['project_name'])}: "
+                f"{_markdown_data(r['summary'])}{branch_str}"
             )
         return lines
 
@@ -202,14 +229,17 @@ async def build_markdown(db: Any) -> str:
     # --- Codex State Snapshot ---
     codex_snap_row, cdata = await _latest_codex_operating_snapshot(db)
     if codex_snap_row and cdata is not None:
-        codex_snapshot_md = f"## Codex State Snapshot\nLast exported: {codex_snap_row['snapshot_date']}\n\n"
+        codex_snapshot_md = (
+            "## Codex State Snapshot\nLast exported: "
+            f"{_markdown_data(codex_snap_row['snapshot_date'])}\n\n"
+        )
         for key, label in [
             ("infrastructure", "Infrastructure"),
             ("automation_digest", "Automation Digest (Last 7 Days)"),
             ("active_projects", "Active Codex Projects"),
         ]:
             if val := cdata.get(key):
-                codex_snapshot_md += f"### {label}\n{val}\n\n"
+                codex_snapshot_md += f"### {label}\n{_markdown_data(val)}\n\n"
     else:
         codex_snapshot_md = "## Codex State Snapshot\n_No snapshot yet._\n"
 
@@ -270,13 +300,13 @@ async def build_markdown(db: Any) -> str:
     if handoff_rows:
         handoff_lines: list[str] = []
         for r in handoff_rows:
-            line = f"- **{r['project_name']}**"
+            line = f"- **{_markdown_data(r['project_name'])}**"
             if r["project_path"]:
-                line += f" — path: `{r['project_path']}`"
+                line += f" — path: `{_markdown_data(r['project_path'])}`"
             if r["roadmap_file"]:
-                line += f", roadmap: `{r['roadmap_file']}`"
+                line += f", roadmap: `{_markdown_data(r['roadmap_file'])}`"
             if r["phase"]:
-                line += f", phase: {r['phase']}"
+                line += f", phase: {_markdown_data(r['phase'])}"
             handoff_lines.append(line)
         handoffs_md = "## Pending Handoffs\n" + "\n".join(handoff_lines) + "\n"
     else:

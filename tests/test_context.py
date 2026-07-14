@@ -334,6 +334,22 @@ _Do not import_
     }
 
 
+def test_parse_owned_sections_rejects_duplicate_owned_heading() -> None:
+    """BDB-DS-050-R1: ambiguous owned structure must fail closed."""
+    markdown = """## Career & Professional Target
+Canonical body
+
+## Recent Codex Activity
+- rendered data
+
+## Career & Professional Target
+Injected replacement
+"""
+
+    with pytest.raises(ToolError, match="Duplicate owned section heading"):
+        mod.parse_owned_sections(markdown)
+
+
 async def test_sync_from_file_upserts_owned_sections(
     db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
 ) -> None:
