@@ -14,6 +14,7 @@ from bridge_db.auth import (
     clamp_source_trust,
     get_principal,
     require_bound_caller,
+    require_bound_principal,
     require_caller,
 )
 from bridge_db.db import (
@@ -248,7 +249,9 @@ async def _record_section_conflict(
     return receipt_id, current
 
 
-async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str, Any]:
+async def sync_owned_sections_from_file(
+    db: Any, bridge_path: Path, *, principal: str
+) -> dict[str, Any]:
     """Read the bridge file and upsert the Claude.ai-owned context sections.
 
     The file is an unauthenticated channel in every auth mode: unchanged
@@ -259,7 +262,12 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
     if not bridge_path.exists():
         raise ToolError(f"Bridge file not found: {bridge_path}")
 
-    parsed_sections = parse_owned_sections(bridge_path.read_text(encoding="utf-8"))
+    fallback_content = bridge_path.read_text(encoding="utf-8")
+    parsed_sections = parse_owned_sections(fallback_content)
+    fallback_file_sha256 = content_sha256(fallback_content)
+    fallback_path_sha256 = content_sha256(
+        str(bridge_path.expanduser().resolve(strict=False))
+    )
     synced_sections: list[str] = []
     unchanged: list[str] = []
     demoted: list[str] = []
@@ -298,7 +306,7 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
                     reason="missing_export_base",
                     attempted_content=content,
                     attempted_source_trust="ingested",
-                    principal=None,
+                    principal=principal,
                     stale_version=None,
                     surface="markdown_sync",
                     detail={"decision": "refused_unknown_file_ancestry"},
@@ -336,7 +344,7 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
                         reason="stale_export_base",
                         attempted_content=content,
                         attempted_source_trust="ingested",
-                        principal=None,
+                        principal=principal,
                         stale_version=int(exported["exported_version"]),
                         surface="markdown_sync",
                         detail={
@@ -372,8 +380,9 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
             owner="claude_ai",
             content=content,
             source_trust="ingested",
-            attempted_by="sync_from_file",
+            attempted_by=principal,
             operation="sync_from_file",
+            principal=principal,
             receipt_surface="markdown_sync",
             if_match_version=current["version"] if current is not None else None,
         )
@@ -392,13 +401,36 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
             continue
         demoted.append(section_name)
 
+        imported_version = int(current["version"]) + 1 if current is not None else 1
+        await db.execute(
+            """
+            INSERT INTO bridge_import_receipts (
+                principal, section_name, previous_version, imported_version,
+                previous_content_sha256, imported_content_sha256,
+                imported_source_trust, fallback_path_sha256, fallback_file_sha256
+            ) VALUES (?, ?, ?, ?, ?, ?, 'ingested', ?, ?)
+            """,
+            (
+                principal,
+                section_name,
+                int(current["version"]) if current is not None else None,
+                imported_version,
+                content_sha256(str(current["content"]))
+                if current is not None
+                else None,
+                content_sha256(content),
+                fallback_path_sha256,
+                fallback_file_sha256,
+            ),
+        )
+
         synced_sections.append(section_name)
 
     await db.commit()
     if demoted:
         log_audit(
             "sync_from_file.demoted",
-            None,
+            principal,
             None,
             ok=True,
             detail=f"sections={','.join(demoted)} label=ingested (file channel)",
@@ -652,7 +684,8 @@ def register(mcp: FastMCP) -> None:
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Sync Claude.ai-owned context sections from the bridge markdown file into SQLite."""
+        principal = require_bound_principal(ctx, tool="sync_from_file")
         db = get_db(ctx)
         return await sync_owned_sections_from_file(
-            db=db, bridge_path=config.BRIDGE_FILE_PATH
+            db=db, bridge_path=config.BRIDGE_FILE_PATH, principal=principal
         )

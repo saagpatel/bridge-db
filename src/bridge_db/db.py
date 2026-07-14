@@ -17,7 +17,7 @@ from bridge_db import config
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 # A migration post-hook runs after its DDL, before the version bump+commit
 # (e.g. FTS repopulation). Its return value is ignored.
@@ -69,6 +69,20 @@ CREATE TABLE IF NOT EXISTS bridge_export_receipts (
     exported_content_sha256 TEXT NOT NULL,
     exported_context_sections INTEGER NOT NULL CHECK(exported_context_sections >= 0),
     byte_count INTEGER NOT NULL CHECK(byte_count >= 0),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS bridge_import_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    principal TEXT NOT NULL,
+    section_name TEXT NOT NULL CHECK(section_name IN ('career', 'speaking', 'research', 'capabilities')),
+    previous_version INTEGER,
+    imported_version INTEGER NOT NULL CHECK(imported_version >= 1),
+    previous_content_sha256 TEXT,
+    imported_content_sha256 TEXT NOT NULL,
+    imported_source_trust TEXT NOT NULL CHECK(imported_source_trust = 'ingested'),
+    fallback_path_sha256 TEXT NOT NULL,
+    fallback_file_sha256 TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
@@ -555,6 +569,22 @@ CREATE TABLE IF NOT EXISTS bridge_export_receipts (
 );
 """
 
+_MIGRATION_V18_TO_V19 = """
+CREATE TABLE IF NOT EXISTS bridge_import_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    principal TEXT NOT NULL,
+    section_name TEXT NOT NULL CHECK(section_name IN ('career', 'speaking', 'research', 'capabilities')),
+    previous_version INTEGER,
+    imported_version INTEGER NOT NULL CHECK(imported_version >= 1),
+    previous_content_sha256 TEXT,
+    imported_content_sha256 TEXT NOT NULL,
+    imported_source_trust TEXT NOT NULL CHECK(imported_source_trust = 'ingested'),
+    fallback_path_sha256 TEXT NOT NULL,
+    fallback_file_sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+"""
+
 # Column definitions for the v14 ADD COLUMN step. Kept character-identical to the
 # activity_log block in _SCHEMA_DDL so a fresh install and a migrated DB converge
 # (see tests/test_schema_convergence_concurrency.py). NOTE: the synced/policy
@@ -807,6 +837,7 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         (16, _MIGRATION_V15_TO_V16, None),
         (17, _MIGRATION_V16_TO_V17, None),
         (18, _MIGRATION_V17_TO_V18, None),
+        (19, _MIGRATION_V18_TO_V19, None),
     ]
     for target, ddl, post_hook in migrations:
         if current_version >= target:

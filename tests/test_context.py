@@ -378,7 +378,7 @@ Capability notes
     original = cfg.BRIDGE_FILE_PATH
     cfg.BRIDGE_FILE_PATH = bridge_file
     try:
-        result = await fns["sync_from_file"](ctx=make_ctx(db))
+        result = await fns["sync_from_file"](ctx=make_ctx(db, principal="cc"))
     finally:
         cfg.BRIDGE_FILE_PATH = original
 
@@ -401,6 +401,53 @@ Capability notes
         ("research", "claude_ai", "Research notes"),
         ("speaking", "claude_ai", "Upcoming talk details"),
     ]
+    receipts = list(
+        await (
+            await db.execute(
+                "SELECT principal, section_name, previous_version, imported_version, "
+                "imported_source_trust, imported_content_sha256, fallback_file_sha256 "
+                "FROM bridge_import_receipts ORDER BY section_name"
+            )
+        ).fetchall()
+    )
+    assert len(receipts) == 4
+    assert {row["principal"] for row in receipts} == {"cc"}
+    assert {row["section_name"] for row in receipts} == {
+        "career",
+        "speaking",
+        "research",
+        "capabilities",
+    }
+    assert all(row["previous_version"] is None for row in receipts)
+    assert all(row["imported_version"] == 1 for row in receipts)
+    assert all(row["imported_source_trust"] == "ingested" for row in receipts)
+    assert all(row["imported_content_sha256"] for row in receipts)
+    assert all(row["fallback_file_sha256"] for row in receipts)
+
+
+async def test_sync_from_file_rejects_unbound_before_read_or_mutation(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge_file = tmp_path / "claude_ai_context.md"
+    bridge_file.write_text(
+        "## Career & Professional Target\nuntrusted edit\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(cfg, "BRIDGE_FILE_PATH", bridge_file)
+
+    with pytest.raises(ToolError, match="Unauthenticated connection"):
+        await fns["sync_from_file"](ctx=make_ctx(db, principal=None))
+
+    section_count = await (
+        await db.execute("SELECT COUNT(*) FROM context_sections")
+    ).fetchone()
+    receipt_count = await (
+        await db.execute("SELECT COUNT(*) FROM bridge_import_receipts")
+    ).fetchone()
+    assert section_count is not None and section_count[0] == 0
+    assert receipt_count is not None and receipt_count[0] == 0
 
 
 async def test_sync_from_file_is_idempotent(
@@ -423,8 +470,12 @@ v4
         encoding="utf-8",
     )
 
-    first = await mod.sync_owned_sections_from_file(db=db, bridge_path=bridge_file)
-    second = await mod.sync_owned_sections_from_file(db=db, bridge_path=bridge_file)
+    first = await mod.sync_owned_sections_from_file(
+        db=db, bridge_path=bridge_file, principal="cc"
+    )
+    second = await mod.sync_owned_sections_from_file(
+        db=db, bridge_path=bridge_file, principal="cc"
+    )
 
     assert first["count"] == 4
     assert second["count"] == 0
@@ -476,7 +527,8 @@ stale file edit
     section = await fns["get_section"](section_name="career", ctx=ctx)
     assert section["content"] == "db v2"
     cursor = await db.execute(
-        "SELECT surface, target_key, reason FROM write_conflicts WHERE id = ?",
+        "SELECT surface, target_key, reason, principal "
+        "FROM write_conflicts WHERE id = ?",
         (result["conflicts"][0]["receipt_id"],),
     )
     receipt = await cursor.fetchone()
@@ -484,6 +536,7 @@ stale file edit
     assert receipt["surface"] == "markdown_sync"
     assert receipt["target_key"] == "career"
     assert receipt["reason"] == "stale_export_base"
+    assert receipt["principal"] == "claude_ai"
 
 
 async def test_sync_from_file_conflicts_when_existing_row_has_no_export_base(
@@ -503,7 +556,9 @@ async def test_sync_from_file_conflicts_when_existing_row_has_no_export_base(
         encoding="utf-8",
     )
 
-    result = await mod.sync_owned_sections_from_file(db, bridge_file)
+    result = await mod.sync_owned_sections_from_file(
+        db, bridge_file, principal="cc"
+    )
 
     assert result["count"] == 0
     assert result["conflict_count"] == 1
@@ -576,7 +631,9 @@ codex data
         encoding="utf-8",
     )
 
-    result = await mod.sync_owned_sections_from_file(db=db, bridge_path=bridge_file)
+    result = await mod.sync_owned_sections_from_file(
+        db=db, bridge_path=bridge_file, principal="cc"
+    )
 
     assert result["sections_synced"] == []
     assert result["count"] == 0
@@ -623,7 +680,9 @@ async def test_sync_warn_mode_refuses_changed_section_without_export_base(
     await db.commit()
 
     path = _write_bridge_file(tmp_path, "edited on disk by who-knows-what")
-    result = await sync_owned_sections_from_file(db=db, bridge_path=path)
+    result = await sync_owned_sections_from_file(
+        db=db, bridge_path=path, principal="cc"
+    )
 
     assert result["demoted"] == []
     assert result["conflicts"][0]["reason"] == "missing_export_base"
@@ -661,7 +720,9 @@ async def test_sync_preserves_label_when_content_unchanged(
     )
     await db.commit()
 
-    result = await sync_owned_sections_from_file(db=db, bridge_path=path)
+    result = await sync_owned_sections_from_file(
+        db=db, bridge_path=path, principal="cc"
+    )
 
     assert "career" in result["unchanged"]
     assert result["demoted"] == []
@@ -695,7 +756,9 @@ async def test_sync_off_mode_refuses_changed_section_without_export_base(
     await db.commit()
 
     path = _write_bridge_file(tmp_path, "changed content")
-    result = await sync_owned_sections_from_file(db=db, bridge_path=path)
+    result = await sync_owned_sections_from_file(
+        db=db, bridge_path=path, principal="cc"
+    )
 
     assert result["demoted"] == []
     assert result["conflicts"][0]["reason"] == "missing_export_base"
@@ -733,7 +796,9 @@ async def test_sync_unchanged_despite_trailing_newline_variance(
     )
     await db.commit()
 
-    result = await sync_owned_sections_from_file(db=db, bridge_path=path)
+    result = await sync_owned_sections_from_file(
+        db=db, bridge_path=path, principal="cc"
+    )
 
     assert "career" in result["unchanged"]
     assert result["demoted"] == []

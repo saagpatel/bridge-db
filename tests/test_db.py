@@ -30,6 +30,7 @@ async def test_schema_creates_all_tables(db: aiosqlite.Connection) -> None:
         "bridge_file_export_state",
         "bridge_export_receipts",
         "bridge_projection_jobs",
+        "bridge_import_receipts",
         "content_index",
         "context_section_export_state",
         "context_sections",

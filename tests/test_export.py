@@ -131,7 +131,9 @@ async def test_exported_data_cannot_round_trip_as_owned_heading(
     await db.commit()
     bridge_file = tmp_path / "bridge.md"
     bridge_file.write_text(markdown, encoding="utf-8")
-    result = await ctx_mod.sync_owned_sections_from_file(db, bridge_file)
+    result = await ctx_mod.sync_owned_sections_from_file(
+        db, bridge_file, principal="cc"
+    )
 
     assert "career" in result["unchanged"]
     cursor = await db.execute(
@@ -335,7 +337,9 @@ async def test_export_receipt_uses_rendered_section_snapshot(
         assert receipt["exported_version"] == snapshot[0].version
         assert receipt["exported_content_sha256"] == snapshot[0].content_sha256
 
-        result = await ctx_mod.sync_owned_sections_from_file(db, bridge_path)
+        result = await ctx_mod.sync_owned_sections_from_file(
+            db, bridge_path, principal="cc"
+        )
         assert result["conflict_count"] == 1
         stored = await all_fns["get_section"](section_name="career", ctx=ctx)
         assert stored["content"] == "committed v2"
