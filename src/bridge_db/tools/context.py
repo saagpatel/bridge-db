@@ -290,6 +290,36 @@ async def sync_owned_sections_from_file(db: Any, bridge_path: Path) -> dict[str,
             exported = await exported_cursor.fetchone()
             if exported is None:
                 legacy_imports.append(section_name)
+                receipt_id, refreshed = await _record_section_conflict(
+                    db,
+                    section_name=section_name,
+                    caller="sync_from_file",
+                    operation="sync_from_file",
+                    reason="missing_export_base",
+                    attempted_content=content,
+                    attempted_source_trust="ingested",
+                    principal=None,
+                    stale_version=None,
+                    surface="markdown_sync",
+                    detail={"decision": "refused_unknown_file_ancestry"},
+                )
+                conflicts.append(
+                    {
+                        "section_name": section_name,
+                        "receipt_id": receipt_id,
+                        "reason": "missing_export_base",
+                        "current_version": refreshed["version"]
+                        if refreshed is not None
+                        else None,
+                        "current_updated_at": refreshed["updated_at"]
+                        if refreshed is not None
+                        else None,
+                        "current_source_trust": refreshed["source_trust"]
+                        if refreshed is not None
+                        else None,
+                    }
+                )
+                continue
             else:
                 current_hash = content_sha256(
                     _normalized_section_content(str(current["content"]))

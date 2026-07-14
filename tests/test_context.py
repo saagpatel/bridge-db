@@ -486,6 +486,44 @@ stale file edit
     assert receipt["reason"] == "stale_export_base"
 
 
+async def test_sync_from_file_conflicts_when_existing_row_has_no_export_base(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
+) -> None:
+    """BDB-DS-088-R1: unknown file ancestry cannot replace canonical bytes."""
+    ctx = make_ctx(db, principal="claude_ai")
+    await fns["update_section"](
+        caller="claude_ai",
+        section_name="career",
+        content="canonical current value",
+        ctx=ctx,
+    )
+    bridge_file = tmp_path / "bridge.md"
+    bridge_file.write_text(
+        "## Career & Professional Target\nstale unknown-base value\n",
+        encoding="utf-8",
+    )
+
+    result = await mod.sync_owned_sections_from_file(db, bridge_file)
+
+    assert result["count"] == 0
+    assert result["conflict_count"] == 1
+    assert result["conflicts"][0]["reason"] == "missing_export_base"
+    assert result["legacy_imports"] == ["career"]
+    section = await fns["get_section"](section_name="career", ctx=ctx)
+    assert section["content"] == "canonical current value"
+    receipt = await (
+        await db.execute(
+            "SELECT surface, target_key, reason FROM write_conflicts "
+            "WHERE id = ?",
+            (result["conflicts"][0]["receipt_id"],),
+        )
+    ).fetchone()
+    assert receipt is not None
+    assert receipt["surface"] == "markdown_sync"
+    assert receipt["target_key"] == "career"
+    assert receipt["reason"] == "missing_export_base"
+
+
 async def test_update_section_clamps_operator_self_promotion(
     db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -563,7 +601,7 @@ def _write_bridge_file(tmp_path: Path, career_body: str) -> Path:
     return path
 
 
-async def test_sync_demotes_changed_section_to_ingested(
+async def test_sync_warn_mode_refuses_changed_section_without_export_base(
     db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from bridge_db import config as bridge_config
@@ -587,13 +625,15 @@ async def test_sync_demotes_changed_section_to_ingested(
     path = _write_bridge_file(tmp_path, "edited on disk by who-knows-what")
     result = await sync_owned_sections_from_file(db=db, bridge_path=path)
 
-    assert "career" in result["demoted"]
+    assert result["demoted"] == []
+    assert result["conflicts"][0]["reason"] == "missing_export_base"
     cursor = await db.execute(
-        "SELECT source_trust FROM context_sections WHERE section_name = 'career'"
+        "SELECT content, source_trust FROM context_sections WHERE section_name = 'career'"
     )
     row = await cursor.fetchone()
     assert row is not None
-    assert row["source_trust"] == "ingested"
+    assert row["content"] == "original content"
+    assert row["source_trust"] == "operator"
 
 
 async def test_sync_preserves_label_when_content_unchanged(
@@ -633,7 +673,7 @@ async def test_sync_preserves_label_when_content_unchanged(
     assert row["source_trust"] == "operator"
 
 
-async def test_sync_off_mode_demotes_changed_operator_content(
+async def test_sync_off_mode_refuses_changed_section_without_export_base(
     db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from bridge_db import config as bridge_config
@@ -657,13 +697,15 @@ async def test_sync_off_mode_demotes_changed_operator_content(
     path = _write_bridge_file(tmp_path, "changed content")
     result = await sync_owned_sections_from_file(db=db, bridge_path=path)
 
-    assert result["demoted"] == ["career"]
+    assert result["demoted"] == []
+    assert result["conflicts"][0]["reason"] == "missing_export_base"
     cursor = await db.execute(
-        "SELECT source_trust FROM context_sections WHERE section_name = 'career'"
+        "SELECT content, source_trust FROM context_sections WHERE section_name = 'career'"
     )
     row = await cursor.fetchone()
     assert row is not None
-    assert row["source_trust"] == "ingested"
+    assert row["content"] == "original"
+    assert row["source_trust"] == "operator"
 
 
 async def test_sync_unchanged_despite_trailing_newline_variance(
