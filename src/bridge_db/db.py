@@ -17,7 +17,7 @@ from bridge_db import config
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # A migration post-hook runs after its DDL, before the version bump+commit
 # (e.g. FTS repopulation). Its return value is ignored.
@@ -46,6 +46,18 @@ CREATE TABLE IF NOT EXISTS bridge_file_export_state (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     exported_content_sha256 TEXT NOT NULL,
     exported_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS bridge_projection_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reason TEXT NOT NULL,
+    target_key TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'completed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    error_category TEXT,
+    projected_content_sha256 TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    completed_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS write_conflicts (
@@ -473,6 +485,20 @@ CREATE TABLE IF NOT EXISTS bridge_file_export_state (
 );
 """
 
+_MIGRATION_V15_TO_V16 = """
+CREATE TABLE IF NOT EXISTS bridge_projection_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reason TEXT NOT NULL,
+    target_key TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'completed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    error_category TEXT,
+    projected_content_sha256 TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    completed_at TEXT
+);
+"""
+
 # Column definitions for the v14 ADD COLUMN step. Kept character-identical to the
 # activity_log block in _SCHEMA_DDL so a fresh install and a migrated DB converge
 # (see tests/test_schema_convergence_concurrency.py). NOTE: the synced/policy
@@ -722,6 +748,7 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         (13, _MIGRATION_V12_TO_V13, None),
         (14, _MIGRATION_V13_TO_V14, _migrate_shipped_state_to_columns),
         (15, _MIGRATION_V14_TO_V15, None),
+        (16, _MIGRATION_V15_TO_V16, None),
     ]
     for target, ddl, post_hook in migrations:
         if current_version >= target:

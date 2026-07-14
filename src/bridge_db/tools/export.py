@@ -474,6 +474,18 @@ async def export_bridge_file(
         """,
         (content_sha256(content),),
     )
+    await db.execute(
+        """
+        UPDATE bridge_projection_jobs SET
+            status = 'completed',
+            attempts = attempts + 1,
+            error_category = NULL,
+            projected_content_sha256 = ?,
+            completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+        WHERE status = 'pending'
+        """,
+        (content_sha256(content),),
+    )
     return exported_context_sections
 
 

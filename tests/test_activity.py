@@ -1130,6 +1130,69 @@ async def test_record_disposition_synced_allows_bound_source_owner(
     assert result["decided_by"] == "codex"
 
 
+async def test_record_disposition_reports_and_recovers_failed_projection(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from bridge_db.tools import export as export_mod
+
+    ctx = make_ctx(db, principal="codex")
+    await fns["log_activity"](
+        caller="codex",
+        project_name="ProjectionJob",
+        summary="shipped",
+        tags=["SHIPPED"],
+        ctx=ctx,
+    )
+    activity_row = await (await db.execute("SELECT id FROM activity_log")).fetchone()
+    assert activity_row is not None
+    activity_id = int(activity_row[0])
+    original_export = export_mod.export_bridge_file
+
+    async def fail_export(*_args: Any, **_kwargs: Any) -> int:
+        raise OSError("simulated projection failure")
+
+    monkeypatch.setattr(export_mod, "export_bridge_file", fail_export)
+    result = await fns["record_disposition"](
+        caller="codex",
+        activity_id=activity_id,
+        disposition="synced",
+        downstream_system="notion",
+        downstream_ref="page-1",
+        ctx=ctx,
+    )
+
+    assert result["ok"] is True
+    assert result["projection"]["state"] == "pending"
+    assert result["projection"]["error_category"] == "bridge_export_failed"
+    job_id = result["projection"]["job_id"]
+    stored = await (
+        await db.execute(
+            "SELECT sync_disposition FROM activity_log WHERE id = ?", (activity_id,)
+        )
+    ).fetchone()
+    assert stored is not None and stored["sync_disposition"] == "synced"
+
+    monkeypatch.setattr(export_mod, "export_bridge_file", original_export)
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", tmp_path / "bridge.md")
+    snapshot: list[export_mod.ContextExportSnapshot] = []
+    content = await export_mod.build_markdown(db, context_snapshot=snapshot)
+    await export_mod.export_bridge_file(db, content, snapshot)
+    await db.commit()
+    job = await (
+        await db.execute(
+            "SELECT status, projected_content_sha256 FROM bridge_projection_jobs "
+            "WHERE id = ?",
+            (job_id,),
+        )
+    ).fetchone()
+    assert job is not None
+    assert job["status"] == "completed"
+    assert job["projected_content_sha256"]
+
+
 async def test_record_disposition_synced_requires_bound_source_owner(
     db: aiosqlite.Connection,
     fns: dict[str, Any],

@@ -222,8 +222,10 @@ def _load_meta_shipped_event_policy(project_name: str) -> dict[str, Any] | None:
     }
 
 
-async def _export_bridge_markdown_after_processing(db: Any) -> None:
-    """Keep the fallback bridge file current after shipped-event state changes."""
+async def _export_bridge_markdown_after_processing(
+    db: Any, projection_job_id: int
+) -> dict[str, Any]:
+    """Attempt one durable fallback projection and report its exact state."""
     try:
         from bridge_db.tools.export import (
             ContextExportSnapshot,
@@ -237,9 +239,31 @@ async def _export_bridge_markdown_after_processing(db: Any) -> None:
         await db.commit()
         logger.info("auto-export triggered after shipped-event processing")
     except Exception:
+        await db.rollback()
+        await db.execute(
+            """
+            UPDATE bridge_projection_jobs SET
+                attempts = attempts + 1,
+                error_category = 'bridge_export_failed'
+            WHERE id = ? AND status = 'pending'
+            """,
+            (projection_job_id,),
+        )
+        await db.commit()
         logger.warning(
             "auto-export after shipped-event processing failed", exc_info=True
         )
+    cursor = await db.execute(
+        "SELECT status, attempts, error_category FROM bridge_projection_jobs WHERE id = ?",
+        (projection_job_id,),
+    )
+    job = await cursor.fetchone()
+    return {
+        "job_id": projection_job_id,
+        "state": job["status"] if job is not None else "unknown",
+        "attempts": int(job["attempts"]) if job is not None else 0,
+        "error_category": job["error_category"] if job is not None else None,
+    }
 
 
 def register(mcp: FastMCP) -> None:
@@ -1043,10 +1067,25 @@ def register(mcp: FastMCP) -> None:
                 f"Activity entry {activity_id} already has immutable downstream "
                 "sync proof; a different synced receipt cannot replace it"
             )
+        projection_job_id: int | None = None
+        if is_synced:
+            projection_cursor = await db.execute(
+                """
+                INSERT INTO bridge_projection_jobs (reason, target_key)
+                VALUES ('shipped_disposition', ?)
+                """,
+                (str(activity_id),),
+            )
+            if projection_cursor.lastrowid is None:
+                raise RuntimeError("projection job insert did not return an id")
+            projection_job_id = projection_cursor.lastrowid
         await db.commit()
 
-        if is_synced:
-            await _export_bridge_markdown_after_processing(db)
+        projection: dict[str, Any] | None = None
+        if projection_job_id is not None:
+            projection = await _export_bridge_markdown_after_processing(
+                db, projection_job_id
+            )
 
         detail = f"activity_id={activity_id} disposition={choice}"
         if is_synced:
@@ -1072,4 +1111,5 @@ def register(mcp: FastMCP) -> None:
             "downstream_system": clean_system if is_synced else None,
             "downstream_ref": clean_ref if is_synced else None,
             "policy_ref": None if is_synced else clean_policy_ref,
+            "projection": projection,
         }
