@@ -93,7 +93,9 @@ uv run python -m bridge_db --promote-handoff 42      # reviewed handoff promotio
   the documented UTF-8/JSON budgets in README. Oversized input is rejected
   before mutation with a stable code. Legacy oversized rows remain readable;
   no migration deletes or truncates them. The open handoff quota is 100 and
-  `get_pending_handoffs` pages with `limit` + `before_id`.
+  the total retained handoff quota is 10,000; a full legacy history rejects
+  creation without deleting rows. `get_pending_handoffs` pages with `limit` +
+  `before_id`.
 - **Semantic memory scope closed**: FTS5 + `recall` is the final layer (Phase −1). Vector/embedding layers are ruled out — most query misses reflect content not in `bridge.db`. See closure banner in `docs/internal/bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md`.
 - **FTS drift repair**: `--rebuild-content-index` is the CLI-only repair path; FTS index drift is treated as a hard health failure because `recall` depends on `content_index` mirroring source tables.
 - **Post-sync review**: after scheduled Bridge Syncs or shipped-event reconciliation, use `docs/internal/POST-SYNC-REVIEW.md` to verify DB state, markdown export freshness, and scorecard updates.

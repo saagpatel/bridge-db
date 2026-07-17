@@ -129,6 +129,9 @@ def register(mcp: FastMCP) -> None:
                 SELECT COUNT(*) FROM pending_handoffs
                 WHERE status IN ('pending', 'active')
             ) < ?
+            AND (
+                SELECT COUNT(*) FROM pending_handoffs
+            ) < ?
             RETURNING id
             """,
             (
@@ -139,11 +142,22 @@ def register(mcp: FastMCP) -> None:
                 resolution.canonical_key,
                 source_trust,
                 config.HANDOFF_OPEN_QUOTA,
+                config.HANDOFF_TOTAL_ROWS_QUOTA,
             ),
         )
         inserted = await cursor.fetchone()
         if inserted is None:
             await db.rollback()
+            total_row = await (
+                await db.execute("SELECT COUNT(*) FROM pending_handoffs")
+            ).fetchone()
+            if total_row is not None and int(total_row[0]) >= (
+                config.HANDOFF_TOTAL_ROWS_QUOTA
+            ):
+                raise ToolError(
+                    "handoff.total_row_quota_exceeded: "
+                    f"maximum={config.HANDOFF_TOTAL_ROWS_QUOTA}"
+                )
             raise ToolError(
                 "handoff.open_queue_quota_exceeded: "
                 f"maximum={config.HANDOFF_OPEN_QUOTA}"

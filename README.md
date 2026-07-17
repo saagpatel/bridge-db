@@ -257,8 +257,10 @@ rewritten, or silently clipped; they remain readable and exportable.
   refused at quota without pruning protected history.
 - Handoffs: project name 4 KiB, project path 16 KiB, roadmap path 4 KiB, phase
   64 KiB, and 72 KiB combined. At most 100 `pending` + `active` rows may be
-  open. `get_pending_handoffs(limit=..., before_id=...)` pages newest IDs with
-  a default page of 100 and maximum of 200.
+  open, and at most 10,000 total history rows may be retained. A full legacy
+  history is preserved and rejects new creation rather than deleting old
+  records. `get_pending_handoffs(limit=..., before_id=...)` pages newest IDs
+  with a default page of 100 and maximum of 200.
 - Snapshots: compact JSON is limited to 256 KiB, depth 32, and 10,000 JSON
   nodes before insert or retention pruning.
 - Context: each section is limited to 256 KiB and the five-section registry to

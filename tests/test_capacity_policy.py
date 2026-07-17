@@ -133,6 +133,39 @@ async def test_handoff_field_quota_and_pagination_are_bounded(
     assert second_page[0]["id"] < first_page[-1]["id"]
 
 
+async def test_handoff_history_quota_is_non_destructive(
+    db: aiosqlite.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "HANDOFF_TOTAL_ROWS_QUOTA", 3)
+    await db.executemany(
+        """
+        INSERT INTO pending_handoffs (project_name, status, cleared_at)
+        VALUES (?, 'cleared', CURRENT_TIMESTAMP)
+        """,
+        [(f"legacy-{i}",) for i in range(3)],
+    )
+    await db.commit()
+
+    fns = _tools(handoffs)
+    ctx = make_ctx(db, principal="claude_ai")
+    with pytest.raises(ToolError, match="handoff.total_row_quota_exceeded"):
+        await fns["create_handoff"](
+            caller="claude_ai", project_name="overflow", ctx=ctx
+        )
+
+    rows = await (
+        await db.execute(
+            "SELECT project_name, status FROM pending_handoffs ORDER BY id"
+        )
+    ).fetchall()
+    assert [(row["project_name"], row["status"]) for row in rows] == [
+        ("legacy-0", "cleared"),
+        ("legacy-1", "cleared"),
+        ("legacy-2", "cleared"),
+    ]
+
+
 @pytest.mark.parametrize(
     ("payload", "error"),
     [
