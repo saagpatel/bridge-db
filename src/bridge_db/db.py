@@ -24,7 +24,7 @@ SCHEMA_VERSION = 21
 _PostHook = Callable[[aiosqlite.Connection], Awaitable[object]]
 
 # Full DDL for current schema (initial create on a fresh DB)
-_SCHEMA_DDL = """
+_SCHEMA_DDL = f"""
 CREATE TABLE IF NOT EXISTS context_sections (
     section_name TEXT PRIMARY KEY,
     owner TEXT NOT NULL CHECK(owner IN ('claude_ai', 'cc', 'codex')),
@@ -39,7 +39,7 @@ BEFORE INSERT ON context_sections
 WHEN (
     SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0)
     FROM context_sections
-) + length(CAST(NEW.content AS BLOB)) > 1048576
+) + length(CAST(NEW.content AS BLOB)) > {config.CONTEXT_TOTAL_MAX_BYTES}
 BEGIN
     SELECT RAISE(ABORT, 'context.total_utf8_bytes_exceeded');
 END;
@@ -50,7 +50,7 @@ WHEN (
     SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0)
     FROM context_sections
     WHERE section_name != OLD.section_name
-) + length(CAST(NEW.content AS BLOB)) > 1048576
+) + length(CAST(NEW.content AS BLOB)) > {config.CONTEXT_TOTAL_MAX_BYTES}
 AND (
     SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0)
     FROM context_sections
@@ -899,13 +899,13 @@ async def _migrate_conflict_aggregation(db: aiosqlite.Connection) -> None:
     )
     if await _table_exists(db, "context_sections"):
         await db.executescript(
-            """
+            f"""
             CREATE TRIGGER IF NOT EXISTS trg_context_total_bytes_insert
         BEFORE INSERT ON context_sections
         WHEN (
             SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0)
             FROM context_sections
-        ) + length(CAST(NEW.content AS BLOB)) > 1048576
+        ) + length(CAST(NEW.content AS BLOB)) > {config.CONTEXT_TOTAL_MAX_BYTES}
         BEGIN
             SELECT RAISE(ABORT, 'context.total_utf8_bytes_exceeded');
         END;
@@ -916,7 +916,7 @@ async def _migrate_conflict_aggregation(db: aiosqlite.Connection) -> None:
             SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0)
             FROM context_sections
             WHERE section_name != OLD.section_name
-        ) + length(CAST(NEW.content AS BLOB)) > 1048576
+        ) + length(CAST(NEW.content AS BLOB)) > {config.CONTEXT_TOTAL_MAX_BYTES}
         AND (
             SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0)
             FROM context_sections
