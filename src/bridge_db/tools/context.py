@@ -40,29 +40,114 @@ _SECTION_HEADING_MAP: dict[str, str] = {
     "Active Research Themes": "research",
     "Claude.ai Capabilities Summary": "capabilities",
 }
+_OWNED_SECTION_START_PREFIX = "<!-- bridge-db:owned-section:start:"
+_OWNED_SECTION_END_PREFIX = "<!-- bridge-db:owned-section:end:"
+_OWNED_SECTION_MARKER_SUFFIX = " -->"
+_LEGACY_DOCUMENT_BOUNDARY_HEADINGS = {
+    "Pending Handoffs",
+    "Claude Code State Snapshot",
+    "Recent Claude Code Activity",
+    "Codex State Snapshot",
+    "Recent Codex Activity",
+    "Recent Notion OS Activity",
+    "Recent Personal Ops Activity",
+    "Pinned Ledger",
+}
 
 
-def parse_owned_sections(markdown: str) -> dict[str, str]:
-    """Extract only Claude.ai-owned section bodies from the bridge markdown file."""
+def owned_section_start_marker(section_name: str) -> str:
+    if section_name not in _SECTION_HEADING_MAP.values():
+        raise ValueError(f"Unknown owned section: {section_name}")
+    return f"{_OWNED_SECTION_START_PREFIX}{section_name}{_OWNED_SECTION_MARKER_SUFFIX}"
+
+
+def owned_section_end_marker(section_name: str) -> str:
+    if section_name not in _SECTION_HEADING_MAP.values():
+        raise ValueError(f"Unknown owned section: {section_name}")
+    return f"{_OWNED_SECTION_END_PREFIX}{section_name}{_OWNED_SECTION_MARKER_SUFFIX}"
+
+
+def _marker_section(line: str, prefix: str) -> str | None:
+    if not line.startswith(prefix):
+        return None
+    if not line.endswith(_OWNED_SECTION_MARKER_SUFFIX):
+        raise ToolError("Malformed owned section marker")
+    section_name = line[len(prefix) : -len(_OWNED_SECTION_MARKER_SUFFIX)]
+    if section_name not in _SECTION_HEADING_MAP.values():
+        raise ToolError(f"Unknown owned section marker: {section_name}")
+    return section_name
+
+
+def _parse_marked_owned_sections(lines: list[str]) -> dict[str, list[str]]:
     parsed: dict[str, list[str]] = {}
     current_section: str | None = None
 
-    for line in markdown.splitlines():
+    for line in lines:
+        start_section = _marker_section(line, _OWNED_SECTION_START_PREFIX)
+        end_section = _marker_section(line, _OWNED_SECTION_END_PREFIX)
+        if start_section is not None:
+            if current_section is not None:
+                raise ToolError("Nested owned section markers are not allowed")
+            if start_section in parsed:
+                raise ToolError(
+                    f"Duplicate owned section marker is not allowed: {start_section}"
+                )
+            parsed[start_section] = []
+            current_section = start_section
+            continue
+        if end_section is not None:
+            if current_section != end_section:
+                raise ToolError(f"Mismatched owned section end marker: {end_section}")
+            current_section = None
+            continue
+        if current_section is not None and not is_markdown_boundary_line(line):
+            parsed[current_section].append(line)
+
+    if current_section is not None:
+        raise ToolError(f"Unclosed owned section marker: {current_section}")
+    return parsed
+
+
+def _parse_legacy_owned_sections(lines: list[str]) -> dict[str, list[str]]:
+    parsed: dict[str, list[str]] = {}
+    current_section: str | None = None
+
+    for line in lines:
         if current_section is not None and is_markdown_boundary_line(line):
             continue
         if line.startswith("## "):
             heading = line[3:].strip()
-            current_section = _SECTION_HEADING_MAP.get(heading)
-            if current_section is not None:
-                if current_section in parsed:
+            section_name = _SECTION_HEADING_MAP.get(heading)
+            if section_name is not None:
+                if section_name in parsed:
                     raise ToolError(
                         f"Duplicate owned section heading is not allowed: {heading}"
                     )
-                parsed[current_section] = []
-            continue
+                parsed[section_name] = []
+                current_section = section_name
+                continue
+            if heading in _LEGACY_DOCUMENT_BOUNDARY_HEADINGS:
+                current_section = None
+                continue
 
         if current_section is not None:
             parsed[current_section].append(line)
+    return parsed
+
+
+def parse_owned_sections(markdown: str) -> dict[str, str]:
+    """Extract only Claude.ai-owned section bodies from the bridge markdown file."""
+    lines = markdown.splitlines()
+    has_markers = any(
+        line.startswith(_OWNED_SECTION_START_PREFIX)
+        or line.startswith(_OWNED_SECTION_END_PREFIX)
+        for line in lines
+    )
+    parsed = (
+        _parse_marked_owned_sections(lines)
+        if has_markers
+        else _parse_legacy_owned_sections(lines)
+    )
 
     return {
         section_name: "\n".join(lines).strip("\n")

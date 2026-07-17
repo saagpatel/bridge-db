@@ -40,10 +40,23 @@ clients and for any Claude.ai workflow that has not moved to direct MCP calls.
 - Direct MCP writes update SQLite first.
 - Consumers call `export_bridge_markdown` after DB writes to keep the fallback file
   current.
+- Exports delimit each editable section with explicit
+  `bridge-db:owned-section` HTML markers, so nested `##` headings remain section
+  content instead of being mistaken for document boundaries.
+- Legacy pre-marker files are accepted only when their four owned headings and
+  known generated document headings parse unambiguously. The first authenticated
+  export converts a matching legacy file to the marked format and records its
+  whole-file export state.
 - Claude.ai may still edit its owned sections directly in the fallback markdown file.
 - Claude Code's `/start` skill calls `mcp__bridge_db__sync_from_file()` before
   bridge-db reads, importing the four Claude.ai-owned sections from the file into
   `context_sections`.
+
+`health` and `status` report `projection_health="untracked"` when the
+whole-file export state is absent, even if the editable section text matches the
+DB. Do not run `sync_from_file` merely to clear that state: first verify that the
+DB and legacy file contain the same complete owned sections, then use
+`export_bridge_markdown` to establish the tracked projection.
 
 **Current limitation:** fallback file edits are synchronized into the DB on the next
 Claude Code startup or explicit `sync_from_file` call, not continuously. That closes

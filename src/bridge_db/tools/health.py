@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
 from bridge_db import clock, config
 from bridge_db.auth import auth_mode, load_principals
@@ -15,7 +16,7 @@ from bridge_db.db import (
     get_db,
     protected_tags_predicate,
 )
-from bridge_db.migration import BRIDGE_SECTION_HEADINGS, SECTION_MAP, extract_sections
+from bridge_db.tools.context import parse_owned_sections
 
 logger = logging.getLogger("bridge_db.tools.health")
 
@@ -96,13 +97,11 @@ def _read_bridge_claude_ai_sections() -> tuple[str, dict[str, str] | None]:
         content = path.read_text(encoding="utf-8")
     except OSError:
         return "unreadable", None
-    headings = extract_sections(content, allowed_headings=BRIDGE_SECTION_HEADINGS)
-    sections: dict[str, str] = {}
-    for heading, section_name in SECTION_MAP.items():
-        body = headings.get(heading, "").strip()
-        if body:
-            sections[section_name] = body
-    return "readable", sections
+    try:
+        sections = parse_owned_sections(content)
+    except (ToolError, ValueError):
+        return "unreadable", None
+    return "readable", {name: body for name, body in sections.items() if body}
 
 
 async def collect_claude_ai_section_drift(db: Any) -> dict[str, Any]:
@@ -283,6 +282,10 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     fts_index = await collect_fts_index_metrics(db)
     claude_ai_section_drift = await collect_claude_ai_section_drift(db)
     source_trust_breakdown = await _source_trust_breakdown(db)
+    cursor = await db.execute(
+        "SELECT 1 FROM bridge_file_export_state WHERE singleton = 1"
+    )
+    bridge_file_export_tracked = await cursor.fetchone() is not None
 
     # Keep structural storage health separate from cross-store projection
     # integrity. Generic readiness is green only when both are proven current.
@@ -293,6 +296,8 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         and fts_index["ok"]
     )
     projection_health = claude_ai_section_drift["state"]
+    if projection_health == "current" and not bridge_file_export_tracked:
+        projection_health = "untracked"
     ok = storage_ok and projection_health == "current"
 
     return {
@@ -306,6 +311,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "bridge_file_path": str(bridge_path),
         "bridge_file_exists": bridge_file_exists,
         "bridge_file_age_seconds": bridge_file_age_seconds,
+        "bridge_file_export_tracked": bridge_file_export_tracked,
         "unprocessed_shipped_count": unprocessed_shipped_count,
         "actionable_unprocessed_shipped_count": actionable_unprocessed_shipped_count,
         "processed_shipped_without_receipt_count": processed_shipped_without_receipt_count,

@@ -182,6 +182,7 @@ async def test_markdown_export_preserves_stored_data_boundary_and_trust(
     agent = exp_mod.markdown_boundary("agent")
     assert (
         "## Career & Professional Target\n"
+        "<!-- bridge-db:owned-section:start:career -->\n"
         f"{ingested}\nreview this career claim"
     ) in markdown
     assert (
@@ -343,6 +344,79 @@ async def test_export_refuses_unsynchronized_file_edit_but_allows_db_update(
         assert bridge_path.read_text(encoding="utf-8") == edited
     finally:
         cfg.BRIDGE_FILE_PATH = original_path
+
+
+async def test_export_bootstrap_round_trips_legacy_nested_h2_sections(
+    db: aiosqlite.Connection,
+    all_fns: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    import bridge_db.config as cfg
+
+    contents = {
+        "career": "Career body\n\n## Current Role\nStaff engineer",
+        "speaking": "Speaking body\n\n## Confirmed Engagements\nBridgeDB Summit",
+        "research": "Research body\n\n## AI Coding Agents & Evals\nEvaluation notes",
+        "capabilities": "Capabilities body\n\n## Python / FastAPI\nBackend systems",
+    }
+    ctx = make_ctx(db, principal="claude_ai")
+    for section_name, content in contents.items():
+        await all_fns["update_section"](
+            caller="claude_ai",
+            section_name=section_name,
+            content=content,
+            ctx=ctx,
+        )
+
+    legacy = "\n".join(
+        [
+            "# Claude.ai <-> Claude Code <-> Codex Context Bridge",
+            "",
+            "## Career & Professional Target",
+            contents["career"],
+            "",
+            "## Speaking Engagements",
+            contents["speaking"],
+            "",
+            "## Active Research Themes",
+            contents["research"],
+            "",
+            "## Claude.ai Capabilities Summary",
+            contents["capabilities"],
+            "",
+            "## Pending Handoffs",
+            "<!-- No pending handoffs -->",
+            "",
+        ]
+    )
+    bridge_path = tmp_path / "claude_ai_context.md"
+    bridge_path.write_text(legacy, encoding="utf-8")
+    snapshot: list[exp_mod.ContextExportSnapshot] = []
+    rendered = await exp_mod.build_markdown(db, context_snapshot=snapshot)
+
+    original_path = cfg.BRIDGE_FILE_PATH
+    cfg.BRIDGE_FILE_PATH = bridge_path
+    try:
+        exported = await exp_mod.export_bridge_file(
+            db,
+            rendered,
+            snapshot,
+            principal="claude_ai",
+            trigger="manual",
+        )
+    finally:
+        cfg.BRIDGE_FILE_PATH = original_path
+
+    assert exported == 4
+    projected = bridge_path.read_text(encoding="utf-8")
+    for section_name in contents:
+        assert f"<!-- bridge-db:owned-section:start:{section_name} -->" in projected
+        assert f"<!-- bridge-db:owned-section:end:{section_name} -->" in projected
+    assert ctx_mod.parse_owned_sections(projected) == contents
+    cursor = await db.execute("SELECT COUNT(*) FROM bridge_file_export_state")
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == 1
 
 
 async def test_export_receipt_uses_rendered_section_snapshot(
@@ -698,11 +772,15 @@ Prefers MCP when available
         )
         status_result = await cap.fns["status"](ctx=mctx)
         await cap.fns["export_bridge_markdown"](ctx=mctx)
+        exported_status = await cap.fns["status"](ctx=mctx)
     finally:
         cfg.BRIDGE_FILE_PATH = original_bridge_path
 
     content = bridge_path.read_text(encoding="utf-8")
-    assert status_result["ok"] is True
+    assert status_result["ok"] is False
+    assert status_result["projection_health"] == "untracked"
+    assert exported_status["ok"] is True
+    assert exported_status["projection_health"] == "current"
     assert status_result["signals"]["pending_handoffs"] == 1
     assert status_result["latest_snapshots"]["codex"] == "2026-04-17"
     assert (

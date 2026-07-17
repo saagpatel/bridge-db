@@ -39,6 +39,13 @@ from bridge_db.db import (
 FIXED_NOW = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
 
 
+async def _seed_bridge_export_state(db: aiosqlite.Connection) -> None:
+    await db.execute(
+        "INSERT INTO bridge_file_export_state (singleton, exported_content_sha256) "
+        "VALUES (1, 'tracked-test-projection')"
+    )
+
+
 async def _seed_cli_snapshot(
     db: aiosqlite.Connection,
     system: str,
@@ -101,6 +108,7 @@ async def test_run_status_reports_healthy_summary(
 
     db = await open_db(db_path)
     try:
+        await _seed_bridge_export_state(db)
         await db.execute(
             "INSERT INTO context_sections (section_name, owner, content) VALUES (?, ?, ?)",
             ("career", "claude_ai", "Career notes"),
@@ -171,6 +179,7 @@ async def test_run_status_clarifies_dispositioned_unprocessed_shipped(
 
     db = await open_db(db_path)
     try:
+        await _seed_bridge_export_state(db)
         cursor = await db.execute(
             "INSERT INTO activity_log (source, timestamp, project_name, summary, tags) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -242,6 +251,7 @@ async def test_run_status_reports_freshness_attention_without_degrading_health(
 
     db = await open_db(db_path)
     try:
+        await _seed_bridge_export_state(db)
         await _seed_cli_snapshot(db, "cc", "2026-07-04", "2026-07-04T11:00:00Z")
         await _seed_cli_snapshot(db, "codex", "2026-07-07", "2026-07-07T11:00:00Z")
         await db.commit()
@@ -269,6 +279,7 @@ async def test_run_status_degraded_exit_code_stays_tied_to_bridge_health(
 
     db = await open_db(db_path)
     try:
+        await _seed_bridge_export_state(db)
         await _seed_cli_snapshot(db, "cc", "2026-07-07", "2026-07-07T11:00:00Z")
         await _seed_cli_snapshot(db, "codex", "2026-07-07", "2026-07-07T11:00:00Z")
         await db.commit()
@@ -297,6 +308,7 @@ async def test_run_status_freshness_actions_use_safe_operator_names(
 
     db = await open_db(db_path)
     try:
+        await _seed_bridge_export_state(db)
         await _seed_cli_snapshot(db, "cc", "2026-07-07", "2026-07-07T11:00:00Z")
         await _seed_cli_snapshot(db, "codex", "2026-07-07", "2026-07-07T11:00:00Z")
         await _seed_cli_activity(db, "cc", "2026-07-07T11:00:00Z", tags=["SHIPPED"])
@@ -357,7 +369,11 @@ async def test_run_dogfood_reports_read_only_observability(
     monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", recall_log_path)
 
     db = await open_db(db_path)
-    await db.close()
+    try:
+        await _seed_bridge_export_state(db)
+        await db.commit()
+    finally:
+        await db.close()
 
     ok = await run_dogfood()
     captured = capsys.readouterr().out
@@ -586,6 +602,11 @@ from bridge_db.db import open_db
 
 async def main() -> None:
     db = await open_db(Path(os.environ["BRIDGE_DB_PATH"]))
+    await db.execute(
+        "INSERT INTO bridge_file_export_state (singleton, exported_content_sha256) "
+        "VALUES (1, 'tracked-test-projection')"
+    )
+    await db.commit()
     await db.close()
 
 

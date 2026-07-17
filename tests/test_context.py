@@ -334,6 +334,68 @@ _Do not import_
     }
 
 
+def test_parse_owned_sections_preserves_nested_h2_headings_in_legacy_file() -> None:
+    markdown = """# Claude.ai <-> Claude Code <-> Codex Context Bridge
+
+## Career & Professional Target
+Career body
+
+## Current Role
+Staff engineer
+
+## Professional Direction
+AI infrastructure
+
+## Speaking Engagements
+Speaking body
+
+## Confirmed Engagements
+BridgeDB Summit
+
+## Active Research Themes
+Research body
+
+## AI Coding Agents & Evals
+Evaluation notes
+
+## Claude.ai Capabilities Summary
+Capabilities body
+
+## Python / FastAPI
+Backend systems
+
+## Pending Handoffs
+- Ignore me
+"""
+
+    parsed = mod.parse_owned_sections(markdown)
+
+    assert parsed == {
+        "career": (
+            "Career body\n\n"
+            "## Current Role\n"
+            "Staff engineer\n\n"
+            "## Professional Direction\n"
+            "AI infrastructure"
+        ),
+        "speaking": (
+            "Speaking body\n\n"
+            "## Confirmed Engagements\n"
+            "BridgeDB Summit"
+        ),
+        "research": (
+            "Research body\n\n"
+            "## AI Coding Agents & Evals\n"
+            "Evaluation notes"
+        ),
+        "capabilities": (
+            "Capabilities body\n\n"
+            "## Python / FastAPI\n"
+            "Backend systems"
+        ),
+    }
+
+
 def test_parse_owned_sections_rejects_duplicate_owned_heading() -> None:
     """BDB-DS-050-R1: ambiguous owned structure must fail closed."""
     markdown = """## Career & Professional Target

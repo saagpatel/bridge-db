@@ -15,8 +15,12 @@ from bridge_db.auth import require_bound_principal
 from bridge_db.db import content_sha256, get_db, protected_tags_predicate
 from bridge_db.instruction_boundary import (
     MARKDOWN_DOCUMENT_WARNING,
-    is_markdown_boundary_line,
     markdown_boundary,
+)
+from bridge_db.tools.context import (
+    owned_section_end_marker,
+    owned_section_start_marker,
+    parse_owned_sections,
 )
 
 logger = logging.getLogger("bridge_db.tools.export")
@@ -64,20 +68,13 @@ class ContextExportSnapshot:
 
 
 def _section_body(markdown: str, heading: str) -> str:
-    marker = f"{heading}\n"
-    start = markdown.find(marker)
-    if start == -1:
-        return ""
-    body_start = start + len(marker)
-    next_heading = markdown.find("\n## ", body_start)
-    body = (
-        markdown[body_start:]
-        if next_heading == -1
-        else markdown[body_start:next_heading]
+    section_name = next(
+        (key for key, section_heading in _HEADING_MAP.items() if section_heading == heading),
+        None,
     )
-    return "\n".join(
-        line for line in body.strip().splitlines() if not is_markdown_boundary_line(line)
-    ).strip()
+    if section_name is None:
+        return ""
+    return parse_owned_sections(markdown).get(section_name, "")
 
 
 def _core_context_is_placeholder_only(content: str) -> bool:
@@ -371,8 +368,10 @@ async def build_markdown(
             section_key, (_EMPTY_SECTION_PLACEHOLDER, "unknown")
         )
         parts.append(_HEADING_MAP[section_key])
+        parts.append(owned_section_start_marker(section_key))
         parts.append(markdown_boundary(source_trust))
         parts.append(content)
+        parts.append(owned_section_end_marker(section_key))
         parts.append("")
 
     parts.append(handoffs_md)
@@ -458,8 +457,6 @@ async def export_bridge_file(
         section_states = await cursor.fetchall()
         safe_bootstrap = current_content == content
         if not safe_bootstrap:
-            from bridge_db.tools.context import parse_owned_sections
-
             try:
                 parsed = parse_owned_sections(current_content)
             except Exception as exc:
