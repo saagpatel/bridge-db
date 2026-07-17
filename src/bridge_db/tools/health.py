@@ -354,6 +354,10 @@ async def _snapshot_freshness(db: Any, now: datetime) -> dict[str, dict[str, Any
         age = _age_hours(row["created_at"], now) if row else None
         latest_activity_cursor = await db.execute(
             "SELECT id, created_at FROM activity_log WHERE source = ? "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM json_each(activity_log.tags) "
+            "  WHERE lower(value) = 'session-boundary'"
+            ") "
             "ORDER BY created_at DESC, id DESC LIMIT 1",
             (system,),
         )

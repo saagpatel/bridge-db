@@ -524,6 +524,53 @@ async def test_status_marks_snapshot_superseded_by_newer_same_source_activity(
     assert result["operating_state"] == "stale"
 
 
+async def test_status_ignores_lifecycle_only_activity_for_snapshot_supersession(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _make_status_health_ready(tmp_path, monkeypatch)
+    await _seed_snapshot(db, "cc", "2026-07-07", "2026-07-07T11:00:00Z")
+    await _seed_snapshot(db, "codex", "2026-07-07", "2026-07-07T11:00:00Z")
+    await _seed_activity(
+        db,
+        "cc",
+        "2026-07-07T11:30:00Z",
+        tags=["session-boundary"],
+    )
+    await db.commit()
+
+    result = await mod.collect_status_summary(db, now=FIXED_NOW)
+
+    cc = result["freshness"]["snapshots"]["cc"]
+    assert cc["state"] == "fresh"
+    assert cc["superseding_activity_id"] is None
+    assert cc["next_action"] == "none"
+    assert result["operating_state"] == "fresh"
+
+
+async def test_status_uses_latest_substantive_activity_despite_newer_lifecycle_row(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _make_status_health_ready(tmp_path, monkeypatch)
+    await _seed_snapshot(db, "cc", "2026-07-07", "2026-07-07T10:00:00Z")
+    await _seed_snapshot(db, "codex", "2026-07-07", "2026-07-07T11:00:00Z")
+    substantive_id = await _seed_activity(db, "cc", "2026-07-07T11:15:00Z")
+    await _seed_activity(
+        db,
+        "cc",
+        "2026-07-07T11:30:00Z",
+        tags=["session-boundary"],
+    )
+    await db.commit()
+
+    result = await mod.collect_status_summary(db, now=FIXED_NOW)
+
+    cc = result["freshness"]["snapshots"]["cc"]
+    assert cc["state"] == "superseded"
+    assert cc["superseding_activity_id"] == substantive_id
+    assert cc["next_action"] == "cc_refresh_snapshot"
+    assert result["operating_state"] == "stale"
+
+
 async def test_status_freshness_reports_stale_snapshots_without_degrading_health(
     db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -54,6 +54,9 @@ Expected result
   `stale` snapshots/handoffs as refresh or review work, and keep snapshot
   refresh ownership exact: `cc_refresh_snapshot` belongs to `cc`;
   `codex_refresh_snapshot` belongs to `codex`.
+- Snapshot supersession considers only substantive same-source activity.
+  Lifecycle-only `session-boundary` rows remain visible in activity freshness
+  and history but do not invalidate a state snapshot.
 - Dogfood prints the read-only post-sync observability summary: status signals, FTS index state, WAL state, recall usage, and shipped-sync audit details.
 - The `health` MCP tool should report `ok=True` only when the DB, schema, fallback bridge file, and FTS recall index are all healthy.
 - If `fts_missing` or `fts_orphaned` is nonzero, run `uv run python -m bridge_db --rebuild-content-index`, then rerun `--status` and `--dogfood`.

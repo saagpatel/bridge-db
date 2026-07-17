@@ -204,8 +204,10 @@ The MCP `status` result separates storage integrity from operating freshness:
 
 Freshness states use a narrow vocabulary: `fresh` means recent enough for that
 surface; `quiet` means an activity source has no recent rows and is not a
-health failure; `superseded` means newer owner activity exists after the latest
-snapshot; `stale` means an aged snapshot or handoff needs refresh/review;
+health failure; `superseded` means newer substantive owner activity exists
+after the latest snapshot. Lifecycle-only rows tagged `session-boundary` remain
+part of activity history and activity-source freshness, but do not supersede a
+state snapshot. `stale` means an aged snapshot or handoff needs refresh/review;
 `missing` means the expected owner row is absent; and `unknown` means a missing
 or unparsable timestamp prevents age calculation.
 
