@@ -43,6 +43,16 @@ def evidence_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
+def _create_fixture_archive(root: Path) -> tuple[Path, str]:
+    plan = policy.collect_evidence_plan()
+    archive = root / "archive"
+    policy.create_evidence_archive(
+        archive,
+        expected_snapshot_sha256=plan["snapshot_sha256"],
+    )
+    return archive, str(plan["snapshot_sha256"])
+
+
 def test_plan_is_content_bound_and_does_not_redisclose_queries(
     evidence_paths: Path,
 ) -> None:
@@ -275,3 +285,152 @@ def test_verify_cli_requires_and_reports_independent_plan_digest(
     output = json.loads(capsys.readouterr().out)
     assert output["ok"] is True
     assert output["snapshot_sha256"] == plan["snapshot_sha256"]
+
+
+def test_recall_redaction_dry_run_is_archive_bound_and_non_mutating(
+    evidence_paths: Path,
+) -> None:
+    archive, snapshot = _create_fixture_archive(evidence_paths)
+    before = policy.RECALL_LOG_PATH.read_bytes()
+
+    result = policy.redact_legacy_recall_queries(
+        archive_path=archive,
+        expected_snapshot_sha256=snapshot,
+        expected_raw_query_records=1,
+        actor="operator",
+        reason="approved archive-and-redact",
+        apply=False,
+    )
+
+    assert result["status"] == "would_redact"
+    assert result["raw_query_records"] == 1
+    assert result["record_count"] == 1
+    assert result["records_deleted"] == 0
+    assert policy.RECALL_LOG_PATH.read_bytes() == before
+    assert not config.EVIDENCE_DISPOSITION_LOG_PATH.exists()
+
+
+def test_recall_redaction_apply_preserves_records_and_empty_semantics(
+    evidence_paths: Path,
+) -> None:
+    append_jsonl_durable(
+        policy.RECALL_LOG_PATH,
+        {"query": "   ", "result_count": 0},
+        rotate_bytes=1024,
+    )
+    append_jsonl_durable(
+        policy.RECALL_LOG_PATH,
+        {"query_empty": False, "result_count": 2},
+        rotate_bytes=1024,
+    )
+    archive, snapshot = _create_fixture_archive(evidence_paths)
+
+    result = policy.redact_legacy_recall_queries(
+        archive_path=archive,
+        expected_snapshot_sha256=snapshot,
+        expected_raw_query_records=2,
+        actor="operator",
+        reason="approved archive-and-redact",
+        apply=True,
+    )
+
+    assert result["status"] == "completed"
+    assert result["record_count"] == 3
+    assert result["records_deleted"] == 0
+    records = [
+        json.loads(line) for line in policy.RECALL_LOG_PATH.read_text().splitlines()
+    ]
+    assert len(records) == 3
+    assert all("query" not in record for record in records)
+    assert records[0]["query_empty"] is False
+    assert records[1]["query_empty"] is True
+    assert records[2]["query_empty"] is False
+    assert records[0]["query_text_redacted"] is True
+    assert records[1]["query_text_redacted"] is True
+    receipts = [
+        json.loads(line)
+        for line in config.EVIDENCE_DISPOSITION_LOG_PATH.read_text().splitlines()
+    ]
+    assert [receipt["status"] for receipt in receipts] == ["prepared", "completed"]
+    assert all(receipt["records_deleted"] == 0 for receipt in receipts)
+    assert "historical private query" not in json.dumps(receipts)
+
+
+def test_recall_redaction_refuses_count_drift_without_receipt(
+    evidence_paths: Path,
+) -> None:
+    archive, snapshot = _create_fixture_archive(evidence_paths)
+
+    with pytest.raises(policy.EvidencePolicyError, match="count changed"):
+        policy.redact_legacy_recall_queries(
+            archive_path=archive,
+            expected_snapshot_sha256=snapshot,
+            expected_raw_query_records=2,
+            actor="operator",
+            reason="approved archive-and-redact",
+            apply=True,
+        )
+
+    assert "query" in json.loads(policy.RECALL_LOG_PATH.read_text())
+    assert not config.EVIDENCE_DISPOSITION_LOG_PATH.exists()
+
+
+def test_recall_redaction_replace_failure_preserves_source_and_aborts_receipt(
+    evidence_paths: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, snapshot = _create_fixture_archive(evidence_paths)
+    before = policy.RECALL_LOG_PATH.read_bytes()
+    original_replace = policy.os.replace
+
+    def fail_recall_replace(source: Path, destination: Path) -> None:
+        if Path(destination) == policy.RECALL_LOG_PATH:
+            raise OSError("simulated redaction publication crash")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(policy.os, "replace", fail_recall_replace)
+    with pytest.raises(OSError, match="publication crash"):
+        policy.redact_legacy_recall_queries(
+            archive_path=archive,
+            expected_snapshot_sha256=snapshot,
+            expected_raw_query_records=1,
+            actor="operator",
+            reason="approved archive-and-redact",
+            apply=True,
+        )
+
+    assert policy.RECALL_LOG_PATH.read_bytes() == before
+    receipts = [
+        json.loads(line)
+        for line in config.EVIDENCE_DISPOSITION_LOG_PATH.read_text().splitlines()
+    ]
+    assert [receipt["status"] for receipt in receipts] == ["prepared", "aborted"]
+    assert list(evidence_paths.glob(".*.redact.*")) == []
+
+
+def test_recall_redaction_completion_failure_leaves_open_prepared_evidence(
+    evidence_paths: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, snapshot = _create_fixture_archive(evidence_paths)
+    original_append = policy.append_jsonl_durable
+
+    def fail_completed(
+        path: Path, event: dict[str, object], *, rotate_bytes: int
+    ) -> object:
+        if event["status"] == "completed":
+            raise OSError("simulated completion receipt failure")
+        return original_append(path, event, rotate_bytes=rotate_bytes)
+
+    monkeypatch.setattr(policy, "append_jsonl_durable", fail_completed)
+    with pytest.raises(OSError, match="completion receipt failure"):
+        policy.redact_legacy_recall_queries(
+            archive_path=archive,
+            expected_snapshot_sha256=snapshot,
+            expected_raw_query_records=1,
+            actor="operator",
+            reason="approved archive-and-redact",
+            apply=True,
+        )
+
+    assert "query" not in json.loads(policy.RECALL_LOG_PATH.read_text())
+    receipt = json.loads(config.EVIDENCE_DISPOSITION_LOG_PATH.read_text())
+    assert receipt["status"] == "prepared"

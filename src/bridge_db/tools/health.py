@@ -18,6 +18,7 @@ from bridge_db.db import (
     protected_tags_predicate,
 )
 from bridge_db.evidence import (
+    evidence_disposition_inventory,
     evidence_file_inventory,
     legacy_raw_query_inventory,
     migration_backup_inventory,
@@ -309,7 +310,15 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         config.EVIDENCE_ACK_LOG_PATH,
         rotate_bytes=config.AUDIT_LOG_ROTATE_BYTES,
     )
+    disposition_file_inventory = evidence_file_inventory(
+        config.EVIDENCE_DISPOSITION_LOG_PATH,
+        rotate_bytes=config.AUDIT_LOG_ROTATE_BYTES,
+    )
+    disposition_state = evidence_disposition_inventory(
+        config.EVIDENCE_DISPOSITION_LOG_PATH
+    )
     audit_degraded = failure_inventory["total_bytes"] > 0
+    disposition_degraded = disposition_state["state"] == "degraded"
     database_list_cursor = await db.execute("PRAGMA database_list")
     database_rows = await database_list_cursor.fetchall()
     open_main_path = next(
@@ -338,8 +347,13 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
             **acknowledgement_inventory,
             "authority": "review_only_no_cleanup_authority",
         },
+        "dispositions": {
+            **disposition_file_inventory,
+            **disposition_state,
+        },
         "migration_backups": backup_inventory,
         "audit_degraded": audit_degraded,
+        "disposition_degraded": disposition_degraded,
         "backup_integrity_ok": backup_integrity_ok,
         "destructive_actions": "approval_required",
     }
@@ -352,6 +366,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         and bridge_file_exists
         and fts_index["ok"]
         and not audit_degraded
+        and not disposition_degraded
         and backup_integrity_ok
     )
     projection_health = claude_ai_section_drift["state"]
@@ -775,6 +790,9 @@ async def collect_status_summary(
             ),
             "open_write_conflicts": health["open_write_conflicts"],
             "audit_degraded": health["evidence_lifecycle"]["audit_degraded"],
+            "evidence_disposition_degraded": health["evidence_lifecycle"][
+                "disposition_degraded"
+            ],
             "migration_backup_integrity_ok": health["evidence_lifecycle"][
                 "backup_integrity_ok"
             ],

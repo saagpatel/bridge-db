@@ -158,6 +158,46 @@ def legacy_raw_query_inventory(
     }
 
 
+def evidence_disposition_inventory(
+    path: Path, *, scan_bytes: int = 1024 * 1024
+) -> dict[str, Any]:
+    """Summarize latest disposition transaction states without payload content."""
+    family_bytes = jsonl_family_size(path)
+    latest_states: dict[str, str] = {}
+    scanned_records = 0
+    invalid_records = 0
+    for record in iter_jsonl_family_reverse(path, max_bytes=scan_bytes):
+        scanned_records += 1
+        transaction_id = record.get("transaction_id")
+        status = record.get("status")
+        if not isinstance(transaction_id, str) or status not in {
+            "prepared",
+            "completed",
+            "aborted",
+        }:
+            invalid_records += 1
+            continue
+        latest_states.setdefault(transaction_id, status)
+    open_count = sum(status == "prepared" for status in latest_states.values())
+    scan_truncated = family_bytes > scan_bytes
+    return {
+        "transaction_count": len(latest_states),
+        "open_count": open_count,
+        "completed_count": sum(
+            status == "completed" for status in latest_states.values()
+        ),
+        "aborted_count": sum(status == "aborted" for status in latest_states.values()),
+        "invalid_records": invalid_records,
+        "scanned_records": scanned_records,
+        "scan_bytes": scan_bytes,
+        "scan_truncated": scan_truncated,
+        "state": (
+            "degraded" if open_count or invalid_records or scan_truncated else "clear"
+        ),
+        "destructive_cleanup": "approval_required",
+    }
+
+
 def sha256_file(path: Path) -> str:
     """Hash a file without materializing it."""
     digest = hashlib.sha256()

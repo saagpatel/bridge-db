@@ -116,7 +116,10 @@ uv run python -m bridge_db --restore-handoff-trust 42  # exact recovery image
   migration backups include digest/integrity/schema readback plus metadata and
   remain approval-gated for cleanup. `bridge_db.evidence_policy` can plan,
   verified-copy, and acknowledge exact evidence snapshots without granting
-  cleanup authority. See
+  cleanup authority. With explicit approval, its archive-bound legacy recall
+  redaction preserves records and aggregate semantics while prepared/completed
+  receipts expose partial work as degraded health. It never grants authority
+  to delete records, segments, backups, archives, or recovery evidence. See
   `docs/internal/EVIDENCE-LIFECYCLE.md`.
 - **FTS drift repair**: `--rebuild-content-index` is the CLI-only repair path; FTS index drift is treated as a hard health failure because `recall` depends on `content_index` mirroring source tables.
 - **Post-sync review**: after scheduled Bridge Syncs or shipped-event reconciliation, use `docs/internal/POST-SYNC-REVIEW.md` to verify DB state, markdown export freshness, and scorecard updates.
