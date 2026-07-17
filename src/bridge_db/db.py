@@ -17,7 +17,7 @@ from bridge_db import clock, config
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 # A migration post-hook runs after its DDL, before the version bump+commit
 # (e.g. FTS repopulation). Its return value is ignored.
@@ -127,6 +127,27 @@ CREATE TABLE IF NOT EXISTS handoff_lifecycle_receipts (
     previous_status TEXT NOT NULL,
     previous_claimant TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS handoff_cancellation_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    handoff_id INTEGER NOT NULL,
+    reason TEXT NOT NULL CHECK(length(trim(reason)) > 0),
+    previous_status TEXT NOT NULL CHECK(previous_status IN ('pending', 'active')),
+    previous_claimant TEXT,
+    reviewed_row_sha256 TEXT NOT NULL,
+    cancelled_by TEXT NOT NULL CHECK(cancelled_by = 'operator-cli'),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS handoff_trust_quarantine (
+    handoff_id INTEGER PRIMARY KEY,
+    row_json TEXT NOT NULL,
+    row_sha256 TEXT NOT NULL,
+    previous_source_trust TEXT NOT NULL CHECK(previous_source_trust = 'operator'),
+    quarantined_by TEXT NOT NULL CHECK(quarantined_by = 'operator-cli'),
+    quarantined_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    restored_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS write_conflicts (
@@ -629,6 +650,29 @@ ON activity_log(created_at DESC, id DESC);
 
 _MIGRATION_V20_TO_V21 = ""
 
+_MIGRATION_V21_TO_V22 = """
+CREATE TABLE IF NOT EXISTS handoff_cancellation_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    handoff_id INTEGER NOT NULL,
+    reason TEXT NOT NULL CHECK(length(trim(reason)) > 0),
+    previous_status TEXT NOT NULL CHECK(previous_status IN ('pending', 'active')),
+    previous_claimant TEXT,
+    reviewed_row_sha256 TEXT NOT NULL,
+    cancelled_by TEXT NOT NULL CHECK(cancelled_by = 'operator-cli'),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS handoff_trust_quarantine (
+    handoff_id INTEGER PRIMARY KEY,
+    row_json TEXT NOT NULL,
+    row_sha256 TEXT NOT NULL,
+    previous_source_trust TEXT NOT NULL CHECK(previous_source_trust = 'operator'),
+    quarantined_by TEXT NOT NULL CHECK(quarantined_by = 'operator-cli'),
+    quarantined_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    restored_at TEXT
+);
+"""
+
 # Column definitions for the v14 ADD COLUMN step. Kept character-identical to the
 # activity_log block in _SCHEMA_DDL so a fresh install and a migrated DB converge
 # (see tests/test_schema_convergence_concurrency.py). NOTE: the synced/policy
@@ -1008,6 +1052,7 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         (19, _MIGRATION_V18_TO_V19, None),
         (20, _MIGRATION_V19_TO_V20, None),
         (21, _MIGRATION_V20_TO_V21, _migrate_conflict_aggregation),
+        (22, _MIGRATION_V21_TO_V22, None),
     ]
     for target, ddl, post_hook in migrations:
         if current_version >= target:

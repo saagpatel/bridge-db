@@ -6,8 +6,8 @@ closed.
 
 | Manifest form | Compatibility state | Signed content | Apply behavior |
 | --- | --- | --- | --- |
-| no `fingerprint_version` | `legacy_implicit_v1` | `snapshot_payload` | accepted for backward compatibility |
-| `"fingerprint_version": "snapshot-v1"` | `legacy_explicit_v1` | `snapshot_payload` | accepted for backward compatibility |
+| no `fingerprint_version` | `legacy_implicit_v1` | `snapshot_payload` | accepted only before 2026-08-18T00:00:00Z |
+| `"fingerprint_version": "snapshot-v1"` | `legacy_explicit_v1` | `snapshot_payload` | accepted only before 2026-08-18T00:00:00Z |
 | `"fingerprint_version": "manifest-v2"` | `current_v2` | version, snapshot date, snapshot payload, and baseline activity | accepted |
 | any other value | none | none | rejected before the database opens |
 
@@ -29,6 +29,7 @@ key-sorted compact JSON over:
 }
 ```
 
-Legacy v1 remains accepted until an operator chooses a compatibility cutoff.
-Rejecting v1 would be a public compatibility change for existing private
-manifests and is not implied by v2 support.
+Legacy v1 responses include `sunset_at`. At and after
+`2026-08-18T00:00:00Z`, validation rejects v1 before the database opens.
+Unknown versions always fail closed. Regenerate existing private manifests as
+`manifest-v2` before the cutoff.

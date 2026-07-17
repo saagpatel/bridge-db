@@ -27,6 +27,7 @@ uv run pytest    # verify the install
 - Schema v13: adds `claimed_by` to `pending_handoffs` (the INV-13 claimant gate for `clear_handoff`). Riding the same migration train, activity retention now exempts rows tagged `SHIPPED` or `LEDGER` (case-insensitive) from the 50-per-source prune — BD-INV-1: retention never deletes a protected row, its receipt, or its disposition.
 - Schema v14: collapses the shipped-sync trio (`shipped_sync_receipts` + `shipped_event_dispositions`) into `activity_log` `sync_*` disposition columns and drops the two child tables. A shipped event's terminal sync state (a `synced` downstream receipt or a policy disposition) now lives on the activity row itself, written by the single `record_disposition` verb. Because the state is the row, BD-INV-1's guarantee is structural — no FK-CASCADE can orphan a receipt.
 - Schema v21: adds non-destructive write-conflict identity aggregation. Exact repeat conflicts increment `occurrence_count`; distinct identity growth is capped at 10,000 and then rolls into an explicit per-surface overflow aggregate. Legacy receipts remain unchanged and are labeled `aggregation_state="legacy"`.
+- Schema v22 adds append-only handoff cancellation receipts and exact-row trust quarantine images. Legacy cleared operator rows can be relabeled `ingested` without deletion and restored only while the captured row still matches.
 - FTS5 `content_index` mirrors all content tables; `health` and `status` verify source-row / FTS-row alignment.
 - `status` includes a native freshness block for owner-specific snapshot, activity, handoff, and shipped-event attention. Freshness attention is advisory: top-level `ok` / `overall` remain tied to DB, schema, fallback-file, and FTS health.
 - 26 MCP tools across 10 modules (activity, handoffs, context, snapshots, cost, export, health, recall, audit, conflicts).
@@ -83,6 +84,11 @@ Instruction-bearing rows carry a `source_trust` label — `operator`, `agent`, o
 
 > MCP clients cannot mint operator provenance. An operator-directed handoff is created as `agent`, reviewed in an interactive terminal, and promoted with `uv run python -m bridge_db --promote-handoff <id>`. The promotion rechecks the exact reviewed row under a write lock and refuses changed or non-pending handoffs.
 
+`clear_handoff` is claimant-only: a caller may clear only an `active` row whose
+`claimed_by` equals its channel principal. Pending and legacy claimant-less
+active rows require the exact-ID `--cancel-handoff <id> --cancel-reason <reason>`
+operator ceremony, which records a durable cancellation receipt.
+
 ## CAS & Conflict Receipts
 
 Context sections are the mutable bridge surface, so they carry a monotonic
@@ -136,13 +142,18 @@ uv run python -m bridge_db --dogfood # read-only observability dogfood pass
 uv run python -m bridge_db --rebuild-content-index  # repair FTS recall index drift
 uv run python -m bridge_db --reconcile-canonical-keys  # backfill GHRA repo_full_name keys
 uv run python -m bridge_db --log-session-boundary bridge-db  # FTS-safe CC hook logging
+uv run python -m bridge_db --upgrade-principals-v2  # preserve v1 hashes; add 90-day scoped grants
 uv run python -m bridge_db --promote-handoff 42  # review/promote one pending handoff (TTY only)
+uv run python -m bridge_db --cancel-handoff 42 --cancel-reason "superseded"  # exact unclaimed cancellation
+uv run python -m bridge_db --quarantine-cleared-operator-handoffs  # recoverable legacy relabel
+uv run python -m bridge_db --restore-handoff-trust 42  # exact-row recovery
 uv run python -m bridge_db          # start MCP server (stdio)
 uv run python -m bridge_db.migration  # migrate from bridge markdown
 ```
 
 The private Codex baseline seed accepts explicit versioned fingerprints.
-Unknown versions fail closed; new manifests should use the whole-manifest
+Legacy `snapshot-v1` is accepted only before `2026-08-18T00:00:00Z`; unknown
+versions and expired v1 manifests fail closed. New manifests should use the whole-manifest
 `manifest-v2` contract documented in
 [`docs/internal/CODEX-SEED-MANIFEST.md`](docs/internal/CODEX-SEED-MANIFEST.md).
 

@@ -166,8 +166,18 @@ async def test_cleared_rows_stay_excluded_from_all(
     db: aiosqlite.Connection, handoff_fns: dict[str, Any]
 ) -> None:
     ctx = make_ctx(db, principal="claude_ai")
-    await handoff_fns["create_handoff"](
+    created = await handoff_fns["create_handoff"](
         caller="claude_ai", project_name="DoneProj", ctx=ctx
+    )
+    await db.execute(
+        "UPDATE pending_handoffs SET source_trust = 'operator' WHERE id = ?",
+        (created["handoff_id"],),
+    )
+    await db.commit()
+    await handoff_fns["pick_up_handoff"](
+        caller="cc",
+        handoff_id=created["handoff_id"],
+        ctx=make_ctx(db, principal="cc"),
     )
     cleared = await handoff_fns["clear_handoff"](
         caller="cc", project_name="DoneProj", ctx=make_ctx(db, principal="cc")

@@ -36,7 +36,9 @@ async def test_schema_creates_all_tables(db: aiosqlite.Connection) -> None:
         "context_section_export_state",
         "context_sections",
         "cost_records",
+        "handoff_cancellation_receipts",
         "handoff_lifecycle_receipts",
+        "handoff_trust_quarantine",
         "pending_handoffs",
         "session_classification",
         "session_costs",
@@ -537,6 +539,17 @@ async def test_ensure_schema_rejects_future_db_version(tmp_path: Path) -> None:
         await ensure_schema(db)
 
     await db.close()
+
+
+async def test_authority_recovery_tables_exist(db: aiosqlite.Connection) -> None:
+    cursor = await db.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' "
+        "AND name IN ('handoff_cancellation_receipts', 'handoff_trust_quarantine')"
+    )
+    assert {row["name"] for row in await cursor.fetchall()} == {
+        "handoff_cancellation_receipts",
+        "handoff_trust_quarantine",
+    }
 
 
 # ── source_trust provenance (v6 → v7) ──────────────────────────────────────

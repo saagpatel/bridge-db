@@ -15,6 +15,7 @@ import bridge_db.config as cfg
 import bridge_db.tools.recall as recall_tool
 from bridge_db import auth, config
 from bridge_db.__main__ import (
+    run_cancel_handoff,
     run_dogfood,
     run_enroll,
     run_list_principals,
@@ -23,8 +24,11 @@ from bridge_db.__main__ import (
     run_promote_section,
     run_rebuild_content_index,
     run_reconcile_canonical_keys,
+    run_quarantine_cleared_operator_handoffs,
+    run_restore_handoff_trust,
     run_revoke_principal,
     run_status,
+    run_upgrade_principals_v2,
 )
 from bridge_db.db import (
     collect_fts_index_metrics,
@@ -677,8 +681,164 @@ def test_enroll_writes_hashed_token_with_0600(
     token = token_line[0].removeprefix("  token: ").strip()
 
     data = json.loads((tmp_path / "principals.json").read_text(encoding="utf-8"))
+    assert data["version"] == 2
     assert data["principals"]["cc"]["token_sha256"] == auth.hash_token(token)
+    assert data["principals"]["cc"]["generation"] == 1
+    assert data["principals"]["cc"]["scopes"] == sorted(auth.scopes_for_caller("cc"))
+    issued = datetime.fromisoformat(
+        data["principals"]["cc"]["issued_at"].replace("Z", "+00:00")
+    )
+    expires = datetime.fromisoformat(
+        data["principals"]["cc"]["expires_at"].replace("Z", "+00:00")
+    )
+    assert (expires - issued).days == 90
     assert (tmp_path / "principals.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_upgrade_principals_v2_preserves_hashes_and_adds_grants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "principals.json"
+    old_hash = auth.hash_token("token-cc")
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "principals": {
+                    "cc": {
+                        "token_sha256": old_hash,
+                        "enrolled_at": "2026-06-12T00:00:00Z",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "PRINCIPALS_PATH", path)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    def confirm_upgrade(_prompt: str) -> str:
+        return "upgrade"
+
+    monkeypatch.setattr("builtins.input", confirm_upgrade)
+
+    assert run_upgrade_principals_v2() is True
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    entry = data["principals"]["cc"]
+    assert data["version"] == 2
+    assert entry["token_sha256"] == old_hash
+    assert entry["generation"] == 1
+    assert entry["scopes"] == sorted(auth.scopes_for_caller("cc"))
+    assert path.with_name("principals.json.pre-v2.bak").exists()
+
+
+@pytest.mark.asyncio
+async def test_cancel_handoff_requires_exact_operator_ceremony(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cursor = await db.execute(
+        "INSERT INTO pending_handoffs (project_name, source_trust) VALUES (?, ?)",
+        ("CancelMe", "agent"),
+    )
+    handoff_id = cursor.lastrowid
+    assert handoff_id is not None
+    await db.commit()
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    def confirm_cancel(_prompt: str) -> str:
+        return "cancel"
+
+    monkeypatch.setattr("builtins.input", confirm_cancel)
+
+    assert await run_cancel_handoff(handoff_id, "superseded by operator") is True
+
+    row = await (
+        await db.execute(
+            "SELECT status FROM pending_handoffs WHERE id = ?", (handoff_id,)
+        )
+    ).fetchone()
+    assert row is not None and row["status"] == "cleared"
+    receipt = await (
+        await db.execute(
+            "SELECT reason, previous_status FROM handoff_cancellation_receipts "
+            "WHERE handoff_id = ?",
+            (handoff_id,),
+        )
+    ).fetchone()
+    assert receipt is not None
+    assert receipt["reason"] == "superseded by operator"
+    assert receipt["previous_status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_cancel_handoff_refuses_claimed_active_work(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cursor = await db.execute(
+        "INSERT INTO pending_handoffs "
+        "(project_name, status, claimed_by, source_trust) VALUES (?, 'active', 'codex', 'operator')",
+        ("ActiveWork",),
+    )
+    handoff_id = cursor.lastrowid
+    assert handoff_id is not None
+    await db.commit()
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    assert await run_cancel_handoff(handoff_id, "should not override") is False
+    row = await (
+        await db.execute(
+            "SELECT status FROM pending_handoffs WHERE id = ?", (handoff_id,)
+        )
+    ).fetchone()
+    assert row is not None and row["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_quarantine_and_exact_restore_preserve_recovery_evidence(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cursor = await db.execute(
+        "INSERT INTO pending_handoffs "
+        "(project_name, status, source_trust, cleared_at) "
+        "VALUES (?, 'cleared', 'operator', '2026-07-01T00:00:00Z')",
+        ("LegacyReviewed",),
+    )
+    handoff_id = cursor.lastrowid
+    assert handoff_id is not None
+    await db.commit()
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    confirmations = iter(["quarantine", "restore"])
+    def confirm_recovery(_prompt: str) -> str:
+        return next(confirmations)
+
+    monkeypatch.setattr("builtins.input", confirm_recovery)
+
+    assert await run_quarantine_cleared_operator_handoffs() is True
+    row = await (
+        await db.execute(
+            "SELECT source_trust FROM pending_handoffs WHERE id = ?", (handoff_id,)
+        )
+    ).fetchone()
+    assert row is not None and row["source_trust"] == "ingested"
+    recovery = await (
+        await db.execute(
+            "SELECT row_json, row_sha256, restored_at FROM handoff_trust_quarantine "
+            "WHERE handoff_id = ?",
+            (handoff_id,),
+        )
+    ).fetchone()
+    assert recovery is not None
+    assert recovery["restored_at"] is None
+
+    assert await run_restore_handoff_trust(handoff_id) is True
+    restored = await (
+        await db.execute(
+            "SELECT source_trust FROM pending_handoffs WHERE id = ?", (handoff_id,)
+        )
+    ).fetchone()
+    assert restored is not None and restored["source_trust"] == "operator"
 
 
 def test_enroll_refuses_without_tty(

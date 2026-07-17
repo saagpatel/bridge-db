@@ -66,6 +66,7 @@ def make_ctx(
     conn: aiosqlite.Connection,
     principal: str | None = None,
     credential_hash: str | None = None,
+    credential_generation: int | None = None,
 ) -> Any:
     """Build a minimal mock Context satisfying ctx.request_context.lifespan_context.
 
@@ -76,11 +77,13 @@ def make_ctx(
     # raises NameError (class bodies cannot close over a name they also bind).
     bound_principal = principal
     bound_credential_hash = credential_hash
+    bound_credential_generation = credential_generation
 
     class _AppContext:
         db = conn
         principal = bound_principal
         credential_hash = bound_credential_hash
+        credential_generation = bound_credential_generation
 
     class _RequestContext:
         lifespan_context = _AppContext()

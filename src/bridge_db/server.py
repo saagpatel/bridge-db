@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import aiosqlite
 from mcp.server.fastmcp import FastMCP
 
-from bridge_db import config
+from bridge_db import clock, config
 from bridge_db.db import open_db
 
 # Logging — stderr only (stdout is the MCP JSON-RPC channel)
@@ -27,17 +27,27 @@ class AppContext:
     db: aiosqlite.Connection
     principal: str | None = None
     credential_hash: str | None = None
+    credential_generation: int | None = None
 
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # noqa: ARG001
     from bridge_db.audit import log_audit
-    from bridge_db.auth import auth_mode, hash_token, load_principals, resolve_principal
+    from bridge_db.auth import auth_mode, hash_token, load_principal_grants, resolve_grant
 
     raw_token = os.environ.get("BRIDGE_DB_PRINCIPAL_TOKEN")
     token = raw_token.strip() if raw_token is not None else None
-    principal = resolve_principal(token, load_principals(config.PRINCIPALS_PATH))
-    if raw_token is not None and principal is None:
+    grant = resolve_grant(token, load_principal_grants(config.PRINCIPALS_PATH))
+    principal = grant.caller if grant is not None else None
+    if grant is not None and clock.now() >= grant.expires_at:
+        log_audit(
+            "auth.bind",
+            principal,
+            None,
+            ok=False,
+            detail=f"principal={principal} reason=expired",
+        )
+    elif raw_token is not None and principal is None:
         # Env var was set but did not resolve to a principal: either blank
         # (shell-quoting bug) or a stale/wrong token. Audit so the misconfig
         # is visible rather than silently starting unbound.
@@ -57,6 +67,7 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # 
             db=db,
             principal=principal,
             credential_hash=hash_token(token) if token and principal else None,
+            credential_generation=grant.generation if grant is not None else None,
         )
     finally:
         await db.close()
