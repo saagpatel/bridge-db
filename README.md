@@ -140,6 +140,11 @@ uv run python -m bridge_db          # start MCP server (stdio)
 uv run python -m bridge_db.migration  # migrate from bridge markdown
 ```
 
+The private Codex baseline seed accepts explicit versioned fingerprints.
+Unknown versions fail closed; new manifests should use the whole-manifest
+`manifest-v2` contract documented in
+[`docs/internal/CODEX-SEED-MANIFEST.md`](docs/internal/CODEX-SEED-MANIFEST.md).
+
 ## Registration
 
 Replace `/path/to/bridge-db` below with the absolute path to your clone of this repo
