@@ -1,6 +1,5 @@
 """Recall tool: lexical search across content_index plus minimized telemetry."""
 
-import json
 import logging
 import re
 from collections import Counter
@@ -12,8 +11,12 @@ from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db import clock, config
-from bridge_db.audit import iter_jsonl_reverse
 from bridge_db.db import get_db
+from bridge_db.evidence import (
+    append_jsonl_durable,
+    iter_jsonl_family_reverse,
+    jsonl_family_size,
+)
 from bridge_db.instruction_boundary import instruction_boundary
 from bridge_db.models import CallerID
 
@@ -135,9 +138,11 @@ def _log_recall(
             "n_results": n_results,
             "caller": caller,
         }
-        RECALL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(RECALL_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(event) + "\n")
+        append_jsonl_durable(
+            RECALL_LOG_PATH,
+            event,
+            rotate_bytes=config.RECALL_LOG_ROTATE_BYTES,
+        )
     except Exception:
         logger.debug("recall log write failed", exc_info=True)
 
@@ -147,7 +152,7 @@ def collect_recall_stats(days: int = 7) -> dict[str, Any]:
     cutoff = (clock.now() - timedelta(days=days)).isoformat().replace("+00:00", "Z")
 
     try:
-        scan_truncated = RECALL_LOG_PATH.stat().st_size > RECALL_STATS_MAX_SCAN_BYTES
+        scan_truncated = jsonl_family_size(RECALL_LOG_PATH) > RECALL_STATS_MAX_SCAN_BYTES
     except OSError:
         scan_truncated = False
 
@@ -158,7 +163,7 @@ def collect_recall_stats(days: int = 7) -> dict[str, Any]:
     caller_counts: Counter[str] = Counter()
     caller_misses: Counter[str] = Counter()
 
-    for record in iter_jsonl_reverse(
+    for record in iter_jsonl_family_reverse(
         RECALL_LOG_PATH, max_bytes=RECALL_STATS_MAX_SCAN_BYTES
     ):
         ts = record.get("ts")

@@ -9,7 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 from bridge_db import config
-from bridge_db.audit import iter_jsonl_reverse
+from bridge_db.evidence import iter_jsonl_family_reverse
 
 logger = logging.getLogger("bridge_db.tools.audit")
 
@@ -27,7 +27,7 @@ def collect_audit_tail(
     """Return recent audit events from a bounded newest-file horizon."""
 
     def matching_records() -> Iterator[dict[str, Any]]:
-        for record in iter_jsonl_reverse(
+        for record in iter_jsonl_family_reverse(
             config.AUDIT_LOG_PATH, max_bytes=AUDIT_TAIL_MAX_SCAN_BYTES
         ):
             if caller is not None and record.get("caller") != caller:
@@ -70,9 +70,10 @@ def register(mcp: FastMCP) -> None:
     ) -> list[dict[str, Any]]:
         """Return recent audit events, newest first, with optional filters.
 
-        Reads a bounded newest-byte horizon from `config.AUDIT_LOG_PATH`.
-        Missing file returns []; malformed or boundary-truncated lines are
-        skipped. Timestamps are ISO8601 UTC; `since` compares as string, which
-        matches temporal order for that format.
+        Reads one bounded newest-byte horizon across the active audit log and
+        losslessly rotated segments. Missing files return []; malformed or
+        boundary-truncated lines are skipped. Timestamps are ISO8601 UTC;
+        `since` compares as string, which matches temporal order for that
+        format.
         """
         return collect_audit_tail(limit=limit, caller=caller, tool=tool, since=since, ok=ok)

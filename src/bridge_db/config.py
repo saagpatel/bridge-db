@@ -67,6 +67,27 @@ AUDIT_LOG_PATH: Path = Path(
     )
 )
 
+# JSONL files rotate losslessly at these active-file boundaries. Preserved
+# segments are never deleted automatically; retention/cleanup requires explicit
+# operator approval.
+AUDIT_LOG_ROTATE_BYTES: int = int(
+    os.environ.get("BRIDGE_DB_AUDIT_LOG_ROTATE_BYTES", str(4 * 1024 * 1024))
+)
+RECALL_LOG_ROTATE_BYTES: int = int(
+    os.environ.get("BRIDGE_DB_RECALL_LOG_ROTATE_BYTES", str(4 * 1024 * 1024))
+)
+
+# Independent durable evidence for a failed primary audit projection. Keeping
+# this path separate lets the service continue in a visible degraded state when
+# a custom audit target is unavailable. If both writes fail, audit.log_audit
+# raises rather than silently claiming auditable success.
+AUDIT_FAILURE_LOG_PATH: Path = Path(
+    os.environ.get(
+        "BRIDGE_DB_AUDIT_FAILURE_LOG_PATH",
+        str(DB_PATH.parent / "audit_failures.jsonl"),
+    )
+)
+
 # Canonical project-identity registry emitted by GithubRepoAuditor. Read-only
 # consumer input for resolving project_name -> canonical key on write. If absent,
 # resolution is a no-op (pass-through) and logging behaviour is unchanged.

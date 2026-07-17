@@ -1,6 +1,7 @@
 """Tests for DB schema creation, PRAGMAs, and migration idempotency."""
 
 import hashlib
+import json
 from pathlib import Path
 
 import aiosqlite
@@ -1053,10 +1054,21 @@ async def test_migration_v13_to_v14_collapses_shipped_tables_losslessly(
     # DROP of the child tables is repairable.
     backup_path = tmp_path / "v13.db.pre-v14.bak"
     manifest_path = tmp_path / "v13.db.pre-v14.bak.sha256"
+    metadata_path = tmp_path / "v13.db.pre-v14.bak.meta.json"
     assert backup_path.exists()
     assert manifest_path.read_text(encoding="utf-8").strip() == hashlib.sha256(
         backup_path.read_bytes()
     ).hexdigest()
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["schema"] == "MigrationBackupEvidenceV1"
+    assert metadata["source_schema_version"] == 13
+    assert metadata["recovery_readback"] == "verified"
+    assert metadata["retention_policy"] == "operator_acknowledgement_required"
+    assert metadata["cleanup"] == "approval_required"
+    assert metadata["sha256"] == hashlib.sha256(backup_path.read_bytes()).hexdigest()
+    assert backup_path.stat().st_mode & 0o777 == 0o600
+    assert manifest_path.stat().st_mode & 0o777 == 0o600
+    assert metadata_path.stat().st_mode & 0o777 == 0o600
     backup_db = await aiosqlite.connect(backup_path)
     try:
         receipt_count = await (

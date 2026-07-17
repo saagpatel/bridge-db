@@ -137,7 +137,10 @@ async def run_status(*, now: datetime | None = None) -> bool:
         f"{summary['signals']['processed_shipped_without_receipt']},"
         f" fts_missing={summary['signals']['fts_missing']},"
         f" fts_orphaned={summary['signals']['fts_orphaned']},"
-        f" open_write_conflicts={summary['signals']['open_write_conflicts']}"
+        f" open_write_conflicts={summary['signals']['open_write_conflicts']},"
+        f" audit_degraded={summary['signals']['audit_degraded']},"
+        " migration_backup_integrity_ok="
+        f"{summary['signals']['migration_backup_integrity_ok']}"
     )
     print(f"  FTS: {_fts_detail(summary['fts_index'])}")
     trust = summary["pending_handoffs_by_trust"]
@@ -213,6 +216,10 @@ def _status_attention(summary: dict[str, Any]) -> str | None:
         notes.append(f"fts_missing={signals['fts_missing']}")
     if signals["fts_orphaned"]:
         notes.append(f"fts_orphaned={signals['fts_orphaned']}")
+    if signals["audit_degraded"]:
+        notes.append("audit_degraded=true")
+    if not signals["migration_backup_integrity_ok"]:
+        notes.append("migration_backup_integrity_ok=false")
     if not notes:
         return None
     return "; ".join(notes) + " — dogfood will fail until cleared"
@@ -284,6 +291,17 @@ async def run_dogfood() -> bool:
         f" miss_rate={recall['miss_rate']},"
         f" scopes={recall['scope_breakdown']}"
     )
+    evidence = health["evidence_lifecycle"]
+    print(
+        "  Evidence lifecycle:"
+        f" audit_bytes={evidence['audit']['total_bytes']},"
+        f" audit_segments={evidence['audit']['segment_count']},"
+        f" recall_bytes={evidence['recall']['total_bytes']},"
+        f" recall_segments={evidence['recall']['segment_count']},"
+        f" audit_degraded={evidence['audit_degraded']},"
+        f" migration_backups={evidence['migration_backups']['count']},"
+        f" verified_backups={evidence['migration_backups']['verified_count']}"
+    )
     print(f"  Recent audit rows checked: {len(recent_audit)}")
     print(f"  Latest record_disposition: {_latest_detail(recent_disposition)}")
 
@@ -296,6 +314,8 @@ async def run_dogfood() -> bool:
         and not health["wal_warning"]
         and health["receipt_orphan_count"] == 0
         and health["disposition_orphan_count"] == 0
+        and not health["evidence_lifecycle"]["audit_degraded"]
+        and health["evidence_lifecycle"]["backup_integrity_ok"]
     )
 
 
