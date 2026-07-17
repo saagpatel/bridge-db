@@ -244,3 +244,34 @@ def test_plan_cli_emits_machine_readable_contract(
     assert output["schema"] == policy.PLAN_SCHEMA
     assert len(output["snapshot_sha256"]) == 64
     assert output["policy"]["destructive_actions"] == "blocked"
+
+
+def test_verify_cli_requires_and_reports_independent_plan_digest(
+    evidence_paths: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    plan = policy.collect_evidence_plan()
+    archive = evidence_paths / "archive"
+    policy.create_evidence_archive(
+        archive,
+        expected_snapshot_sha256=plan["snapshot_sha256"],
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "evidence_policy",
+            "verify",
+            "--archive",
+            str(archive),
+            "--expected-snapshot-sha256",
+            plan["snapshot_sha256"],
+        ],
+    )
+
+    policy.main()
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is True
+    assert output["snapshot_sha256"] == plan["snapshot_sha256"]
