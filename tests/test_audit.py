@@ -42,10 +42,11 @@ async def test_log_audit_appends_multiple_events(tmp_path: Path) -> None:
 
 
 async def test_log_audit_never_raises_on_bad_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unwriteable path must not propagate — audit failure is silent."""
+    """Primary failure continues only because a durable receipt is available."""
     monkeypatch.setattr(config, "AUDIT_LOG_PATH", Path("/no/such/dir/audit.jsonl"))
-    # Should not raise
-    audit.log_audit("health", None, None, ok=True)
+    result = audit.log_audit("health", None, None, ok=True)
+    assert result["audit_degraded"] is True
+    assert config.AUDIT_FAILURE_LOG_PATH.exists()
 
 
 async def test_log_audit_ts_format(tmp_path: Path) -> None:

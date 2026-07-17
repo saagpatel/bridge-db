@@ -57,6 +57,27 @@ async def test_health_returns_ok_on_healthy_db(
     assert result["ok"] is True
     assert result["db_exists"] is True
     assert result["schema_version"] == SCHEMA_VERSION
+    assert result["evidence_lifecycle"]["audit_degraded"] is False
+    assert result["evidence_lifecycle"]["destructive_actions"] == "approval_required"
+
+
+async def test_health_degrades_on_durable_audit_failure_receipt(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "test.db").touch()
+    config.AUDIT_FAILURE_LOG_PATH.write_text(
+        '{"kind":"audit_write_failure","status":"open"}\n',
+        encoding="utf-8",
+    )
+
+    result = await fns["health"](ctx=make_ctx(db))
+
+    assert result["ok"] is False
+    assert result["storage_ok"] is False
+    assert result["evidence_lifecycle"]["audit_degraded"] is True
+    assert result["evidence_lifecycle"]["audit_failures"]["state"] == "degraded"
 
 
 async def test_health_row_counts_reflect_data(

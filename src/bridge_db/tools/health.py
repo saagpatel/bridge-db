@@ -3,6 +3,7 @@
 import json
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -15,6 +16,11 @@ from bridge_db.db import (
     collect_fts_index_metrics,
     get_db,
     protected_tags_predicate,
+)
+from bridge_db.evidence import (
+    evidence_file_inventory,
+    legacy_raw_query_inventory,
+    migration_backup_inventory,
 )
 from bridge_db.tools.context import parse_owned_sections
 
@@ -287,6 +293,49 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     )
     bridge_file_export_tracked = await cursor.fetchone() is not None
 
+    from bridge_db.tools.recall import RECALL_LOG_PATH
+
+    audit_inventory = evidence_file_inventory(
+        config.AUDIT_LOG_PATH, rotate_bytes=config.AUDIT_LOG_ROTATE_BYTES
+    )
+    recall_inventory = evidence_file_inventory(
+        RECALL_LOG_PATH, rotate_bytes=config.RECALL_LOG_ROTATE_BYTES
+    )
+    failure_inventory = evidence_file_inventory(
+        config.AUDIT_FAILURE_LOG_PATH,
+        rotate_bytes=config.AUDIT_LOG_ROTATE_BYTES,
+    )
+    audit_degraded = failure_inventory["total_bytes"] > 0
+    database_list_cursor = await db.execute("PRAGMA database_list")
+    database_rows = await database_list_cursor.fetchall()
+    open_main_path = next(
+        (
+            row[2]
+            for row in database_rows
+            if row[1] == "main" and isinstance(row[2], str) and row[2]
+        ),
+        str(config.DB_PATH),
+    )
+    backup_inventory = migration_backup_inventory(Path(open_main_path))
+    backup_integrity_ok = (
+        backup_inventory["count"] == backup_inventory["verified_count"]
+    )
+    evidence_lifecycle = {
+        "audit": audit_inventory,
+        "recall": {
+            **recall_inventory,
+            "historical_raw_queries": legacy_raw_query_inventory(RECALL_LOG_PATH),
+        },
+        "audit_failures": {
+            **failure_inventory,
+            "state": "degraded" if audit_degraded else "clear",
+        },
+        "migration_backups": backup_inventory,
+        "audit_degraded": audit_degraded,
+        "backup_integrity_ok": backup_integrity_ok,
+        "destructive_actions": "approval_required",
+    }
+
     # Keep structural storage health separate from cross-store projection
     # integrity. Generic readiness is green only when both are proven current.
     storage_ok = (
@@ -294,6 +343,8 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         and schema_version == SCHEMA_VERSION
         and bridge_file_exists
         and fts_index["ok"]
+        and not audit_degraded
+        and backup_integrity_ok
     )
     projection_health = claude_ai_section_drift["state"]
     if projection_health == "current" and not bridge_file_export_tracked:
@@ -326,6 +377,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "fts_index": fts_index,
         "claude_ai_section_drift": claude_ai_section_drift,
         "source_trust_breakdown": source_trust_breakdown,
+        "evidence_lifecycle": evidence_lifecycle,
         "auth": {
             "mode": auth_mode(),
             "principals_file_exists": config.PRINCIPALS_PATH.exists(),
@@ -714,7 +766,12 @@ async def collect_status_summary(
                 health["claude_ai_section_drift"]["drifted_sections"]
             ),
             "open_write_conflicts": health["open_write_conflicts"],
+            "audit_degraded": health["evidence_lifecycle"]["audit_degraded"],
+            "migration_backup_integrity_ok": health["evidence_lifecycle"][
+                "backup_integrity_ok"
+            ],
         },
+        "evidence_lifecycle": health["evidence_lifecycle"],
         "fts_index": health["fts_index"],
         "latest_snapshots": latest_snapshots,
         "latest_activity": latest_activity,

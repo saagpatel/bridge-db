@@ -9,6 +9,7 @@ import pytest
 from conftest import CaptureMCP, make_ctx
 from mcp.server.fastmcp.exceptions import ToolError
 
+from bridge_db import config
 from bridge_db.db import repopulate_content_index
 from bridge_db.tools import activity as activity_tools
 from bridge_db.tools import context as context_tools
@@ -472,6 +473,30 @@ async def test_recall_stats_enforces_visible_reverse_scan_budget(
         "codex": {"count": 1, "miss_rate": 0.0}
     }
     assert result["scan_truncated"] is True
+
+
+async def test_recall_stats_reads_across_lossless_rotation(
+    capture: CaptureMCP, tmp_path: Any, monkeypatch: Any
+) -> None:
+    log_path = tmp_path / "recall.jsonl"
+    monkeypatch.setattr(recall_tool, "RECALL_LOG_PATH", log_path)
+    monkeypatch.setattr(config, "RECALL_LOG_ROTATE_BYTES", 1)
+    for caller in ("cc", "codex"):
+        recall_tool._log_recall(  # pyright: ignore[reportPrivateUsage]
+            query_empty=False,
+            scope="all",
+            limit=10,
+            n_results=1,
+            caller=caller,
+        )
+
+    result = await capture.fns["recall_stats"](days=7)
+
+    assert result["total_queries"] == 2
+    assert result["caller_breakdown"] == {
+        "cc": {"count": 1, "miss_rate": 0.0},
+        "codex": {"count": 1, "miss_rate": 0.0},
+    }
 
 
 async def test_recall_or_semantics_returns_partial_matches(

@@ -175,6 +175,12 @@ args = ["run", "--directory", "/path/to/bridge-db", "python", "-m", "bridge_db"]
 - Health check: `health` MCP tool or `uv run python -m bridge_db --doctor`
 - Operator summary: `uv run python -m bridge_db --status`
 - Dogfood pass: `uv run python -m bridge_db --dogfood` bundles the status, FTS index, WAL, recall, and shipped-sync audit checks used after bridge-sync runs
+- Evidence lifecycle: audit and recall JSONL active files rotate losslessly at
+  configurable byte boundaries under an inter-process lock. All segments are
+  preserved pending an approved retention policy. `health`/`status` expose
+  active/segment bytes, audit degradation, historical raw-query inventory, and
+  verified migration-backup inventory. See
+  [docs/internal/EVIDENCE-LIFECYCLE.md](docs/internal/EVIDENCE-LIFECYCLE.md).
 - FTS repair: `uv run python -m bridge_db --rebuild-content-index` rebuilds the local `content_index` from source tables when health reports recall-index drift
 - Canonical-key reconcile: `uv run python -m bridge_db --reconcile-canonical-keys` rewrites stored `activity_log` and `pending_handoffs` `canonical_key` values through GithubRepoAuditor's registry, storing GHRA `repo_full_name` for repo-backed projects and leaving unresolvable rows `NULL`.
 - Session boundary logging: Claude Code's SessionEnd hook should call `uv run --directory /path/to/bridge-db python -m bridge_db --log-session-boundary <project>` rather than writing SQLite directly; this path adds the FTS row and does not run activity retention pruning

@@ -2,13 +2,19 @@
 
 import json
 import logging
+import hashlib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 from bridge_db import clock, config
+from bridge_db.evidence import append_jsonl_durable
 
 logger = logging.getLogger("bridge_db.audit")
+
+
+class AuditUnavailableError(RuntimeError):
+    """Neither primary audit evidence nor a durable failure receipt was writable."""
 
 
 def log_audit(
@@ -17,22 +23,64 @@ def log_audit(
     project: str | None,
     ok: bool,
     detail: str | None = None,
-) -> None:
-    """Append one audit event to the audit JSONL log. Never raises."""
+) -> dict[str, Any]:
+    """Write audit evidence or continue with an independent durable failure receipt.
+
+    A failed primary projection is not hidden: it creates a minimized receipt
+    at ``AUDIT_FAILURE_LOG_PATH`` and returns ``audit_degraded=True``. If both
+    evidence paths fail, this raises ``AuditUnavailableError``.
+    """
+    event: dict[str, Any] = {
+        "ts": clock.now().isoformat().replace("+00:00", "Z"),
+        "tool": tool,
+        "caller": caller,
+        "project": project,
+        "ok": ok,
+        "detail": detail,
+    }
     try:
-        event: dict[str, Any] = {
+        result = append_jsonl_durable(
+            config.AUDIT_LOG_PATH,
+            event,
+            rotate_bytes=config.AUDIT_LOG_ROTATE_BYTES,
+        )
+        return {
+            "audit_degraded": False,
+            "path": str(result.path),
+            "rotated": str(result.rotated_path) if result.rotated_path else None,
+        }
+    except Exception as primary_error:
+        logger.warning(
+            "primary audit projection failed; recording durable degradation receipt",
+            exc_info=True,
+        )
+        serialized = json.dumps(event, sort_keys=True, default=str).encode("utf-8")
+        receipt = {
             "ts": clock.now().isoformat().replace("+00:00", "Z"),
+            "kind": "audit_write_failure",
             "tool": tool,
             "caller": caller,
             "project": project,
-            "ok": ok,
-            "detail": detail,
+            "event_sha256": hashlib.sha256(serialized).hexdigest(),
+            "primary_error": type(primary_error).__name__,
+            "status": "open",
         }
-        config.AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(config.AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(event) + "\n")
-    except Exception:
-        logger.debug("audit log write failed", exc_info=True)
+        try:
+            result = append_jsonl_durable(
+                config.AUDIT_FAILURE_LOG_PATH,
+                receipt,
+                rotate_bytes=config.AUDIT_LOG_ROTATE_BYTES,
+            )
+        except Exception as receipt_error:
+            raise AuditUnavailableError(
+                "audit write failed and durable failure evidence is unavailable; "
+                "the caller must not claim an auditable success"
+            ) from receipt_error
+        return {
+            "audit_degraded": True,
+            "failure_receipt_path": str(result.path),
+            "event_sha256": receipt["event_sha256"],
+        }
 
 
 def iter_jsonl(path: Path) -> Iterator[dict[str, Any]]:
