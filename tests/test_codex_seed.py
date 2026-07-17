@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from bridge_db import config
+from bridge_db import clock
 from bridge_db.codex_seed import (
     CURRENT_FINGERPRINT_VERSION,
     LEGACY_FINGERPRINT_VERSION,
@@ -92,7 +95,34 @@ def test_load_manifest_reports_implicit_legacy_v1(tmp_path: Path) -> None:
         "state": "legacy_implicit_v1",
         "covered_fields": ["snapshot_payload"],
         "upgrade_required": True,
+        "sunset_at": "2026-08-18T00:00:00Z",
     }
+
+
+def test_legacy_manifest_warns_before_cutoff(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(make_manifest()), encoding="utf-8")
+    clock.install(lambda: datetime(2026, 8, 17, 23, 59, tzinfo=UTC))
+    try:
+        with caplog.at_level(logging.WARNING):
+            load_manifest(path)
+    finally:
+        clock.reset()
+    assert "legacy seed fingerprint" in caplog.text
+    assert "2026-08-18T00:00:00Z" in caplog.text
+
+
+def test_legacy_manifest_fails_closed_after_cutoff(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(make_manifest()), encoding="utf-8")
+    clock.install(lambda: datetime(2026, 8, 18, 0, 0, tzinfo=UTC))
+    try:
+        with pytest.raises(ValueError, match="legacy fingerprint compatibility expired"):
+            load_manifest(path)
+    finally:
+        clock.reset()
 
 
 def test_load_manifest_reports_explicit_legacy_v1(tmp_path: Path) -> None:

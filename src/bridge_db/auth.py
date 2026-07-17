@@ -12,18 +12,97 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast, overload
 
 from mcp.server.fastmcp.exceptions import ToolError
 
-from bridge_db import config
+from bridge_db import clock, config
 from bridge_db.audit import log_audit
-from bridge_db.models import SourceTrust
+from bridge_db.models import CALLER_IDS, SourceTrust
 
 logger = logging.getLogger("bridge_db.auth")
 
 _VALID_MODES = frozenset({"off", "warn", "enforce"})
+PRINCIPALS_VERSION = 2
+GRANT_TTL_DAYS = 90
+
+_SCOPES_BY_CALLER: dict[str, frozenset[str]] = {
+    "cc": frozenset(
+        {
+            "log_activity",
+            "save_snapshot",
+            "record_cost",
+            "record_disposition",
+            "pick_up_handoff",
+            "clear_handoff",
+            "sync_from_file",
+            "export_bridge_markdown",
+        }
+    ),
+    "codex": frozenset(
+        {
+            "log_activity",
+            "save_snapshot",
+            "record_cost",
+            "record_disposition",
+            "pick_up_handoff",
+            "clear_handoff",
+            "export_bridge_markdown",
+        }
+    ),
+    "claude_ai": frozenset(
+        {
+            "update_section",
+            "create_handoff",
+            "export_bridge_markdown",
+        }
+    ),
+    "notion_os": frozenset(
+        {
+            "log_activity",
+            "record_cost",
+            "record_disposition",
+            "export_bridge_markdown",
+        }
+    ),
+    "personal_ops": frozenset(
+        {
+            "log_activity",
+            "record_cost",
+            "record_disposition",
+            "export_bridge_markdown",
+        }
+    ),
+}
+
+
+@dataclass(frozen=True)
+class PrincipalGrant:
+    caller: str
+    issued_at: datetime
+    expires_at: datetime
+    generation: int
+    scopes: frozenset[str]
+
+
+def scopes_for_caller(caller: str) -> list[str]:
+    """Return the closed default action scope for a known caller."""
+    return sorted(_SCOPES_BY_CALLER.get(caller, frozenset()))
+
+
+def _parse_utc_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
 
 
 def hash_token(token: str) -> str:
@@ -36,10 +115,10 @@ def auth_mode() -> str:
     return mode if mode in _VALID_MODES else "enforce"
 
 
-def load_principals(path: Path) -> dict[str, str]:
-    """Read the enrollment file into a sha256(token) -> caller map.
+def load_principal_grants(path: Path) -> dict[str, PrincipalGrant]:
+    """Read a v2 enrollment file into a sha256(token) -> scoped grant map.
 
-    Missing or malformed file -> {} (nothing binds, enforce mode denies writes).
+    Missing, legacy-v1, or malformed files fail closed to no grants.
     A vanished file (deleted between calls) is treated as missing and returns {}.
     """
     try:
@@ -53,20 +132,72 @@ def load_principals(path: Path) -> dict[str, str]:
         raw = cast(object, json.loads(text))
         if not isinstance(raw, dict):
             return {}
-        entries = cast(dict[str, object], raw).get("principals")
+        raw_dict = cast(dict[str, object], raw)
+        if raw_dict.get("version") != PRINCIPALS_VERSION:
+            logger.warning("unsupported principals registry version: %r", raw_dict.get("version"))
+            return {}
+        entries = raw_dict.get("principals")
         if not isinstance(entries, dict):
             return {}
-        result: dict[str, str] = {}
+        result: dict[str, PrincipalGrant] = {}
         for caller, entry in cast(dict[str, object], entries).items():
-            if not isinstance(entry, dict):
+            if caller not in CALLER_IDS or not isinstance(entry, dict):
                 continue
-            token_hash = cast(dict[str, object], entry).get("token_sha256")
-            if isinstance(token_hash, str):
-                result[token_hash] = caller
+            entry_dict = cast(dict[str, object], entry)
+            token_hash = entry_dict.get("token_sha256")
+            issued_at = _parse_utc_timestamp(entry_dict.get("issued_at"))
+            expires_at = _parse_utc_timestamp(entry_dict.get("expires_at"))
+            generation = entry_dict.get("generation")
+            scopes_value = entry_dict.get("scopes")
+            allowed_scopes = _SCOPES_BY_CALLER[caller]
+            if (
+                not isinstance(token_hash, str)
+                or len(token_hash) != 64
+                or any(char not in "0123456789abcdef" for char in token_hash)
+                or issued_at is None
+                or expires_at is None
+                or not isinstance(generation, int)
+                or isinstance(generation, bool)
+                or generation < 1
+                or not isinstance(scopes_value, list)
+            ):
+                continue
+            scopes = cast(list[object], scopes_value)
+            if not all(isinstance(scope, str) for scope in scopes):
+                continue
+            scope_set = frozenset(cast(list[str], scopes))
+            if not scope_set or not scope_set.issubset(allowed_scopes):
+                continue
+            if token_hash in result:
+                logger.warning("duplicate token hash in principals registry")
+                return {}
+            result[token_hash] = PrincipalGrant(
+                caller=caller,
+                issued_at=issued_at,
+                expires_at=expires_at,
+                generation=generation,
+                scopes=scope_set,
+            )
         return result
     except (json.JSONDecodeError, TypeError):
         logger.warning("principals file unreadable: %s", path)
         return {}
+
+
+def load_principals(path: Path) -> dict[str, str]:
+    """Compatibility view of valid v2 grants as sha256(token) -> caller."""
+    return {
+        token_hash: grant.caller
+        for token_hash, grant in load_principal_grants(path).items()
+    }
+
+
+def resolve_grant(
+    token: str | None, grants: dict[str, PrincipalGrant]
+) -> PrincipalGrant | None:
+    if not token:
+        return None
+    return grants.get(hash_token(token))
 
 
 def resolve_principal(token: str | None, principals: dict[str, str]) -> str | None:
@@ -75,40 +206,56 @@ def resolve_principal(token: str | None, principals: dict[str, str]) -> str | No
     return principals.get(hash_token(token))
 
 
-def get_principal(ctx: Any) -> str | None:
-    """Return the still-enrolled connection principal. None-safe and fail-closed."""
+def _bound_grant_state(
+    ctx: Any, tool: str | None = None
+) -> tuple[PrincipalGrant | None, str | None, str | None]:
     try:
         lifespan = ctx.request_context.lifespan_context
         principal = getattr(lifespan, "principal", None)
         credential_hash = getattr(lifespan, "credential_hash", None)
+        credential_generation = getattr(lifespan, "credential_generation", None)
     except AttributeError:
-        return None
+        return None, "unbound", None
     if credential_hash is None:
-        return principal
-    live_principal = load_principals(config.PRINCIPALS_PATH).get(credential_hash)
-    return principal if live_principal == principal else None
+        return None, None, principal
+    grant = load_principal_grants(config.PRINCIPALS_PATH).get(credential_hash)
+    if grant is None:
+        return None, "not_enrolled", principal
+    if grant.caller != principal:
+        return None, "principal_changed", principal
+    if credential_generation != grant.generation:
+        return None, "generation_changed", principal
+    if clock.now() >= grant.expires_at:
+        return None, "expired", principal
+    if tool is not None and tool not in grant.scopes:
+        return None, "out_of_scope", principal
+    return grant, None, principal
 
 
-def _revoked_bound_credential(ctx: Any) -> tuple[bool, str | None]:
-    try:
-        lifespan = ctx.request_context.lifespan_context
-        cached = getattr(lifespan, "principal", None)
-        credential_hash = getattr(lifespan, "credential_hash", None)
-    except AttributeError:
-        return False, None
-    return credential_hash is not None and get_principal(ctx) is None, cached
+def get_principal(ctx: Any) -> str | None:
+    """Return the still-valid bound principal. None-safe and fail-closed."""
+    grant, reason, cached = _bound_grant_state(ctx)
+    if reason is None:
+        return grant.caller if grant is not None else cached
+    return None
 
 
-def _reject_revoked_credential(ctx: Any, caller: str, tool: str) -> None:
-    revoked, cached = _revoked_bound_credential(ctx)
-    if not revoked:
+def _reject_invalid_credential(ctx: Any, caller: str, tool: str) -> None:
+    _grant, reason, cached = _bound_grant_state(ctx, tool)
+    if reason is None or (reason == "unbound" and cached is None):
         return
-    detail = f"tool={tool} principal={cached or 'unbound'} caller={caller} decision=revoked"
-    log_audit("auth.revoked", cached, None, ok=False, detail=detail)
-    logger.warning("revoked credential refused: %s", detail)
-    raise ToolError(
-        "Bound credential is no longer enrolled; restart and enroll or bind a current token"
-    )
+    detail = f"tool={tool} principal={cached or 'unbound'} caller={caller} reason={reason}"
+    event = "auth.revoked" if reason == "not_enrolled" else "auth.denied"
+    log_audit(event, cached, None, ok=False, detail=detail)
+    logger.warning("credential refused: %s", detail)
+    messages = {
+        "expired": "Bound credential has expired; enroll and bind a new credential",
+        "out_of_scope": f"Bound credential is not scoped for tool '{tool}'",
+        "generation_changed": "Bound credential generation changed; restart with the current grant",
+        "principal_changed": "Bound credential principal changed; restart with the current grant",
+        "not_enrolled": "Bound credential is no longer enrolled; restart and bind a current token",
+    }
+    raise ToolError(messages.get(reason, "Bound credential is invalid"))
 
 
 def require_bound_caller(ctx: Any, caller: str, tool: str) -> None:
@@ -118,7 +265,7 @@ def require_bound_caller(ctx: Any, caller: str, tool: str) -> None:
     compatibility dial cannot disable their identity boundary. Mismatch audit
     attribution comes from the bound principal, never the request's claim.
     """
-    _reject_revoked_credential(ctx, caller, tool)
+    _reject_invalid_credential(ctx, caller, tool)
     principal = get_principal(ctx)
     if principal == caller:
         return
@@ -141,7 +288,7 @@ def require_bound_principal(ctx: Any, tool: str) -> str:
     instead of accepting a caller claim. They still fail closed regardless of
     the rollout dial and revalidate credential enrollment before mutation.
     """
-    _reject_revoked_credential(ctx, "implicit", tool)
+    _reject_invalid_credential(ctx, "implicit", tool)
     principal = get_principal(ctx)
     if principal is not None:
         return principal
@@ -160,7 +307,7 @@ def require_caller(ctx: Any, caller: str, tool: str) -> None:
     off: no-op. warn: allow but audit mismatches. enforce: reject mismatches
     and unbound connections. Match is always silent.
     """
-    _reject_revoked_credential(ctx, caller, tool)
+    _reject_invalid_credential(ctx, caller, tool)
     mode = auth_mode()
     if mode == "off":
         return

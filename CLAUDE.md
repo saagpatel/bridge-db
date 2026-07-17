@@ -18,15 +18,19 @@ uv run python -m bridge_db --log-session-boundary bridge-db  # FTS-safe CC hook 
 uv run python -m bridge_db          # start MCP server (stdio)
 uv run python -m bridge_db.migration  # migrate from bridge markdown
 uv run python -m bridge_db --enroll cc            # enroll/rotate a principal (TTY only)
+uv run python -m bridge_db --upgrade-principals-v2  # preserve v1 hashes; add scoped 90-day grants
 uv run python -m bridge_db --list-principals      # show enrolled principals
 uv run python -m bridge_db --revoke-principal cc  # revoke a principal (TTY only)
 uv run python -m bridge_db --promote-section career  # operator label promotion (TTY only)
 uv run python -m bridge_db --promote-handoff 42      # reviewed handoff promotion (TTY only)
+uv run python -m bridge_db --cancel-handoff 42 --cancel-reason "superseded"  # unclaimed only
+uv run python -m bridge_db --quarantine-cleared-operator-handoffs  # recoverable legacy relabel
+uv run python -m bridge_db --restore-handoff-trust 42  # exact recovery image
 ```
 
 ## Architecture
 
-- **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=15000`). Schema at v21. v10 added context-section CAS and durable `write_conflicts`; v13 added handoff claimants; v14 collapsed shipped-sync state onto `activity_log`; v15-v20 added projection/export/import receipts and the bounded lifecycle index; v21 adds non-destructive exact conflict aggregation and explicit overflow counters. Auth state lives in `principals.json` (not the DB).
+- **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=15000`). Schema at v22. v21 adds non-destructive exact conflict aggregation and explicit overflow counters; v22 adds non-destructive handoff cancellation/quarantine recovery tables. Auth state lives in `principals.json` v2 (not the DB): grants expire after 90 days, carry a generation, and are limited to a caller-specific tool scope.
 - **MCP transport**: stdio (stdout = JSON-RPC, all logging → stderr)
 - **MCP tools**: verify the current count with `rg '@mcp\.tool' src/bridge_db -c`. As of the 2026-07-12 v14 collapse there are 24 tools across 10 modules: activity, handoffs, context, snapshots, cost, export, health, recall (FTS5 lexical search; Phase −1 of the semantic memory layer), audit (read-side observability over the JSONL audit + recall query logs), and conflicts (`get_write_conflicts`). The shipped-sync trio (`confirm_shipped_sync` / `record_shipped_event_disposition` / `mark_shipped_processed`) collapsed into the single `record_disposition` verb (net −2 tools). `get_recent_activity` is the raw row-level feed; `get_activity_signal` is the operator-facing feed that compresses lifecycle `session-boundary` telemetry. `health` / `status` include signals for pending handoffs, raw and actionable unprocessed shipped events, receiptless processed shipped events, FTS index drift, WAL size, and bridge-file freshness.
 - **Context access**: `get_db(ctx)` helper casts lifespan context to `aiosqlite.Connection`
@@ -69,6 +73,12 @@ uv run python -m bridge_db --promote-handoff 42      # reviewed handoff promotio
   requested operator trust. Review and promote an exact pending row with
   `--promote-handoff <id>` (TTY-only) before either Claude Code or Codex pickup;
   consuming MCP clients cannot self-confirm non-operator handoffs.
+  Version-1 registries fail closed in the new runtime; use
+  `--upgrade-principals-v2` first to preserve deployed token hashes while adding
+  issued/expiry timestamps, generation 1, and the closed caller scope.
+- **Handoff completion**: `clear_handoff` accepts only claimant-owned `active`
+  rows. Pending, foreign-claimed, and legacy NULL-claimant rows are denied.
+  Only the exact-ID operator cancellation ceremony may clear an unclaimed row.
 
 ## Gotchas
 
