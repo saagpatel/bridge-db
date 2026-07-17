@@ -17,10 +17,11 @@ or recovery artifact is deleted automatically.
 
 | Evidence | Producer | Storage | Retention | Rotation | Failure behavior | Recovery / readback | Operator visibility | Destructive action |
 |---|---|---|---|---|---|---|---|---|
-| Recall telemetry | `recall` | `recall_query_log.jsonl` plus immutable segments | Preserve all pending policy; new records contain no raw query | Locked, fsync'd, atomic rename at configured byte boundary | Telemetry failure does not break read-only recall; failure is logged to stderr | `recall_stats` scans a bounded horizon across active + segments | `health.evidence_lifecycle.recall`, including bounded legacy raw-query inventory | Legacy-query compaction, segment deletion, and external-copy cleanup require approval |
+| Recall telemetry | `recall` | `recall_query_log.jsonl` plus immutable segments | Review-only; new records contain no raw query; historical query text may be redacted only from an exact verified archive snapshot | Locked, fsync'd, atomic rename at configured byte boundary | Telemetry failure does not break read-only recall; failure is logged to stderr. Redaction writes a durable prepared receipt before publication; an incomplete transaction degrades health | `recall_stats` scans a bounded horizon across active + segments. Redaction readback proves record count, digest, and zero remaining raw-query fields | `health.evidence_lifecycle.recall` plus `dispositions`, including bounded legacy raw-query and open-transaction inventory | Record/segment deletion, archive deletion, automatic retention, and external-copy cleanup require separate approval |
 | Audit events | `log_audit` callers | `audit.jsonl` plus immutable segments | Preserve all pending policy | Locked, fsync'd, atomic rename at configured byte boundary | Primary failure writes independent minimized failure receipt and continues degraded; dual failure raises | `audit_tail` scans a bounded horizon across active + segments | `health/status/dogfood` expose bytes, segments, and degradation | Segment deletion or rewrite requires approval |
 | Audit failure receipts | `log_audit` fallback | `audit_failures.jsonl` plus immutable segments | Preserve until an operator-defined acknowledgement/reconciliation policy exists | Same lossless rotation | Failure to persist this receipt raises; no silent success | Receipt contains event digest and non-sensitive attribution, not original detail | Any receipt makes storage health non-green | Acknowledge/archive/delete policy requires approval |
-| Migration backups | Destructive schema migration hook | Verified `.bak`, `.sha256`, and `.meta.json` siblings | Operator acknowledgement required | One immutable backup per migration label | Missing/bad manifest, digest, SQLite integrity, or schema evidence blocks destructive migration/reuse | Online SQLite backup includes committed WAL state; digest + integrity + schema readback verified | `health.evidence_lifecycle.migration_backups` inventories every sibling | Backup/manifest/metadata deletion or external archival requires approval |
+| Migration backups | Destructive schema migration hook | Verified `.bak`, `.sha256`, and `.meta.json` siblings; pre-verification backups remain `legacy-unverified` | Review-only; preserve all | One immutable backup per migration label | Missing/bad manifest, digest, SQLite integrity, or schema evidence blocks destructive migration/reuse | Online SQLite backup includes committed WAL state; digest + integrity + schema readback verified. Missing historical provenance is never reconstructed retroactively | `health.evidence_lifecycle.migration_backups` inventories every sibling and its verification state | Backup/manifest/metadata deletion requires separate approval |
+| Evidence disposition receipts | Approved lifecycle operation | `evidence_dispositions.jsonl` plus immutable segments | Preserve all pending policy | Same lossless rotation | `prepared` is durable before source publication; `completed` follows readback; pre-publish failure appends `aborted`; post-publish interruption leaves an open `prepared` receipt | Latest state is reconstructed across active + rotated files | Any open or malformed transaction makes storage health non-green | Receipt deletion, reconciliation rewrite, or automatic expiry requires separate approval |
 
 ## Retention boundary
 
@@ -78,3 +79,30 @@ retention horizons and every destructive disposition remain explicit operator
 decisions. Actor and reason fields reuse the repository's established 4 KiB and
 64 KiB UTF-8 write budgets so an acknowledgement cannot become an unbounded
 single record.
+
+## Approved archive-bound raw-query redaction
+
+After an operator explicitly approves archive-and-redact for an exact snapshot,
+first run the non-mutating form:
+
+```console
+python -m bridge_db.evidence_policy redact-legacy-recall \
+  --archive /protected/archive/bridge-db-evidence \
+  --expected-snapshot-sha256 <independently-retained-plan-digest> \
+  --expected-raw-query-records <approved-count> \
+  --actor <operator> \
+  --reason <approval-reason> \
+  --dry-run
+```
+
+Only if that returns `status=would_redact` with the approved count may the same
+command use `--apply`. The operation locks the recall family, verifies that
+every source file still byte-matches the protected archive, preserves every
+JSONL record, derives `query_empty` before removing the legacy `query` field,
+and adds `query_text_redacted=true`. It atomically replaces each file, fsyncs
+the directory, and reads the result back before recording completion.
+
+This authority is narrow. It does not permit deleting telemetry records,
+rotated segments, migration backups, archive generations, disposition receipts,
+or recovery evidence; it does not enable automatic retention; and it says
+nothing about unknown external copies.

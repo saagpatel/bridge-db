@@ -84,6 +84,45 @@ async def test_health_degrades_on_durable_audit_failure_receipt(
     assert result["evidence_lifecycle"]["audit_failures"]["state"] == "degraded"
 
 
+async def test_health_degrades_on_open_evidence_disposition(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "test.db").touch()
+    config.EVIDENCE_DISPOSITION_LOG_PATH.write_text(
+        '{"transaction_id":"tx-open","status":"prepared"}\n',
+        encoding="utf-8",
+    )
+
+    result = await fns["health"](ctx=make_ctx(db))
+
+    assert result["ok"] is False
+    assert result["storage_ok"] is False
+    assert result["evidence_lifecycle"]["disposition_degraded"] is True
+    assert result["evidence_lifecycle"]["dispositions"]["open_count"] == 1
+
+
+async def test_health_accepts_completed_evidence_disposition(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "test.db").touch()
+    config.EVIDENCE_DISPOSITION_LOG_PATH.write_text(
+        '{"transaction_id":"tx-complete","status":"prepared"}\n'
+        '{"transaction_id":"tx-complete","status":"completed"}\n',
+        encoding="utf-8",
+    )
+
+    result = await fns["health"](ctx=make_ctx(db))
+
+    assert result["ok"] is True
+    assert result["storage_ok"] is True
+    assert result["evidence_lifecycle"]["disposition_degraded"] is False
+    assert result["evidence_lifecycle"]["dispositions"]["completed_count"] == 1
+
+
 async def test_health_row_counts_reflect_data(
     db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
 ) -> None:

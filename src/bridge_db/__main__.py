@@ -139,6 +139,8 @@ async def run_status(*, now: datetime | None = None) -> bool:
         f" fts_orphaned={summary['signals']['fts_orphaned']},"
         f" open_write_conflicts={summary['signals']['open_write_conflicts']},"
         f" audit_degraded={summary['signals']['audit_degraded']},"
+        " evidence_disposition_degraded="
+        f"{summary['signals']['evidence_disposition_degraded']},"
         " migration_backup_integrity_ok="
         f"{summary['signals']['migration_backup_integrity_ok']}"
     )
@@ -218,6 +220,8 @@ def _status_attention(summary: dict[str, Any]) -> str | None:
         notes.append(f"fts_orphaned={signals['fts_orphaned']}")
     if signals["audit_degraded"]:
         notes.append("audit_degraded=true")
+    if signals["evidence_disposition_degraded"]:
+        notes.append("evidence_disposition_degraded=true")
     if not signals["migration_backup_integrity_ok"]:
         notes.append("migration_backup_integrity_ok=false")
     if not notes:
@@ -299,6 +303,7 @@ async def run_dogfood() -> bool:
         f" recall_bytes={evidence['recall']['total_bytes']},"
         f" recall_segments={evidence['recall']['segment_count']},"
         f" audit_degraded={evidence['audit_degraded']},"
+        f" disposition_degraded={evidence['disposition_degraded']},"
         f" migration_backups={evidence['migration_backups']['count']},"
         f" verified_backups={evidence['migration_backups']['verified_count']}"
     )
@@ -315,6 +320,7 @@ async def run_dogfood() -> bool:
         and health["receipt_orphan_count"] == 0
         and health["disposition_orphan_count"] == 0
         and not health["evidence_lifecycle"]["audit_degraded"]
+        and not health["evidence_lifecycle"]["disposition_degraded"]
         and health["evidence_lifecycle"]["backup_integrity_ok"]
     )
 

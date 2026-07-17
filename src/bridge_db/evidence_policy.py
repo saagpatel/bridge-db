@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -25,6 +27,7 @@ from bridge_db.tools.recall import RECALL_LOG_PATH
 PLAN_SCHEMA = "EvidenceLifecyclePlanV1"
 ARCHIVE_SCHEMA = "EvidenceArchiveV1"
 ACK_SCHEMA = "EvidenceAcknowledgementV1"
+REDACTION_SCHEMA = "EvidenceRedactionReceiptV1"
 _COPY_CHUNK_BYTES = 1024 * 1024
 
 
@@ -110,6 +113,7 @@ def _validate_distinct_family_paths() -> None:
         "recall": RECALL_LOG_PATH.absolute(),
         "audit_failure": config.AUDIT_FAILURE_LOG_PATH.absolute(),
         "lifecycle_acknowledgement": config.EVIDENCE_ACK_LOG_PATH.absolute(),
+        "evidence_disposition": config.EVIDENCE_DISPOSITION_LOG_PATH.absolute(),
     }
     if len(set(families.values())) != len(families):
         raise EvidencePolicyError("configured evidence family paths must be distinct")
@@ -128,6 +132,12 @@ def collect_evidence_plan() -> dict[str, Any]:
         _family_artifacts(
             config.EVIDENCE_ACK_LOG_PATH,
             kind="lifecycle_acknowledgement",
+        )
+    )
+    artifacts.extend(
+        _family_artifacts(
+            config.EVIDENCE_DISPOSITION_LOG_PATH,
+            kind="evidence_disposition",
         )
     )
     for backup in sorted(config.DB_PATH.parent.glob(f"{config.DB_PATH.name}.*.bak")):
@@ -238,12 +248,12 @@ def _secure_and_fsync_archive_directories(root: Path) -> None:
             os.close(fd)
 
 
-def verify_evidence_archive(
+def _verify_evidence_archive_manifest(
     archive_path: Path,
     *,
     expected_snapshot_sha256: str,
-) -> dict[str, Any]:
-    """Verify archive contents against an independently retained plan digest."""
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return a verification summary and the exact manifest bytes it verified."""
     manifest_path = archive_path / "manifest.json"
     digest_path = archive_path / "manifest.sha256"
     try:
@@ -292,14 +302,30 @@ def verify_evidence_archive(
         if (size, digest) != (expected_bytes, expected_sha256):
             raise EvidencePolicyError(f"archive artifact digest mismatch: {relative}")
         verified += 1
-    return {
-        "ok": True,
-        "schema": ARCHIVE_SCHEMA,
-        "snapshot_sha256": snapshot_sha256,
-        "artifact_count": verified,
-        "source_preserved": True,
-        "destructive_authority": False,
-    }
+    return (
+        {
+            "ok": True,
+            "schema": ARCHIVE_SCHEMA,
+            "snapshot_sha256": snapshot_sha256,
+            "artifact_count": verified,
+            "source_preserved": True,
+            "destructive_authority": False,
+        },
+        manifest,
+    )
+
+
+def verify_evidence_archive(
+    archive_path: Path,
+    *,
+    expected_snapshot_sha256: str,
+) -> dict[str, Any]:
+    """Verify archive contents against an independently retained plan digest."""
+    result, _ = _verify_evidence_archive_manifest(
+        archive_path,
+        expected_snapshot_sha256=expected_snapshot_sha256,
+    )
+    return result
 
 
 def create_evidence_archive(
@@ -408,6 +434,234 @@ def acknowledge_evidence_plan(
     return receipt
 
 
+def _load_verified_archive_manifest(
+    archive_path: Path, *, expected_snapshot_sha256: str
+) -> dict[str, Any]:
+    _, manifest = _verify_evidence_archive_manifest(
+        archive_path,
+        expected_snapshot_sha256=expected_snapshot_sha256,
+    )
+    return manifest
+
+
+def _redact_recall_jsonl(content: bytes) -> tuple[bytes, int, int]:
+    records: list[bytes] = []
+    record_count = 0
+    redacted_count = 0
+    for line_number, line in enumerate(content.splitlines(), start=1):
+        if not line:
+            raise EvidencePolicyError(
+                f"recall JSONL contains blank record at line {line_number}"
+            )
+        try:
+            raw: object = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise EvidencePolicyError(
+                f"recall JSONL is invalid at line {line_number}"
+            ) from exc
+        if not isinstance(raw, dict):
+            raise EvidencePolicyError(
+                f"recall JSONL record is not an object at line {line_number}"
+            )
+        record = cast(dict[str, Any], raw)
+        query = record.get("query")
+        if isinstance(query, str):
+            record["query_empty"] = not bool(query.strip())
+            record["query_text_redacted"] = True
+            del record["query"]
+            redacted_count += 1
+        records.append(_canonical_json(record))
+        record_count += 1
+    return (
+        b"\n".join(records) + (b"\n" if records else b""),
+        record_count,
+        redacted_count,
+    )
+
+
+def _append_redaction_receipt(receipt: dict[str, Any]) -> None:
+    append_jsonl_durable(
+        config.EVIDENCE_DISPOSITION_LOG_PATH,
+        receipt,
+        rotate_bytes=config.AUDIT_LOG_ROTATE_BYTES,
+    )
+
+
+def redact_legacy_recall_queries(
+    *,
+    archive_path: Path,
+    expected_snapshot_sha256: str,
+    expected_raw_query_records: int,
+    actor: str,
+    reason: str,
+    apply: bool,
+) -> dict[str, Any]:
+    """Archive-bound atomic redaction that preserves records and aggregates."""
+    if expected_raw_query_records < 0:
+        raise EvidencePolicyError("expected raw-query count must be non-negative")
+    if not actor.strip() or not reason.strip():
+        raise EvidencePolicyError("actor and reason are required")
+    if len(actor.strip().encode("utf-8")) > config.EVIDENCE_ACK_ACTOR_MAX_BYTES:
+        raise EvidencePolicyError("redaction actor exceeds UTF-8 byte limit")
+    if len(reason.strip().encode("utf-8")) > config.EVIDENCE_ACK_REASON_MAX_BYTES:
+        raise EvidencePolicyError("redaction reason exceeds UTF-8 byte limit")
+
+    lock_path = RECALL_LOG_PATH.with_name(f".{RECALL_LOG_PATH.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+    replacements: list[tuple[Path, Path, bytes, str, str, int]] = []
+    published = 0
+    prepared_written = False
+    transaction_id = secrets.token_hex(16)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        manifest = _load_verified_archive_manifest(
+            archive_path,
+            expected_snapshot_sha256=expected_snapshot_sha256,
+        )
+        archive_artifacts_raw = manifest.get("artifacts")
+        if not isinstance(archive_artifacts_raw, list):
+            raise EvidencePolicyError("archive artifact inventory is invalid")
+        archive_artifacts: dict[str, dict[str, Any]] = {}
+        for raw_item in cast(list[object], archive_artifacts_raw):
+            if not isinstance(raw_item, dict):
+                continue
+            item = cast(dict[str, Any], raw_item)
+            if item.get("kind") == "recall":
+                archive_artifacts[str(item.get("source_path"))] = item
+
+        total_records = 0
+        total_redacted = 0
+        for source in jsonl_family_paths(RECALL_LOG_PATH):
+            artifact = archive_artifacts.get(str(source))
+            if artifact is None:
+                raise EvidencePolicyError(
+                    f"recall evidence is not present in verified archive: {source}"
+                )
+            current = source.read_bytes()
+            pre_sha256 = hashlib.sha256(current).hexdigest()
+            if pre_sha256 != artifact.get("sha256") or len(current) != artifact.get(
+                "bytes"
+            ):
+                raise EvidencePolicyError(
+                    f"recall evidence changed after verified archive: {source}"
+                )
+            redacted, record_count, redacted_count = _redact_recall_jsonl(current)
+            post_sha256 = hashlib.sha256(redacted).hexdigest()
+            total_records += record_count
+            total_redacted += redacted_count
+            temporary = source.with_name(
+                f".{source.name}.redact.{os.getpid()}.{secrets.token_hex(6)}"
+            )
+            replacements.append(
+                (
+                    source,
+                    temporary,
+                    redacted,
+                    pre_sha256,
+                    post_sha256,
+                    record_count,
+                )
+            )
+
+        if total_redacted != expected_raw_query_records:
+            raise EvidencePolicyError(
+                "raw-query count changed: "
+                f"expected={expected_raw_query_records} actual={total_redacted}"
+            )
+        result = {
+            "schema": REDACTION_SCHEMA,
+            "mode": "apply" if apply else "dry_run",
+            "transaction_id": transaction_id,
+            "archive_snapshot_sha256": expected_snapshot_sha256,
+            "source_file_count": len(replacements),
+            "record_count": total_records,
+            "raw_query_records": total_redacted,
+            "records_deleted": 0,
+            "source_archive_preserved": True,
+            "legacy_backups_preserved": True,
+            "automatic_retention": "disabled",
+        }
+        if not apply:
+            return {**result, "status": "would_redact"}
+        if total_redacted == 0:
+            return {**result, "status": "already_redacted"}
+
+        prepared = {
+            "schema": REDACTION_SCHEMA,
+            "timestamp": clock.now().isoformat(),
+            "transaction_id": transaction_id,
+            "status": "prepared",
+            "actor": actor.strip(),
+            "reason": reason.strip(),
+            "archive_snapshot_sha256": expected_snapshot_sha256,
+            "archive_path": str(archive_path),
+            "source_files": [
+                {
+                    "path": str(source),
+                    "pre_sha256": pre_sha256,
+                    "post_sha256": post_sha256,
+                    "record_count": record_count,
+                }
+                for source, _, _, pre_sha256, post_sha256, record_count in replacements
+            ],
+            "raw_query_records": total_redacted,
+            "records_deleted": 0,
+        }
+        _append_redaction_receipt(prepared)
+        prepared_written = True
+
+        for source, temporary, redacted, _, _, _ in replacements:
+            _write_durable_file(temporary, redacted)
+            os.replace(temporary, source)
+            published += 1
+        parent_fd = os.open(RECALL_LOG_PATH.parent, os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+
+        for source, _, _, _, expected_post_sha256, expected_records in replacements:
+            readback = source.read_bytes()
+            _, actual_records, actual_raw_queries = _redact_recall_jsonl(readback)
+            if (
+                hashlib.sha256(readback).hexdigest() != expected_post_sha256
+                or actual_records != expected_records
+                or actual_raw_queries != 0
+            ):
+                raise EvidencePolicyError(f"redaction readback failed: {source}")
+        completed = {
+            **prepared,
+            "timestamp": clock.now().isoformat(),
+            "status": "completed",
+        }
+        _append_redaction_receipt(completed)
+        return {**result, "status": "completed"}
+    except Exception:
+        if prepared_written and published == 0:
+            with contextlib.suppress(Exception):
+                _append_redaction_receipt(
+                    {
+                        "schema": REDACTION_SCHEMA,
+                        "timestamp": clock.now().isoformat(),
+                        "transaction_id": transaction_id,
+                        "status": "aborted",
+                        "actor": actor.strip(),
+                        "raw_query_records": expected_raw_query_records,
+                        "records_deleted": 0,
+                    }
+                )
+        raise
+    finally:
+        for _, temporary, _, _, _, _ in replacements:
+            with contextlib.suppress(OSError):
+                temporary.unlink(missing_ok=True)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m bridge_db.evidence_policy")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -431,6 +685,18 @@ def main() -> None:
     acknowledge.add_argument("--expected-snapshot-sha256", required=True)
     acknowledge.add_argument("--actor", required=True)
     acknowledge.add_argument("--reason", required=True)
+    redact = subparsers.add_parser(
+        "redact-legacy-recall",
+        help="Replace archived legacy query text without deleting telemetry records",
+    )
+    redact.add_argument("--archive", type=Path, required=True)
+    redact.add_argument("--expected-snapshot-sha256", required=True)
+    redact.add_argument("--expected-raw-query-records", type=int, required=True)
+    redact.add_argument("--actor", required=True)
+    redact.add_argument("--reason", required=True)
+    redact_mode = redact.add_mutually_exclusive_group(required=True)
+    redact_mode.add_argument("--dry-run", action="store_true")
+    redact_mode.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -446,11 +712,20 @@ def main() -> None:
                 args.archive,
                 expected_snapshot_sha256=args.expected_snapshot_sha256,
             )
-        else:
+        elif args.command == "acknowledge":
             result = acknowledge_evidence_plan(
                 expected_snapshot_sha256=args.expected_snapshot_sha256,
                 actor=args.actor,
                 reason=args.reason,
+            )
+        else:
+            result = redact_legacy_recall_queries(
+                archive_path=args.archive,
+                expected_snapshot_sha256=args.expected_snapshot_sha256,
+                expected_raw_query_records=args.expected_raw_query_records,
+                actor=args.actor,
+                reason=args.reason,
+                apply=args.apply,
             )
     except EvidencePolicyError as exc:
         print(f"evidence lifecycle refused: {exc}", file=sys.stderr)

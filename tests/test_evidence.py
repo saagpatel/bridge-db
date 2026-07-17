@@ -16,6 +16,7 @@ from bridge_db import evidence as evidence_mod
 from bridge_db.audit import AuditUnavailableError
 from bridge_db.evidence import (
     append_jsonl_durable,
+    evidence_disposition_inventory,
     evidence_file_inventory,
     iter_jsonl_family_reverse,
     legacy_raw_query_inventory,
@@ -214,3 +215,61 @@ def test_legacy_query_inventory_never_rediscloses_query_text(tmp_path: Path) -> 
     assert inventory["raw_query_records"] == 1
     assert inventory["cleanup"] == "approval_required"
     assert sentinel not in json.dumps(inventory)
+
+
+def test_disposition_inventory_flags_open_prepared_transaction(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "evidence_dispositions.jsonl"
+    append_jsonl_durable(
+        path,
+        {"transaction_id": "tx-open", "status": "prepared"},
+        rotate_bytes=1,
+    )
+
+    inventory = evidence_disposition_inventory(path)
+
+    assert inventory["transaction_count"] == 1
+    assert inventory["open_count"] == 1
+    assert inventory["completed_count"] == 0
+    assert inventory["state"] == "degraded"
+    assert inventory["destructive_cleanup"] == "approval_required"
+
+
+def test_disposition_inventory_uses_latest_transaction_state_across_rotation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "evidence_dispositions.jsonl"
+    append_jsonl_durable(
+        path,
+        {"transaction_id": "tx-complete", "status": "prepared"},
+        rotate_bytes=1,
+    )
+    append_jsonl_durable(
+        path,
+        {"transaction_id": "tx-complete", "status": "completed"},
+        rotate_bytes=1,
+    )
+
+    inventory = evidence_disposition_inventory(path)
+
+    assert inventory["transaction_count"] == 1
+    assert inventory["open_count"] == 0
+    assert inventory["completed_count"] == 1
+    assert inventory["state"] == "clear"
+
+
+def test_disposition_inventory_never_claims_clear_from_truncated_scan(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "evidence_dispositions.jsonl"
+    append_jsonl_durable(
+        path,
+        {"transaction_id": "tx-complete", "status": "completed"},
+        rotate_bytes=1024,
+    )
+
+    inventory = evidence_disposition_inventory(path, scan_bytes=1)
+
+    assert inventory["scan_truncated"] is True
+    assert inventory["state"] == "degraded"

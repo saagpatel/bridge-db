@@ -131,6 +131,16 @@ EVIDENCE_ACK_LOG_PATH: Path = Path(
 EVIDENCE_ACK_ACTOR_MAX_BYTES: int = ACTIVITY_PROJECT_NAME_MAX_BYTES
 EVIDENCE_ACK_REASON_MAX_BYTES: int = ACTIVITY_SUMMARY_MAX_BYTES
 
+# Append-only prepared/completed/aborted receipts for approved evidence
+# dispositions. An unmatched prepared receipt degrades health so a crash cannot
+# make a partial rewrite look complete.
+EVIDENCE_DISPOSITION_LOG_PATH: Path = Path(
+    os.environ.get(
+        "BRIDGE_DB_EVIDENCE_DISPOSITION_LOG_PATH",
+        str(DB_PATH.parent / "evidence_dispositions.jsonl"),
+    )
+)
+
 # Canonical project-identity registry emitted by GithubRepoAuditor. Read-only
 # consumer input for resolving project_name -> canonical key on write. If absent,
 # resolution is a no-op (pass-through) and logging behaviour is unchanged.
