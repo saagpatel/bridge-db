@@ -19,17 +19,61 @@ from bridge_db.db import (
 )
 from bridge_db.tools.export import ContextExportSnapshot, build_markdown, export_bridge_file
 
+LEGACY_FINGERPRINT_VERSION = "snapshot-v1"
+CURRENT_FINGERPRINT_VERSION = "manifest-v2"
+_FINGERPRINT_COMPATIBILITY_KEY = "_fingerprint_compatibility"
+
 
 def load_manifest(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
+    return _validate_manifest(data)
+
+
+def _validate_manifest(data: dict[str, Any]) -> dict[str, Any]:
     required = {"fingerprint", "snapshot_date", "snapshot_payload", "baseline_activity"}
     missing = sorted(required.difference(data))
     if missing:
         raise ValueError(f"manifest missing required keys: {', '.join(missing)}")
-    expected_fingerprint = _fingerprint_snapshot(data["snapshot_payload"])
+    version_value = data.get("fingerprint_version")
+    implicit_legacy = version_value is None
+    if implicit_legacy:
+        version = LEGACY_FINGERPRINT_VERSION
+    elif not isinstance(version_value, str):
+        raise ValueError("unsupported fingerprint_version: expected a string")
+    else:
+        version = version_value
+
+    if version == LEGACY_FINGERPRINT_VERSION:
+        expected_fingerprint = _fingerprint_snapshot(data["snapshot_payload"])
+        compatibility_state = (
+            "legacy_implicit_v1" if implicit_legacy else "legacy_explicit_v1"
+        )
+        covered_fields = ["snapshot_payload"]
+    elif version == CURRENT_FINGERPRINT_VERSION:
+        expected_fingerprint = fingerprint_manifest_v2(data)
+        compatibility_state = "current_v2"
+        covered_fields = [
+            "fingerprint_version",
+            "snapshot_date",
+            "snapshot_payload",
+            "baseline_activity",
+        ]
+    else:
+        raise ValueError(f"unsupported fingerprint_version: {version!r}")
+
     if data["fingerprint"] != expected_fingerprint:
-        raise ValueError("manifest fingerprint does not match snapshot_payload")
-    return data
+        raise ValueError(
+            f"manifest fingerprint does not match {version} signed content"
+        )
+
+    validated = dict(data)
+    validated[_FINGERPRINT_COMPATIBILITY_KEY] = {
+        "version": version,
+        "state": compatibility_state,
+        "covered_fields": covered_fields,
+        "upgrade_required": version != CURRENT_FINGERPRINT_VERSION,
+    }
+    return validated
 
 
 def _stable_json(value: Any) -> str:
@@ -38,6 +82,17 @@ def _stable_json(value: Any) -> str:
 
 def _fingerprint_snapshot(payload: dict[str, Any]) -> str:
     return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
+
+
+def fingerprint_manifest_v2(manifest: dict[str, Any]) -> str:
+    """Return the v2 digest over every operator-reviewed seed field."""
+    signed_content = {
+        "fingerprint_version": CURRENT_FINGERPRINT_VERSION,
+        "snapshot_date": manifest["snapshot_date"],
+        "snapshot_payload": manifest["snapshot_payload"],
+        "baseline_activity": manifest["baseline_activity"],
+    }
+    return hashlib.sha256(_stable_json(signed_content).encode("utf-8")).hexdigest()
 
 
 async def _latest_codex_snapshot_payload(db: Any) -> dict[str, Any] | None:
@@ -91,6 +146,8 @@ async def _baseline_activity_state(db: Any, entry: dict[str, Any]) -> str:
 
 
 async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, Any]:
+    manifest = _validate_manifest(manifest)
+    fingerprint_compatibility = manifest[_FINGERPRINT_COMPATIBILITY_KEY]
     db = await open_db(config.DB_PATH)
     try:
         snapshot_payload = manifest["snapshot_payload"]
@@ -106,6 +163,7 @@ async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, A
                 "dry_run": dry_run,
                 "snapshot_write": "blocked_conflict",
                 "activity_write": "conflict",
+                "fingerprint_compatibility": fingerprint_compatibility,
                 "bridge_file": str(config.BRIDGE_FILE_PATH),
             }
 
@@ -191,6 +249,7 @@ async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, A
             "dry_run": dry_run,
             "snapshot_write": snapshot_write,
             "activity_write": activity_write,
+            "fingerprint_compatibility": fingerprint_compatibility,
             "bridge_file": str(config.BRIDGE_FILE_PATH),
         }
     finally:
