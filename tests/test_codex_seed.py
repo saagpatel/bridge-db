@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 
 from bridge_db import config
-from bridge_db.codex_seed import apply_manifest, load_manifest
+from bridge_db.codex_seed import (
+    CURRENT_FINGERPRINT_VERSION,
+    LEGACY_FINGERPRINT_VERSION,
+    apply_manifest,
+    fingerprint_manifest_v2,
+    load_manifest,
+)
 from bridge_db.db import open_db
 
 
@@ -19,7 +25,7 @@ def make_manifest() -> dict[str, object]:
         "active_projects": "- ResumeEvolver",
     }
     return {
-        "fingerprint": "2f7765f0a535ffce7f64a314294f5bc3eb0f4c6452860ea06073dd9406f25d0a",
+        "fingerprint": "f393a8e9e5fee06654af9e28f7b3a3b33a850911c22394e30ebe272c7c0c1f5a",
         "snapshot_date": "2026-04-14",
         "snapshot_payload": snapshot_payload,
         "baseline_activity": {
@@ -46,6 +52,16 @@ def make_variant_manifest() -> dict[str, object]:
         "summary": "Seeded Codex baseline from corrected reconciled truth.",
         "tags": ["BASELINE", "CODEX-STATE", "TRUTH-RECONCILED"],
     }
+    manifest["fingerprint"] = (
+        "0fca697e6281b8c47e2232a8e29a38760d614e13994470c4766ee18a6f5a0d10"
+    )
+    return manifest
+
+
+def make_v2_manifest() -> dict[str, object]:
+    manifest = make_manifest()
+    manifest["fingerprint_version"] = CURRENT_FINGERPRINT_VERSION
+    manifest["fingerprint"] = fingerprint_manifest_v2(manifest)
     return manifest
 
 
@@ -65,6 +81,106 @@ def test_load_manifest_rejects_mismatched_fingerprint(tmp_path: Path) -> None:
         load_manifest(path)
 
 
+def test_load_manifest_reports_implicit_legacy_v1(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(make_manifest()), encoding="utf-8")
+
+    loaded = load_manifest(path)
+
+    assert loaded["_fingerprint_compatibility"] == {
+        "version": LEGACY_FINGERPRINT_VERSION,
+        "state": "legacy_implicit_v1",
+        "covered_fields": ["snapshot_payload"],
+        "upgrade_required": True,
+    }
+
+
+def test_load_manifest_reports_explicit_legacy_v1(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.json"
+    manifest = make_manifest()
+    manifest["fingerprint_version"] = LEGACY_FINGERPRINT_VERSION
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    loaded = load_manifest(path)
+
+    assert loaded["_fingerprint_compatibility"]["state"] == "legacy_explicit_v1"
+
+
+def test_load_manifest_accepts_current_v2(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(make_v2_manifest()), encoding="utf-8")
+
+    loaded = load_manifest(path)
+
+    assert loaded["_fingerprint_compatibility"] == {
+        "version": CURRENT_FINGERPRINT_VERSION,
+        "state": "current_v2",
+        "covered_fields": [
+            "fingerprint_version",
+            "snapshot_date",
+            "snapshot_payload",
+            "baseline_activity",
+        ],
+        "upgrade_required": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("snapshot_date", "2026-04-15"),
+        (
+            "baseline_activity",
+            {
+                "caller": "codex",
+                "timestamp": "2026-04-14",
+                "project_name": "bridge-baseline-seed",
+                "summary": "Tampered after review.",
+                "tags": ["BASELINE"],
+            },
+        ),
+    ],
+)
+def test_load_manifest_v2_rejects_reviewed_field_tampering(
+    tmp_path: Path, field: str, replacement: object
+) -> None:
+    path = tmp_path / "manifest.json"
+    manifest = make_v2_manifest()
+    manifest[field] = replacement
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="manifest-v2 signed content"):
+        load_manifest(path)
+
+
+@pytest.mark.parametrize("version", ["manifest-v3", 2, {"version": 2}])
+def test_load_manifest_rejects_unknown_fingerprint_versions(
+    tmp_path: Path, version: object
+) -> None:
+    path = tmp_path / "manifest.json"
+    manifest = make_manifest()
+    manifest["fingerprint_version"] = version
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unsupported fingerprint_version"):
+        load_manifest(path)
+
+
+@pytest.mark.asyncio
+async def test_apply_manifest_rejects_unknown_version_before_opening_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    manifest = make_manifest()
+    manifest["fingerprint_version"] = "manifest-v3"
+
+    with pytest.raises(ValueError, match="unsupported fingerprint_version"):
+        await apply_manifest(manifest, dry_run=False)
+
+    assert not db_path.exists()
+
+
 @pytest.mark.asyncio
 async def test_codex_seed_dry_run_reports_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -80,6 +196,7 @@ async def test_codex_seed_dry_run_reports_writes(
     result = await apply_manifest(make_manifest(), dry_run=True)
     assert result["snapshot_write"] == "would_insert"
     assert result["activity_write"] == "would_insert"
+    assert result["fingerprint_compatibility"]["state"] == "legacy_implicit_v1"
 
 
 @pytest.mark.asyncio
