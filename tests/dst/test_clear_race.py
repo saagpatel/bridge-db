@@ -1,23 +1,9 @@
-"""Phase 2 scenario: clear_handoff (cc) racing pick_up_handoff (codex) on one
-pending handoff — the INV-3 / INV-13 clear boundary (R4 WC-2).
+"""Claimant-only clear racing a legitimate pickup on one pending handoff.
 
-This is the first corpus scenario that drives clear_handoff, closing the
-`clear_refused_foreign_claim` coverage gap called out in
-test_sometimes_coverage (Phase 2 scenario debt).
-
-The clear reads the row as 'pending' (clearable), but a concurrent claim can
-flip it to 'active'/claimed_by='codex' before the clear's guarded UPDATE
-lands. The UPDATE's status/claimant guard then matches 0 rows and the
-post-update recheck refuses it (clear_handoff.py's race branch →
-`clear_refused_foreign_claim`). If instead the clear commits first, the
-claim sees a non-'pending' row and loses with a durable receipt.
-
-Per-seed oracle (hostile control): the handoff starts 'pending' and only
-these two writers mutate it, so EXACTLY one wins — the terminal row is
-either 'cleared' (clear won; claim lost with a stale_claim or raced_claim
-receipt) or 'active'/claimed_by='codex' (claim won; clear refused with
-clear_refused_foreign_claim). Both-lost is impossible unless the guard is
-broken (INV-3 + INV-13 + no-silent-loss). INV-3's always() must never trip.
+Pending rows are no longer clearable through MCP. Across every schedule the
+clear is refused and the pickup is the sole possible state transition, leaving
+the row active and claimed by codex. This corpus case proves the denial is
+stable under concurrency instead of depending on SELECT/UPDATE ordering.
 """
 
 import asyncio
@@ -41,9 +27,7 @@ from dst.sim import (
     trace_hash,
 )
 
-# Pinned to the cheapest seed whose interleaving lets the claim win the
-# clear's read/write window, driving the refused branch (discovered by the
-# sweep below). Replays the clear-race TOCTOU forever via regress_seeds.txt.
+# Pinned to the cheapest seed in the deterministic corpus.
 CLEAR_REFUSED_SEED = 0
 SEED_SWEEP = range(0, 30)
 
@@ -110,7 +94,7 @@ async def _claim_writer(
 
 
 async def run_clear_race(base: Path, seed: int) -> dict[str, Any]:
-    """One seeded run; per-seed oracle asserts INV-3 / INV-13 / no-loss inside."""
+    """One seeded run; per-seed oracle asserts claimant-only completion."""
     sim_clock = SimClock()
     rng = Random(seed)
     trace: list[TraceEvent] = []
@@ -155,41 +139,20 @@ async def run_clear_race(base: Path, seed: int) -> dict[str, Any]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT status, claimed_by FROM pending_handoffs").fetchone()
-    stale = conn.execute(
-        "SELECT COUNT(*) AS n FROM write_conflicts WHERE reason = 'stale_claim'"
-    ).fetchone()["n"]
-    raced = conn.execute(
-        "SELECT COUNT(*) AS n FROM write_conflicts WHERE reason = 'raced_claim'"
-    ).fetchone()["n"]
     conn.close()
 
     clear_outcome = results["clear"]["outcome"]
     claim_outcome = results["claim"]["outcome"]
     assert row is not None
 
-    if clear_outcome == "cleared":
-        # Clear won: the claim must have lost, and lost with a durable receipt
-        # (no silent loss). The terminal row is 'cleared'.
-        assert claim_outcome in ("claim_lost_precheck", "claim_lost_raced"), (
-            f"seed {seed}: clear won but claim outcome={claim_outcome}"
-        )
-        assert row["status"] == "cleared", f"seed {seed}: status={row['status']}"
-        assert stale + raced >= 1, f"seed {seed}: claim lost silently (no receipt)"
-    elif clear_outcome == "clear_refused":
-        # Claim won the window: clear's guarded UPDATE missed, the row is
-        # 'active' claimed by codex, and the refusal fired its label.
-        assert claim_outcome == "claim_won", (
-            f"seed {seed}: clear refused but claim outcome={claim_outcome}"
-        )
-        assert row["status"] == "active", f"seed {seed}: status={row['status']}"
-        assert row["claimed_by"] == "codex", (
-            f"seed {seed}: claimed_by={row['claimed_by']}"
-        )
-    else:
-        raise AssertionError(
-            f"seed {seed}: handoff exists, so clear must clear or be refused, "
-            f"got clear_outcome={clear_outcome}"
-        )
+    assert clear_outcome == "clear_refused", (
+        f"seed {seed}: pending clear was not refused: {clear_outcome}"
+    )
+    assert claim_outcome == "claim_won", (
+        f"seed {seed}: legitimate claimant did not win: {claim_outcome}"
+    )
+    assert row["status"] == "active", f"seed {seed}: status={row['status']}"
+    assert row["claimed_by"] == "codex", f"seed {seed}: claimed_by={row['claimed_by']}"
 
     return {
         "clear": clear_outcome,
@@ -199,46 +162,23 @@ async def run_clear_race(base: Path, seed: int) -> dict[str, Any]:
     }
 
 
-async def test_clear_refused_rederived(tmp_path: Path) -> None:
-    """Pinned half: the racing seed re-derives the clear-race TOCTOU — the claim
-    commits between clear_handoff's SELECT and its guarded UPDATE, the UPDATE
-    matches 0 rows, and the post-update recheck refuses the clear
-    (clear_refused_race, a strict subset of clear_refused_foreign_claim). The
-    before/after delta proves the pinned seed hits the RACE branch, not a
-    static foreign refusal decided before the clear ever read the row."""
+async def test_pending_clear_refused_rederived(tmp_path: Path) -> None:
+    """The pinned seed refuses pending clear and preserves the claimant transition."""
     from bridge_db.invariants import sometimes_counts
 
-    before = sometimes_counts().get("clear_refused_race", 0)
     outcome = await run_clear_race(tmp_path, CLEAR_REFUSED_SEED)
-    after = sometimes_counts().get("clear_refused_race", 0)
     assert outcome["clear"] == "clear_refused"
     assert outcome["claim"] == "claim_won"
-    assert after > before, "pinned seed did not hit the clear-race branch"
     assert sometimes_counts().get("clear_refused_foreign_claim")
 
 
-async def test_clear_race_both_directions_reachable(tmp_path: Path) -> None:
-    """The oracle holds on every sweep seed AND the sweep reaches BOTH winners
-    — clear-wins and claim-wins — proving neither branch is vacuous. At least
-    one claim-win must hit the true post-UPDATE race branch, not only the
-    static foreign-refusal path."""
-    from bridge_db.invariants import sometimes_counts
-
-    before = sometimes_counts().get("clear_refused_race", 0)
-    clear_won: list[int] = []
-    claim_won: list[int] = []
+async def test_pending_clear_denial_is_schedule_independent(tmp_path: Path) -> None:
+    """Every seeded interleaving converges to the same authority outcome."""
     for seed in SEED_SWEEP:
         outcome = await run_clear_race(tmp_path, seed)
-        if outcome["clear"] == "cleared":
-            clear_won.append(seed)
-        elif outcome["clear"] == "clear_refused":
-            claim_won.append(seed)
-    assert clear_won, "no seed let the clear win — clear-wins branch is vacuous"
-    assert claim_won, "no seed drove the refused clear — the coverage gap is still open"
-    assert sometimes_counts().get("clear_refused_race", 0) > before, (
-        "no sweep seed hit the clear-race TOCTOU branch — the scenario only "
-        "exercises static foreign refusals, not the INV-3 clear race"
-    )
+        assert outcome["clear"] == "clear_refused"
+        assert outcome["claim"] == "claim_won"
+        assert outcome["status"] == "active"
 
 
 async def test_clear_race_replay_is_bit_identical(tmp_path: Path) -> None:

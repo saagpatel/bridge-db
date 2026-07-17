@@ -16,9 +16,15 @@ from bridge_db.models import SourceTrust
 def write_principals(path: Path, entries: dict[str, str]) -> None:
     """Write a principals file mapping caller id -> raw token (hashed on write)."""
     payload = {
-        "version": 1,
+        "version": 2,
         "principals": {
-            caller: {"token_sha256": auth.hash_token(token), "enrolled_at": "2026-06-12T00:00:00Z"}
+            caller: {
+                "token_sha256": auth.hash_token(token),
+                "issued_at": "2026-06-12T00:00:00Z",
+                "expires_at": "2099-06-12T00:00:00Z",
+                "generation": 1,
+                "scopes": sorted(auth.scopes_for_caller(caller)),
+            }
             for caller, token in entries.items()
         },
     }
@@ -106,29 +112,43 @@ def test_load_principals_skips_malformed_entries(tmp_path: Path) -> None:
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
     loaded = auth.load_principals(path)
-    assert loaded == {auth.hash_token("token-cc"): "cc"}
+    assert loaded == {}
 
 
 class _FakeLifespan:
     def __init__(
-        self, principal: str | None, credential_hash: str | None = None
+        self,
+        principal: str | None,
+        credential_hash: str | None = None,
+        credential_generation: int | None = None,
     ) -> None:
         self.principal = principal
         self.credential_hash = credential_hash
+        self.credential_generation = credential_generation
 
 
 class _FakeRequestContext:
     def __init__(
-        self, principal: str | None, credential_hash: str | None = None
+        self,
+        principal: str | None,
+        credential_hash: str | None = None,
+        credential_generation: int | None = None,
     ) -> None:
-        self.lifespan_context = _FakeLifespan(principal, credential_hash)
+        self.lifespan_context = _FakeLifespan(
+            principal, credential_hash, credential_generation
+        )
 
 
 class _FakeCtx:
     def __init__(
-        self, principal: str | None, credential_hash: str | None = None
+        self,
+        principal: str | None,
+        credential_hash: str | None = None,
+        credential_generation: int | None = None,
     ) -> None:
-        self.request_context = _FakeRequestContext(principal, credential_hash)
+        self.request_context = _FakeRequestContext(
+            principal, credential_hash, credential_generation
+        )
 
 
 def audit_events() -> list[dict[str, object]]:
@@ -207,7 +227,7 @@ def test_active_session_revalidates_enrollment_after_revocation(
     write_principals(principals_path, {"cc": "token-cc"})
     monkeypatch.setattr(config, "PRINCIPALS_PATH", principals_path)
     monkeypatch.setattr(config, "AUTH_MODE", mode)
-    ctx = _FakeCtx("cc", auth.hash_token("token-cc"))
+    ctx = _FakeCtx("cc", auth.hash_token("token-cc"), 1)
 
     auth.require_caller(ctx, "cc", tool="log_activity")
     write_principals(principals_path, {})
@@ -218,6 +238,84 @@ def test_active_session_revalidates_enrollment_after_revocation(
         auth.require_bound_caller(ctx, "cc", tool="record_cost")
     events = [event for event in audit_events() if event["tool"] == "auth.revoked"]
     assert len(events) == 2
+
+
+def test_runtime_rejects_legacy_v1_registry(tmp_path: Path) -> None:
+    path = tmp_path / "principals.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "principals": {
+                    "cc": {
+                        "token_sha256": auth.hash_token("token-cc"),
+                        "enrolled_at": "2026-06-12T00:00:00Z",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert auth.load_principals(path) == {}
+
+
+def test_expired_grant_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "principals.json"
+    write_principals(path, {"cc": "token-cc"})
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["principals"]["cc"]["expires_at"] = "2000-01-01T00:00:00Z"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(config, "PRINCIPALS_PATH", path)
+    ctx = _FakeCtx("cc", auth.hash_token("token-cc"), 1)
+
+    with pytest.raises(ToolError, match="expired"):
+        auth.require_bound_caller(ctx, "cc", tool="log_activity")
+    event = audit_events()[0]
+    assert event["tool"] == "auth.denied"
+    assert "reason=expired" in str(event["detail"])
+
+
+def test_out_of_scope_grant_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "principals.json"
+    write_principals(path, {"cc": "token-cc"})
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["principals"]["cc"]["scopes"] = ["record_cost"]
+    path.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(config, "PRINCIPALS_PATH", path)
+    ctx = _FakeCtx("cc", auth.hash_token("token-cc"), 1)
+
+    with pytest.raises(ToolError, match="not scoped"):
+        auth.require_bound_caller(ctx, "cc", tool="log_activity")
+
+
+def test_generation_change_invalidates_active_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "principals.json"
+    write_principals(path, {"cc": "token-cc"})
+    monkeypatch.setattr(config, "PRINCIPALS_PATH", path)
+    ctx = _FakeCtx("cc", auth.hash_token("token-cc"), 1)
+    auth.require_bound_caller(ctx, "cc", tool="log_activity")
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["principals"]["cc"]["generation"] = 2
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(ToolError, match="generation changed"):
+        auth.require_bound_caller(ctx, "cc", tool="log_activity")
+
+
+def test_scope_matrix_is_least_privilege() -> None:
+    assert "create_handoff" in auth.scopes_for_caller("claude_ai")
+    assert "create_handoff" not in auth.scopes_for_caller("cc")
+    assert "update_section" not in auth.scopes_for_caller("codex")
+    assert "sync_from_file" in auth.scopes_for_caller("cc")
+    assert "sync_from_file" not in auth.scopes_for_caller("personal_ops")
+    assert "export_bridge_markdown" in auth.scopes_for_caller("personal_ops")
 
 
 @pytest.mark.parametrize("mode", ["warn", "enforce"])

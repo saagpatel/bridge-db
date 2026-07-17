@@ -8,7 +8,7 @@ import os
 import secrets
 import sys
 import tempfile
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from bridge_db import clock
@@ -493,7 +493,7 @@ def _write_principals_file(data: dict[str, Any]) -> None:
 def run_enroll(caller: str) -> bool:
     """Generate a token for one caller, store its hash, print the token once."""
     from bridge_db.audit import log_audit
-    from bridge_db.auth import hash_token
+    from bridge_db.auth import GRANT_TTL_DAYS, hash_token, scopes_for_caller
     from bridge_db.models import CALLER_IDS
 
     if caller not in CALLER_IDS:
@@ -504,10 +504,22 @@ def run_enroll(caller: str) -> bool:
 
     token = secrets.token_urlsafe(32)
     data = _read_principals_file()
+    if data.get("version") != 2 and data["principals"]:
+        print("refused: upgrade the existing registry with --upgrade-principals-v2")
+        return False
     rotated = caller in data["principals"]
+    previous = data["principals"].get(caller, {})
+    previous_generation = previous.get("generation", 0)
+    generation = previous_generation + 1 if isinstance(previous_generation, int) else 1
+    issued_at = clock.now().astimezone(UTC)
+    expires_at = issued_at + timedelta(days=GRANT_TTL_DAYS)
+    data["version"] = 2
     data["principals"][caller] = {
         "token_sha256": hash_token(token),
-        "enrolled_at": clock.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "issued_at": issued_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "expires_at": expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generation": generation,
+        "scopes": scopes_for_caller(caller),
     }
     _write_principals_file(data)
     log_audit("auth.enroll", caller, None, ok=True, detail=f"rotated={rotated}")
@@ -518,6 +530,86 @@ def run_enroll(caller: str) -> bool:
     print("  Set this token in the client's MCP spawn env (shown once, not stored):")
     print(f"  token: {token}")
     print("  env:   BRIDGE_DB_PRINCIPAL_TOKEN")
+    return True
+
+
+def run_upgrade_principals_v2() -> bool:
+    """Preserve v1 token hashes while adding expiring, scoped v2 grants."""
+    from bridge_db import config
+    from bridge_db.audit import log_audit
+    from bridge_db.auth import GRANT_TTL_DAYS, scopes_for_caller
+    from bridge_db.models import CALLER_IDS
+
+    if not _require_tty("upgrade-principals-v2"):
+        return False
+    data = _read_principals_file()
+    if data.get("version") == 2:
+        print("principals registry is already version 2")
+        return True
+    if data.get("version") != 1:
+        print(f"refused: unsupported principals registry version {data.get('version')!r}")
+        return False
+
+    principals = cast(dict[str, Any], data["principals"])
+    for caller, entry in principals.items():
+        entry_dict = cast(dict[str, Any], entry) if isinstance(entry, dict) else {}
+        token_hash = entry_dict.get("token_sha256")
+        if (
+            caller not in CALLER_IDS
+            or not isinstance(token_hash, str)
+            or len(token_hash) != 64
+            or any(char not in "0123456789abcdef" for char in token_hash)
+        ):
+            print(f"refused: malformed v1 principal entry for {caller!r}")
+            return False
+
+    print(f"upgrade principals registry v1 -> v2 ({len(principals)} grants)")
+    try:
+        confirmed = input("Type 'upgrade' to preserve hashes and add 90-day grants: ")
+    except EOFError:
+        confirmed = ""
+    if confirmed.strip() != "upgrade":
+        print("upgrade cancelled")
+        return False
+
+    backup = config.PRINCIPALS_PATH.with_name(
+        f"{config.PRINCIPALS_PATH.name}.pre-v2.bak"
+    )
+    if not backup.exists() and config.PRINCIPALS_PATH.exists():
+        raw = config.PRINCIPALS_PATH.read_text(encoding="utf-8")
+        fd, tmp = tempfile.mkstemp(dir=backup.parent)
+        try:
+            os.chmod(tmp, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(raw)
+            os.replace(tmp, backup)
+        except Exception:
+            os.unlink(tmp)
+            raise
+
+    issued_at = clock.now().astimezone(UTC)
+    expires_at = issued_at + timedelta(days=GRANT_TTL_DAYS)
+    upgraded: dict[str, Any] = {"version": 2, "principals": {}}
+    for caller, entry in principals.items():
+        upgraded["principals"][caller] = {
+            "token_sha256": entry["token_sha256"],
+            "issued_at": issued_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "expires_at": expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "generation": 1,
+            "scopes": scopes_for_caller(caller),
+        }
+    _write_principals_file(upgraded)
+    log_audit(
+        "auth.registry_upgrade",
+        "operator-cli",
+        None,
+        ok=True,
+        detail=f"version=1->2 grants={len(principals)} ttl_days={GRANT_TTL_DAYS}",
+    )
+    print(
+        f"upgraded {len(principals)} grants to v2; existing token hashes preserved "
+        f"through {expires_at.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+    )
     return True
 
 
@@ -545,7 +637,10 @@ def run_list_principals() -> bool:
     print("enrolled principals")
     for caller, entry in sorted(data["principals"].items()):
         print(
-            f"  {caller}: enrolled_at={entry.get('enrolled_at', '?')}, "
+            f"  {caller}: issued_at={entry.get('issued_at', entry.get('enrolled_at', '?'))}, "
+            f"expires_at={entry.get('expires_at', '?')}, "
+            f"generation={entry.get('generation', '?')}, "
+            f"scopes={','.join(entry.get('scopes', [])) or '?'}, "
             f"hash={str(entry.get('token_sha256', ''))[:8]}…"
         )
     return True
@@ -781,6 +876,334 @@ async def run_promote_handoff(handoff_id: int) -> bool:
     return True
 
 
+def _handoff_row_payload(row: Any) -> dict[str, Any]:
+    return {field: row[field] for field in _HANDOFF_PROMOTION_FIELDS}
+
+
+def _handoff_row_json(row: Any) -> str:
+    return json.dumps(_handoff_row_payload(row), sort_keys=True, separators=(",", ":"))
+
+
+def _handoff_row_digest(row: Any) -> str:
+    return hashlib.sha256(_handoff_row_json(row).encode("utf-8")).hexdigest()
+
+
+async def _select_handoff(db: Any, handoff_id: int) -> Any:
+    cursor = await db.execute(
+        "SELECT id, project_name, project_path, roadmap_file, phase, "
+        "dispatched_from, dispatched_at, picked_up_at, cleared_at, "
+        "canonical_key, source_trust, status, claimed_by "
+        "FROM pending_handoffs WHERE id = ?",
+        (handoff_id,),
+    )
+    return await cursor.fetchone()
+
+
+async def run_cancel_handoff(handoff_id: int, reason: str) -> bool:
+    """Cancel one unclaimed handoff through an exact-row operator ceremony."""
+    from bridge_db import config
+    from bridge_db.audit import log_audit
+    from bridge_db.db import open_db
+
+    clean_reason = reason.strip()
+    if handoff_id <= 0 or not clean_reason:
+        print("refused: cancellation requires a positive handoff id and a reason")
+        return False
+    if not _require_tty("cancel-handoff"):
+        return False
+
+    db = await open_db(config.DB_PATH)
+    reviewed_digest: str | None = None
+    project_name: str | None = None
+    previous_status: str | None = None
+    try:
+        row = await _select_handoff(db, handoff_id)
+        if row is None:
+            print(f"no stored handoff {handoff_id}")
+            return False
+        if row["status"] == "active" and row["claimed_by"] is not None:
+            print(
+                f"refused: handoff {handoff_id} is claimed by {row['claimed_by']}; "
+                "the claimant owns completion"
+            )
+            return False
+        if row["status"] not in ("pending", "active"):
+            print(f"refused: handoff {handoff_id} is already {row['status']}")
+            return False
+        reviewed_digest = _handoff_row_digest(row)
+        project_name = cast(str, row["project_name"])
+        previous_status = cast(str, row["status"])
+        print(
+            f"cancel handoff id={handoff_id} project={json.dumps(project_name)} "
+            f"status={previous_status} claimant={row['claimed_by']} "
+            f"sha256={reviewed_digest} reason={json.dumps(clean_reason)}"
+        )
+        try:
+            confirmed = input("Type 'cancel' to clear this exact unclaimed handoff: ")
+        except EOFError:
+            confirmed = ""
+        if confirmed.strip() != "cancel":
+            print("cancellation cancelled")
+            return False
+
+        await db.execute("BEGIN IMMEDIATE")
+        current = await _select_handoff(db, handoff_id)
+        if current is None or _handoff_row_digest(current) != reviewed_digest:
+            await db.rollback()
+            print("refused: handoff changed after review; inspect it again")
+            return False
+        cursor = await db.execute(
+            "UPDATE pending_handoffs "
+            "SET status = 'cleared', cleared_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+            "WHERE id = ? AND status = ? AND claimed_by IS NULL",
+            (handoff_id, previous_status),
+        )
+        if cursor.rowcount != 1:
+            await db.rollback()
+            print("refused: handoff changed before cancellation")
+            return False
+        await db.execute(
+            """
+            INSERT INTO handoff_cancellation_receipts (
+                handoff_id, reason, previous_status, previous_claimant,
+                reviewed_row_sha256, cancelled_by
+            ) VALUES (?, ?, ?, NULL, ?, 'operator-cli')
+            """,
+            (handoff_id, clean_reason, previous_status, reviewed_digest),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    log_audit(
+        "handoff.operator_cancel",
+        "operator-cli",
+        project_name,
+        ok=True,
+        detail=(
+            f"handoff_id={handoff_id} previous_status={previous_status} "
+            f"sha256={reviewed_digest}"
+        ),
+    )
+    print(f"cancelled handoff {handoff_id}; durable receipt recorded")
+    return True
+
+
+async def run_quarantine_cleared_operator_handoffs() -> bool:
+    """Relabel legacy cleared operator rows while preserving exact recovery images."""
+    from bridge_db import config
+    from bridge_db.audit import log_audit
+    from bridge_db.db import open_db
+
+    if not _require_tty("quarantine-cleared-operator-handoffs"):
+        return False
+    db = await open_db(config.DB_PATH)
+    reviewed: dict[int, tuple[str, str]] = {}
+    try:
+        cursor = await db.execute(
+            "SELECT id, project_name, project_path, roadmap_file, phase, "
+            "dispatched_from, dispatched_at, picked_up_at, cleared_at, "
+            "canonical_key, source_trust, status, claimed_by "
+            "FROM pending_handoffs "
+            "WHERE status = 'cleared' AND source_trust = 'operator' "
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM handoff_trust_quarantine AS q "
+            "WHERE q.handoff_id = pending_handoffs.id"
+            ") "
+            "ORDER BY id"
+        )
+        rows = list(await cursor.fetchall())
+        if not rows:
+            print("no cleared operator-trust handoffs require quarantine")
+            return True
+        for row in rows:
+            row_json = _handoff_row_json(row)
+            digest = hashlib.sha256(row_json.encode("utf-8")).hexdigest()
+            reviewed[int(row["id"])] = (row_json, digest)
+            print(
+                f"quarantine handoff id={row['id']} "
+                f"project={json.dumps(row['project_name'])} sha256={digest}"
+            )
+        try:
+            confirmed = input(
+                f"Type 'quarantine' to preserve and relabel {len(rows)} exact rows: "
+            )
+        except EOFError:
+            confirmed = ""
+        if confirmed.strip() != "quarantine":
+            print("quarantine cancelled")
+            return False
+
+        await db.execute("BEGIN IMMEDIATE")
+        cursor = await db.execute(
+            "SELECT id, project_name, project_path, roadmap_file, phase, "
+            "dispatched_from, dispatched_at, picked_up_at, cleared_at, "
+            "canonical_key, source_trust, status, claimed_by "
+            "FROM pending_handoffs "
+            "WHERE status = 'cleared' AND source_trust = 'operator' "
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM handoff_trust_quarantine AS q "
+            "WHERE q.handoff_id = pending_handoffs.id"
+            ") "
+            "ORDER BY id"
+        )
+        current_rows = list(await cursor.fetchall())
+        current = {
+            int(row["id"]): (
+                _handoff_row_json(row),
+                _handoff_row_digest(row),
+            )
+            for row in current_rows
+        }
+        if current != reviewed:
+            await db.rollback()
+            print("refused: quarantine set changed after review; inspect it again")
+            return False
+        for row in current_rows:
+            handoff_id = int(row["id"])
+            row_json, digest = reviewed[handoff_id]
+            await db.execute(
+                """
+                INSERT INTO handoff_trust_quarantine (
+                    handoff_id, row_json, row_sha256, previous_source_trust,
+                    quarantined_by
+                ) VALUES (?, ?, ?, 'operator', 'operator-cli')
+                """,
+                (handoff_id, row_json, digest),
+            )
+            updated = await db.execute(
+                "UPDATE pending_handoffs SET source_trust = 'ingested' "
+                "WHERE id = ? AND status = 'cleared' AND source_trust = 'operator'",
+                (handoff_id,),
+            )
+            if updated.rowcount != 1:
+                await db.rollback()
+                print(f"refused: handoff {handoff_id} changed before quarantine")
+                return False
+        await db.commit()
+    finally:
+        await db.close()
+
+    log_audit(
+        "handoff.trust_quarantine",
+        "operator-cli",
+        None,
+        ok=True,
+        detail=f"rows={len(reviewed)} ids={sorted(reviewed)}",
+    )
+    print(f"quarantined {len(reviewed)} cleared operator-trust handoffs")
+    return True
+
+
+async def run_restore_handoff_trust(handoff_id: int) -> bool:
+    """Restore one quarantined row only when its complete state still matches."""
+    from bridge_db import config
+    from bridge_db.audit import log_audit
+    from bridge_db.db import open_db
+
+    if handoff_id <= 0:
+        print("refused: handoff id must be a positive integer")
+        return False
+    if not _require_tty("restore-handoff-trust"):
+        return False
+    db = await open_db(config.DB_PATH)
+    stored_digest: str | None = None
+    project_name: str | None = None
+    try:
+        receipt = await (
+            await db.execute(
+                "SELECT row_json, row_sha256, restored_at "
+                "FROM handoff_trust_quarantine WHERE handoff_id = ?",
+                (handoff_id,),
+            )
+        ).fetchone()
+        if receipt is None or receipt["restored_at"] is not None:
+            print(f"no active quarantine recovery image for handoff {handoff_id}")
+            return False
+        row = await _select_handoff(db, handoff_id)
+        if row is None or row["source_trust"] != "ingested":
+            print("refused: current handoff is missing or no longer quarantined")
+            return False
+        stored = cast(dict[str, Any], json.loads(cast(str, receipt["row_json"])))
+        stored_row_json = cast(str, receipt["row_json"])
+        stored_digest = cast(str, receipt["row_sha256"])
+        if hashlib.sha256(stored_row_json.encode("utf-8")).hexdigest() != stored_digest:
+            print("refused: quarantine recovery image failed digest verification")
+            return False
+        current = _handoff_row_payload(row)
+        current["source_trust"] = "operator"
+        if current != stored:
+            print("refused: current handoff differs from the recovery image")
+            return False
+        project_name = cast(str, row["project_name"])
+        try:
+            confirmed = input(
+                f"Type 'restore' to restore operator trust for handoff {handoff_id}: "
+            )
+        except EOFError:
+            confirmed = ""
+        if confirmed.strip() != "restore":
+            print("restore cancelled")
+            return False
+
+        await db.execute("BEGIN IMMEDIATE")
+        locked_receipt = await (
+            await db.execute(
+                "SELECT row_json, row_sha256, restored_at "
+                "FROM handoff_trust_quarantine WHERE handoff_id = ?",
+                (handoff_id,),
+            )
+        ).fetchone()
+        if (
+            locked_receipt is None
+            or locked_receipt["restored_at"] is not None
+            or locked_receipt["row_json"] != stored_row_json
+            or locked_receipt["row_sha256"] != stored_digest
+        ):
+            await db.rollback()
+            print("refused: quarantine recovery image changed before restore")
+            return False
+        current_row = await _select_handoff(db, handoff_id)
+        if current_row is None:
+            await db.rollback()
+            print("refused: handoff disappeared before restore")
+            return False
+        current_payload = _handoff_row_payload(current_row)
+        current_payload["source_trust"] = "operator"
+        if current_payload != stored:
+            await db.rollback()
+            print("refused: handoff changed before restore")
+            return False
+        cursor = await db.execute(
+            "UPDATE pending_handoffs SET source_trust = 'operator' "
+            "WHERE id = ? AND source_trust = 'ingested'",
+            (handoff_id,),
+        )
+        if cursor.rowcount != 1:
+            await db.rollback()
+            print("refused: handoff trust changed before restore")
+            return False
+        await db.execute(
+            "UPDATE handoff_trust_quarantine "
+            "SET restored_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+            "WHERE handoff_id = ? AND restored_at IS NULL",
+            (handoff_id,),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    log_audit(
+        "handoff.trust_restore",
+        "operator-cli",
+        project_name,
+        ok=True,
+        detail=f"handoff_id={handoff_id} sha256={stored_digest}",
+    )
+    print(f"restored operator trust for handoff {handoff_id}")
+    return True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="bridge-db")
     parser.add_argument(
@@ -832,6 +1255,11 @@ def main() -> None:
         "--list-principals", action="store_true", help="List enrolled principals"
     )
     parser.add_argument(
+        "--upgrade-principals-v2",
+        action="store_true",
+        help="Preserve v1 token hashes and add scoped, expiring v2 grants (operator TTY only)",
+    )
+    parser.add_argument(
         "--promote-section",
         metavar="SECTION",
         help="Set a context section's source_trust to 'operator' (operator TTY only)",
@@ -841,6 +1269,27 @@ def main() -> None:
         metavar="ID",
         type=int,
         help="Review and promote a pending handoff to operator trust (operator TTY only)",
+    )
+    parser.add_argument(
+        "--cancel-handoff",
+        metavar="ID",
+        type=int,
+        help="Cancel one exact unclaimed handoff (operator TTY only)",
+    )
+    parser.add_argument(
+        "--cancel-reason",
+        help="Required durable reason for --cancel-handoff",
+    )
+    parser.add_argument(
+        "--quarantine-cleared-operator-handoffs",
+        action="store_true",
+        help="Preserve and relabel cleared legacy operator handoffs (operator TTY only)",
+    )
+    parser.add_argument(
+        "--restore-handoff-trust",
+        metavar="ID",
+        type=int,
+        help="Restore one exact quarantined handoff recovery image (operator TTY only)",
     )
     args, _ = parser.parse_known_args()
 
@@ -873,10 +1322,28 @@ def main() -> None:
         sys.exit(0 if run_revoke_principal(args.revoke_principal) else 1)
     if args.list_principals:
         sys.exit(0 if run_list_principals() else 1)
+    if args.upgrade_principals_v2:
+        sys.exit(0 if run_upgrade_principals_v2() else 1)
     if args.promote_section:
         sys.exit(0 if asyncio.run(run_promote_section(args.promote_section)) else 1)
     if args.promote_handoff is not None:
         sys.exit(0 if asyncio.run(run_promote_handoff(args.promote_handoff)) else 1)
+    if args.cancel_handoff is not None:
+        if not args.cancel_reason:
+            parser.error("--cancel-handoff requires --cancel-reason")
+        sys.exit(
+            0
+            if asyncio.run(run_cancel_handoff(args.cancel_handoff, args.cancel_reason))
+            else 1
+        )
+    if args.quarantine_cleared_operator_handoffs:
+        sys.exit(
+            0 if asyncio.run(run_quarantine_cleared_operator_handoffs()) else 1
+        )
+    if args.restore_handoff_trust is not None:
+        sys.exit(
+            0 if asyncio.run(run_restore_handoff_trust(args.restore_handoff_trust)) else 1
+        )
 
     from bridge_db.server import mcp
 

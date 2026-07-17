@@ -436,7 +436,13 @@ async def test_clear_handoff_by_project_name(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
     ctx = make_ctx(db)
-    await fns["create_handoff"](caller="claude_ai", project_name="MyProject", ctx=ctx)
+    created = await fns["create_handoff"](
+        caller="claude_ai", project_name="MyProject", ctx=ctx
+    )
+    await _promote_handoff_for_test(db, created["handoff_id"])
+    await fns["pick_up_handoff"](
+        caller="cc", handoff_id=created["handoff_id"], ctx=ctx
+    )
 
     result = await fns["clear_handoff"](caller="cc", project_name="MyProject", ctx=ctx)
     assert result["ok"] is True
@@ -463,8 +469,8 @@ async def test_clear_handoff_by_project_name(
     assert receipt["claimed_caller"] == "cc"
     assert receipt["requested_project_name"] == "MyProject"
     assert receipt["match_basis"] == "exact"
-    assert receipt["previous_status"] == "pending"
-    assert receipt["previous_claimant"] is None
+    assert receipt["previous_status"] == "active"
+    assert receipt["previous_claimant"] == "cc"
 
 
 async def test_clear_handoff_clears_all_matching_rows(
@@ -486,17 +492,16 @@ async def test_clear_handoff_clears_all_matching_rows(
 
     assert result["ok"] is True
     assert result["cleared"] is True
-    assert result["cleared_count"] == 2
-    assert sorted(result["handoff_ids"]) == sorted(
-        [first["handoff_id"], second["handoff_id"]]
-    )
+    assert result["cleared_count"] == 1
+    assert result["handoff_ids"] == [second["handoff_id"]]
+    assert result["refused_ids"] == [first["handoff_id"]]
 
     cursor = await db.execute(
         "SELECT COUNT(*) FROM pending_handoffs WHERE project_name='MyProject' AND status != 'cleared'"
     )
     row = await cursor.fetchone()
     assert row is not None
-    assert row[0] == 0
+    assert row[0] == 1
 
 
 async def test_clear_handoff_missing_project_returns_ok(
@@ -691,7 +696,7 @@ async def test_clear_allows_own_active_claim(
     assert row is not None and row["status"] == "cleared"
 
 
-async def test_clear_allows_unclaimed_pending(
+async def test_clear_refuses_unclaimed_pending(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
     ctx = make_ctx(db)
@@ -705,11 +710,17 @@ async def test_clear_allows_unclaimed_pending(
     result = await fns["clear_handoff"](
         caller="cc", project_name="NeverClaimed", ctx=ctx
     )
-    assert result["cleared"] is True
-    assert result["refused_count"] == 0
+    assert result["cleared"] is False
+    assert result["refused_count"] == 1
+    assert result["reason"] == "Matched handoffs require claimant-owned active state"
+    cursor = await db.execute(
+        "SELECT status FROM pending_handoffs WHERE project_name = 'NeverClaimed'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None and row["status"] == "pending"
 
 
-async def test_clear_allows_legacy_null_claimant_active(
+async def test_clear_refuses_legacy_null_claimant_active(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
     ctx = make_ctx(db)
@@ -735,8 +746,16 @@ async def test_clear_allows_legacy_null_claimant_active(
     result = await fns["clear_handoff"](
         caller="cc", project_name="LegacyActive", ctx=ctx
     )
-    assert result["cleared"] is True
-    assert result["cleared_count"] == 1
+    assert result["cleared"] is False
+    assert result["refused_count"] == 1
+    cursor = await db.execute(
+        "SELECT status, claimed_by FROM pending_handoffs WHERE id = ?",
+        (created["handoff_id"],),
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["status"] == "active"
+    assert row["claimed_by"] is None
 
 
 async def test_pick_up_records_claimant(
@@ -863,6 +882,10 @@ async def test_clear_handoff_matches_canonical_alias(
     ctx = make_ctx(db)
     created = await fns["create_handoff"](
         caller="claude_ai", project_name="IncidentMgmt", ctx=ctx
+    )
+    await _promote_handoff_for_test(db, created["handoff_id"])
+    await fns["pick_up_handoff"](
+        caller="cc", handoff_id=created["handoff_id"], ctx=ctx
     )
 
     # 'IncidentManagement' != the stored project_name, so this clears ONLY via the
@@ -1019,8 +1042,12 @@ async def test_clear_handoff_canonical_does_not_overmatch_other_projects(
     keep = await fns["create_handoff"](
         caller="claude_ai", project_name="weekly-review", ctx=ctx
     )
-    await fns["create_handoff"](
+    incident = await fns["create_handoff"](
         caller="claude_ai", project_name="IncidentMgmt", ctx=ctx
+    )
+    await _promote_handoff_for_test(db, incident["handoff_id"])
+    await fns["pick_up_handoff"](
+        caller="cc", handoff_id=incident["handoff_id"], ctx=ctx
     )
 
     result = await fns["clear_handoff"](

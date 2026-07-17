@@ -1147,7 +1147,7 @@ async def test_health_reports_auth_block(
     assert metrics["auth"] == {
         "mode": "warn",
         "principals_file_exists": True,
-        "principals_enrolled": 1,
+        "principals_enrolled": 0,
     }
 
 

@@ -6,10 +6,12 @@ import argparse
 import asyncio
 import hashlib
 import json
+import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from bridge_db import config
+from bridge_db import clock, config
 from bridge_db.db import (
     fts_text_for_activity,
     fts_text_for_snapshot,
@@ -22,6 +24,10 @@ from bridge_db.tools.export import ContextExportSnapshot, build_markdown, export
 LEGACY_FINGERPRINT_VERSION = "snapshot-v1"
 CURRENT_FINGERPRINT_VERSION = "manifest-v2"
 _FINGERPRINT_COMPATIBILITY_KEY = "_fingerprint_compatibility"
+LEGACY_FINGERPRINT_SUNSET = datetime(2026, 8, 18, tzinfo=UTC)
+LEGACY_FINGERPRINT_SUNSET_TEXT = "2026-08-18T00:00:00Z"
+
+logger = logging.getLogger("bridge_db.codex_seed")
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
@@ -44,6 +50,15 @@ def _validate_manifest(data: dict[str, Any]) -> dict[str, Any]:
         version = version_value
 
     if version == LEGACY_FINGERPRINT_VERSION:
+        if clock.now() >= LEGACY_FINGERPRINT_SUNSET:
+            raise ValueError(
+                "legacy fingerprint compatibility expired at "
+                f"{LEGACY_FINGERPRINT_SUNSET_TEXT}; use manifest-v2"
+            )
+        logger.warning(
+            "legacy seed fingerprint accepted before sunset=%s; upgrade to manifest-v2",
+            LEGACY_FINGERPRINT_SUNSET_TEXT,
+        )
         expected_fingerprint = _fingerprint_snapshot(data["snapshot_payload"])
         compatibility_state = (
             "legacy_implicit_v1" if implicit_legacy else "legacy_explicit_v1"
@@ -67,12 +82,15 @@ def _validate_manifest(data: dict[str, Any]) -> dict[str, Any]:
         )
 
     validated = dict(data)
-    validated[_FINGERPRINT_COMPATIBILITY_KEY] = {
+    compatibility = {
         "version": version,
         "state": compatibility_state,
         "covered_fields": covered_fields,
         "upgrade_required": version != CURRENT_FINGERPRINT_VERSION,
     }
+    if version == LEGACY_FINGERPRINT_VERSION:
+        compatibility["sunset_at"] = LEGACY_FINGERPRINT_SUNSET_TEXT
+    validated[_FINGERPRINT_COMPATIBILITY_KEY] = compatibility
     return validated
 
 

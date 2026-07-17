@@ -489,15 +489,11 @@ def register(mcp: FastMCP) -> None:
         """Clear a handoff by project name (mark as done). Called by /end after completing project work.
 
         Identity gate: the claimed caller must exactly match the channel-bound
-        principal in every rollout mode. Claimant gate (INV-13): 'pending' rows
-        (never claimed) are always
-        clearable — /finish and /bank clear opportunistically by project name
-        from sessions that never claimed, and that contract is preserved.
-        'active' rows are clearable only when claimed_by is NULL (legacy
-        pre-v13 rows) or equals that verified identity. Refusals are reported, not raised:
-        ok stays True and the response carries refused_ids/refused_count —
-        deliberately asymmetric with pick_up_handoff's hard refusals, to match
-        this tool's opportunistic no-op contract.
+        principal in every rollout mode. Claimant gate: only an active handoff
+        whose claimed_by value equals that verified identity may transition to
+        cleared. Pending and legacy active rows without a claimant require the
+        exact-ID operator cancellation ceremony. Refusals are reported, not
+        raised: ok stays True and the response carries refused_ids/refused_count.
 
         Scope honesty: all cc windows share one principal, so the claimant gate
         protects cross-role clears (cc <-> codex), not same-role session ownership.
@@ -555,15 +551,10 @@ def register(mcp: FastMCP) -> None:
                 handoff_id=row["id"],
                 status=row["status"],
             )
-            claimant = row["claimed_by"]
-            if (
-                row["status"] == "active"
-                and claimant is not None
-                and claimant != gate_identity
-            ):
-                refused_ids.append(row["id"])
-            else:
+            if row["status"] == "active" and row["claimed_by"] == gate_identity:
                 clearable_ids.append(row["id"])
+            else:
+                refused_ids.append(row["id"])
 
         if clearable_ids:
             id_placeholders = ", ".join("?" for _ in clearable_ids)
@@ -572,13 +563,8 @@ def register(mcp: FastMCP) -> None:
                 UPDATE pending_handoffs
                 SET status = 'cleared', cleared_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
                 WHERE id IN ({id_placeholders})
-                  AND (
-                      status = 'pending'
-                      OR (
-                          status = 'active'
-                          AND (claimed_by IS NULL OR claimed_by = ?)
-                      )
-                  )
+                  AND status = 'active'
+                  AND claimed_by = ?
                 """,
                 [*clearable_ids, gate_identity],
             )
@@ -590,10 +576,8 @@ def register(mcp: FastMCP) -> None:
                 clearable_ids,
             )
             race_refused_ids = [row["id"] for row in await cursor.fetchall()]
-            # INV-3/INV-13 clear-race counter: the guarded UPDATE matched 0 rows
-            # because a concurrent claim changed claimed_by between this call's
-            # SELECT and its UPDATE — distinct from a static foreign refusal
-            # decided in the loop above (both feed clear_refused_foreign_claim).
+            # The guarded UPDATE repeats the complete claimant predicate. Any
+            # out-of-band state change after the SELECT becomes a refusal.
             sometimes("clear_refused_race", bool(race_refused_ids))
             if race_refused_ids:
                 refused_ids.extend(race_refused_ids)
@@ -642,7 +626,7 @@ def register(mcp: FastMCP) -> None:
             return {
                 "ok": True,
                 "cleared": False,
-                "reason": "All matched handoffs are actively claimed by another identity",
+                "reason": "Matched handoffs require claimant-owned active state",
                 "refused_ids": refused_ids,
                 "refused_count": len(refused_ids),
                 "project_name": project_name,
