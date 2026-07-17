@@ -338,6 +338,12 @@ All principals may use read-side tools for bridge-owned state:
 `get_pending_handoffs`, `get_section`, `get_all_sections`, `get_latest_snapshot`,
 `get_cost_history`, `recall`, `recall_stats`, and `audit_tail`.
 
+`health` and `status` also expose `evidence_lifecycle`. JSONL rotation is
+lossless and does not imply retention deletion. An `audit_degraded` signal means
+the primary audit projection failed and an independent durable failure receipt
+exists; generic storage health remains non-green until that evidence is
+reconciled under an approved operator policy.
+
 | Principal | Write capabilities | Boundaries |
 |---|---|---|
 | `codex` | `log_activity(caller="codex")`, `save_snapshot(caller="codex")`, `record_cost(caller="codex")`, source-owned `record_disposition(caller="codex")`, and `pick_up_handoff`/`clear_handoff` where their gates allow it | Owns Codex truth and verification; must not write or refresh `cc` snapshots or Claude.ai sections |

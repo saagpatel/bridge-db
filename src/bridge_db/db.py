@@ -12,7 +12,7 @@ from typing import Any, NamedTuple, cast
 
 import aiosqlite
 
-from bridge_db import config
+from bridge_db import clock, config
 
 logger = logging.getLogger("bridge_db.db")
 
@@ -712,6 +712,7 @@ async def _backup_db_file(db: aiosqlite.Connection, label: str) -> None:
         return
     backup = Path(f"{main_path}.{label}.bak")
     manifest = Path(f"{backup}.sha256")
+    metadata = Path(f"{backup}.meta.json")
     version_row = await (await db.execute("PRAGMA user_version")).fetchone()
     expected_version = int(version_row[0]) if version_row is not None else -1
 
@@ -744,18 +745,44 @@ async def _backup_db_file(db: aiosqlite.Connection, label: str) -> None:
     await db.commit()
     temporary = Path(f"{backup}.tmp")
     temporary.unlink(missing_ok=True)
+    temporary_manifest = Path(f"{manifest}.tmp")
+    temporary_manifest.unlink(missing_ok=True)
+    temporary_metadata = Path(f"{metadata}.tmp")
+    temporary_metadata.unlink(missing_ok=True)
     target = sqlite3.connect(temporary)
     try:
         await db.backup(target)
     finally:
         target.close()
-    temporary_manifest = Path(f"{manifest}.tmp")
     temporary_manifest.write_text(
         hashlib.sha256(temporary.read_bytes()).hexdigest() + "\n", encoding="utf-8"
     )
+    temporary_metadata.write_text(
+        json.dumps(
+            {
+                "schema": "MigrationBackupEvidenceV1",
+                "created_at": clock.now().isoformat().replace("+00:00", "Z"),
+                "label": label,
+                "source_schema_version": expected_version,
+                "backup_bytes": temporary.stat().st_size,
+                "sha256": temporary_manifest.read_text(encoding="utf-8").strip(),
+                "sqlite_integrity": "ok",
+                "recovery_readback": "verified",
+                "retention_policy": "operator_acknowledgement_required",
+                "cleanup": "approval_required",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(temporary, 0o600)
+    os.chmod(temporary_manifest, 0o600)
+    os.chmod(temporary_metadata, 0o600)
     validate(temporary, temporary_manifest)
     os.replace(temporary, backup)
     os.replace(temporary_manifest, manifest)
+    os.replace(temporary_metadata, metadata)
     logger.info("migration backup written to %s", backup)
 
 

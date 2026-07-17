@@ -143,3 +143,18 @@ async def test_audit_tail_enforces_reverse_scan_byte_budget(
     results = await fns["audit_tail"](limit=10)
 
     assert [record["project"] for record in results] == ["inside-budget"]
+
+
+async def test_audit_tail_reads_across_lossless_rotation(
+    fns: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(config, "AUDIT_LOG_ROTATE_BYTES", 1)
+    audit.log_audit("log_activity", "cc", "before-rotation", ok=True)
+    audit.log_audit("log_activity", "cc", "after-rotation", ok=True)
+
+    results = await fns["audit_tail"](limit=10)
+
+    assert [record["project"] for record in results] == [
+        "after-rotation",
+        "before-rotation",
+    ]

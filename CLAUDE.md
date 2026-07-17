@@ -97,6 +97,14 @@ uv run python -m bridge_db --promote-handoff 42      # reviewed handoff promotio
   creation without deleting rows. `get_pending_handoffs` pages with `limit` +
   `before_id`.
 - **Semantic memory scope closed**: FTS5 + `recall` is the final layer (Phase −1). Vector/embedding layers are ruled out — most query misses reflect content not in `bridge.db`. See closure banner in `docs/internal/bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md`.
+- **Durable evidence lifecycle**: audit and minimized recall telemetry use
+  locked, fsync'd, lossless active-file rotation; no segment is automatically
+  deleted. A primary audit-write failure creates an independent minimized
+  durable receipt and degrades health; if both evidence paths fail,
+  `AuditUnavailableError` prevents a silent auditable-success claim. Verified
+  migration backups include digest/integrity/schema readback plus metadata and
+  remain approval-gated for cleanup. See
+  `docs/internal/EVIDENCE-LIFECYCLE.md`.
 - **FTS drift repair**: `--rebuild-content-index` is the CLI-only repair path; FTS index drift is treated as a hard health failure because `recall` depends on `content_index` mirroring source tables.
 - **Post-sync review**: after scheduled Bridge Syncs or shipped-event reconciliation, use `docs/internal/POST-SYNC-REVIEW.md` to verify DB state, markdown export freshness, and scorecard updates.
 - **Dependency drift**: check with `uv tree --outdated`; refresh `uv.lock` and re-run the full verifier to confirm green.
