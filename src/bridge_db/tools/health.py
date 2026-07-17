@@ -305,6 +305,10 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         config.AUDIT_FAILURE_LOG_PATH,
         rotate_bytes=config.AUDIT_LOG_ROTATE_BYTES,
     )
+    acknowledgement_inventory = evidence_file_inventory(
+        config.EVIDENCE_ACK_LOG_PATH,
+        rotate_bytes=config.AUDIT_LOG_ROTATE_BYTES,
+    )
     audit_degraded = failure_inventory["total_bytes"] > 0
     database_list_cursor = await db.execute("PRAGMA database_list")
     database_rows = await database_list_cursor.fetchall()
@@ -329,6 +333,10 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "audit_failures": {
             **failure_inventory,
             "state": "degraded" if audit_degraded else "clear",
+        },
+        "acknowledgements": {
+            **acknowledgement_inventory,
+            "authority": "review_only_no_cleanup_authority",
         },
         "migration_backups": backup_inventory,
         "audit_degraded": audit_degraded,

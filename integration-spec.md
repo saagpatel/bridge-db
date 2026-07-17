@@ -343,6 +343,10 @@ lossless and does not imply retention deletion. An `audit_degraded` signal means
 the primary audit projection failed and an independent durable failure receipt
 exists; generic storage health remains non-green until that evidence is
 reconciled under an approved operator policy.
+The maintenance-only `bridge_db.evidence_policy` workflow can emit a
+content-bound plan, create a verified archive copy, or append an operator
+acknowledgement. Acknowledgement is review evidence only: it never authorizes
+cleanup, clears degradation, or rewrites historical records.
 
 | Principal | Write capabilities | Boundaries |
 |---|---|---|

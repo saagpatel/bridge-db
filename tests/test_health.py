@@ -59,6 +59,10 @@ async def test_health_returns_ok_on_healthy_db(
     assert result["schema_version"] == SCHEMA_VERSION
     assert result["evidence_lifecycle"]["audit_degraded"] is False
     assert result["evidence_lifecycle"]["destructive_actions"] == "approval_required"
+    assert (
+        result["evidence_lifecycle"]["acknowledgements"]["authority"]
+        == "review_only_no_cleanup_authority"
+    )
 
 
 async def test_health_degrades_on_durable_audit_failure_receipt(

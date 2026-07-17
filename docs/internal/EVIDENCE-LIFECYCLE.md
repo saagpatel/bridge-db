@@ -30,3 +30,40 @@ the operator approves a retention or archival policy. Health reports
 `retention_policy="preserve_all_pending_approval"` and
 `destructive_cleanup="approval_required"` so bounded reads cannot be mistaken
 for bounded historical storage.
+
+## Operator policy workflow
+
+`python -m bridge_db.evidence_policy plan` emits a read-only,
+content-bound `EvidenceLifecyclePlanV1`. It inventories evidence by path, byte
+size, and SHA-256 without returning query or audit contents. The snapshot digest
+changes if any artifact changes.
+
+An operator can create a verified copy with:
+
+```console
+python -m bridge_db.evidence_policy archive \
+  --destination /protected/archive/bridge-db-evidence \
+  --expected-snapshot-sha256 <digest-from-plan>
+```
+
+The archive is written through a private temporary directory, fsync'd,
+atomically published, and read-verified. A stale digest fails closed. Source
+evidence is never removed or rewritten, and the manifest explicitly carries
+`destructive_authority=false`. Archives can contain historical sensitive
+telemetry and require equivalent or stronger access controls than the source.
+
+Plan review can be recorded without granting cleanup authority:
+
+```console
+python -m bridge_db.evidence_policy acknowledge \
+  --expected-snapshot-sha256 <digest-from-plan> \
+  --actor <operator> \
+  --reason <review-reason>
+```
+
+Acknowledgements are append-only and content-bound. They do not clear audit
+degradation, authorize historical-query rewriting, or permit deletion. Numeric
+retention horizons and every destructive disposition remain explicit operator
+decisions. Actor and reason fields reuse the repository's established 4 KiB and
+64 KiB UTF-8 write budgets so an acknowledgement cannot become an unbounded
+single record.

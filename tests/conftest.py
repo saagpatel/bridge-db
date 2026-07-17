@@ -33,6 +33,11 @@ def isolate_jsonl_logs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         config, "AUDIT_FAILURE_LOG_PATH", tmp_path / "audit_failures.jsonl"
     )
     monkeypatch.setattr(
+        config,
+        "EVIDENCE_ACK_LOG_PATH",
+        tmp_path / "evidence_acknowledgements.jsonl",
+    )
+    monkeypatch.setattr(
         recall_tool, "RECALL_LOG_PATH", tmp_path / "recall_query_log.jsonl"
     )
     monkeypatch.setattr(config, "AUTH_MODE", "off")

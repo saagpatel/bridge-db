@@ -12,6 +12,7 @@ uv run ruff check --fix    # lint + auto-fix
 uv run python -m bridge_db --doctor  # local environment diagnostics
 uv run python -m bridge_db --status  # compact operator summary
 uv run python -m bridge_db --dogfood # read-only observability dogfood pass
+uv run python -m bridge_db.evidence_policy plan  # content-bound evidence inventory
 uv run python -m bridge_db --rebuild-content-index  # repair FTS recall index drift
 uv run python -m bridge_db --reconcile-canonical-keys  # backfill GHRA repo_full_name keys
 uv run python -m bridge_db --log-session-boundary bridge-db  # FTS-safe CC hook logging
@@ -103,7 +104,9 @@ uv run python -m bridge_db --promote-handoff 42      # reviewed handoff promotio
   durable receipt and degrades health; if both evidence paths fail,
   `AuditUnavailableError` prevents a silent auditable-success claim. Verified
   migration backups include digest/integrity/schema readback plus metadata and
-  remain approval-gated for cleanup. See
+  remain approval-gated for cleanup. `bridge_db.evidence_policy` can plan,
+  verified-copy, and acknowledge exact evidence snapshots without granting
+  cleanup authority. See
   `docs/internal/EVIDENCE-LIFECYCLE.md`.
 - **FTS drift repair**: `--rebuild-content-index` is the CLI-only repair path; FTS index drift is treated as a hard health failure because `recall` depends on `content_index` mirroring source tables.
 - **Post-sync review**: after scheduled Bridge Syncs or shipped-event reconciliation, use `docs/internal/POST-SYNC-REVIEW.md` to verify DB state, markdown export freshness, and scorecard updates.

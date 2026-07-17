@@ -119,6 +119,18 @@ AUDIT_FAILURE_LOG_PATH: Path = Path(
     )
 )
 
+# Append-only operator acknowledgements for evidence-lifecycle plans. These
+# receipts record review intent only: they never authorize cleanup, rewrite
+# historical evidence, or clear degraded health.
+EVIDENCE_ACK_LOG_PATH: Path = Path(
+    os.environ.get(
+        "BRIDGE_DB_EVIDENCE_ACK_LOG_PATH",
+        str(DB_PATH.parent / "evidence_acknowledgements.jsonl"),
+    )
+)
+EVIDENCE_ACK_ACTOR_MAX_BYTES: int = ACTIVITY_PROJECT_NAME_MAX_BYTES
+EVIDENCE_ACK_REASON_MAX_BYTES: int = ACTIVITY_SUMMARY_MAX_BYTES
+
 # Canonical project-identity registry emitted by GithubRepoAuditor. Read-only
 # consumer input for resolving project_name -> canonical key on write. If absent,
 # resolution is a no-op (pass-through) and logging behaviour is unchanged.
