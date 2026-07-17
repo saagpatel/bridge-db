@@ -11,6 +11,7 @@ from pydantic import Field
 from bridge_db import clock, config
 from bridge_db.audit import log_audit
 from bridge_db.auth import clamp_source_trust, require_bound_caller, require_caller
+from bridge_db.capacity import encode_bounded_json
 from bridge_db.db import (
     fts_text_for_snapshot,
     gc_fts_orphans,
@@ -123,10 +124,15 @@ def register(mcp: FastMCP) -> None:
             logger.warning("snapshot ownership violation: caller=%s", caller)
             raise ToolError(snapshot_ownership_error(caller))
 
+        snapshot_json = encode_bounded_json(
+            data,
+            maximum_bytes=config.SNAPSHOT_JSON_MAX_BYTES,
+            maximum_depth=config.SNAPSHOT_JSON_MAX_DEPTH,
+            maximum_nodes=config.SNAPSHOT_JSON_MAX_NODES,
+            code_prefix="snapshot",
+        )
         db = get_db(ctx)
         snap_date = snapshot_date or _utc_snapshot_date()
-
-        snapshot_json = json.dumps(data)
         cursor = await db.execute(
             """
             INSERT INTO system_snapshots (system, snapshot_date, data, source_trust)

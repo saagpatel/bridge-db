@@ -7,7 +7,9 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
+from bridge_db import config
 from bridge_db.audit import log_audit
+from bridge_db.capacity import require_combined_bytes, require_utf8_bytes
 from bridge_db.auth import (
     clamp_source_trust,
     get_principal,
@@ -28,6 +30,42 @@ from bridge_db.models import CallerID, SourceTrust
 from bridge_db.project_resolver import resolve as resolve_project
 
 logger = logging.getLogger("bridge_db.tools.handoffs")
+
+
+def _validate_handoff_payload(
+    *,
+    project_name: str,
+    project_path: str | None,
+    roadmap_file: str | None,
+    phase: str | None,
+) -> None:
+    sizes = [
+        require_utf8_bytes(
+            project_name,
+            config.HANDOFF_PROJECT_NAME_MAX_BYTES,
+            "handoff.project_name_utf8_bytes_exceeded",
+        ),
+        require_utf8_bytes(
+            project_path,
+            config.HANDOFF_PROJECT_PATH_MAX_BYTES,
+            "handoff.project_path_utf8_bytes_exceeded",
+        ),
+        require_utf8_bytes(
+            roadmap_file,
+            config.HANDOFF_ROADMAP_FILE_MAX_BYTES,
+            "handoff.roadmap_file_utf8_bytes_exceeded",
+        ),
+        require_utf8_bytes(
+            phase,
+            config.HANDOFF_PHASE_MAX_BYTES,
+            "handoff.phase_utf8_bytes_exceeded",
+        ),
+    ]
+    require_combined_bytes(
+        sizes,
+        config.HANDOFF_COMBINED_MAX_BYTES,
+        "handoff.combined_utf8_bytes_exceeded",
+    )
 
 
 def register(mcp: FastMCP) -> None:
@@ -72,6 +110,12 @@ def register(mcp: FastMCP) -> None:
         source_trust, source_trust_clamped = clamp_source_trust(
             source_trust, caller=caller, tool="create_handoff", strict=True
         )
+        _validate_handoff_payload(
+            project_name=project_name,
+            project_path=project_path,
+            roadmap_file=roadmap_file,
+            phase=phase,
+        )
 
         db = get_db(ctx)
         resolution = resolve_project(project_name)
@@ -80,7 +124,12 @@ def register(mcp: FastMCP) -> None:
             INSERT INTO pending_handoffs
                 (project_name, project_path, roadmap_file, phase, dispatched_from,
                  canonical_key, source_trust)
-            VALUES (?, ?, ?, ?, 'claude_ai', ?, ?)
+            SELECT ?, ?, ?, ?, 'claude_ai', ?, ?
+            WHERE (
+                SELECT COUNT(*) FROM pending_handoffs
+                WHERE status IN ('pending', 'active')
+            ) < ?
+            RETURNING id
             """,
             (
                 project_name,
@@ -89,17 +138,24 @@ def register(mcp: FastMCP) -> None:
                 phase,
                 resolution.canonical_key,
                 source_trust,
+                config.HANDOFF_OPEN_QUOTA,
             ),
         )
-        handoff_id = cursor.lastrowid
-
-        if handoff_id is not None:
-            await upsert_fts_entry(
-                db,
-                "handoff",
-                str(handoff_id),
-                fts_text_for_handoff(project_name, project_path, roadmap_file, phase),
+        inserted = await cursor.fetchone()
+        if inserted is None:
+            await db.rollback()
+            raise ToolError(
+                "handoff.open_queue_quota_exceeded: "
+                f"maximum={config.HANDOFF_OPEN_QUOTA}"
             )
+        handoff_id = int(inserted["id"])
+
+        await upsert_fts_entry(
+            db,
+            "handoff",
+            str(handoff_id),
+            fts_text_for_handoff(project_name, project_path, roadmap_file, phase),
+        )
 
         await db.commit()
 
@@ -148,6 +204,18 @@ def register(mcp: FastMCP) -> None:
                 "Cleared rows are history and stay excluded — recall covers them."
             ),
         ] = "pending",
+        limit: Annotated[
+            int,
+            Field(
+                description="Page size; use before_id to fetch older open handoffs",
+                ge=1,
+                le=config.HANDOFF_PAGE_MAX,
+            ),
+        ] = config.HANDOFF_PAGE_DEFAULT,
+        before_id: Annotated[
+            int | None,
+            Field(description="Return rows with id lower than this page cursor", ge=1),
+        ] = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> list[dict[str, Any]]:
         """Return open handoffs, newest first. Used by /start to surface priority work.
@@ -160,6 +228,11 @@ def register(mcp: FastMCP) -> None:
         db = get_db(ctx)
         statuses = ("pending", "active") if status == "all" else (status,)
         placeholders = ", ".join("?" for _ in statuses)
+        before_sql = "AND id < ?" if before_id is not None else ""
+        params: list[Any] = [*statuses]
+        if before_id is not None:
+            params.append(before_id)
+        params.append(limit)
         cursor = await db.execute(
             f"""
             SELECT id, project_name, project_path, roadmap_file, phase,
@@ -167,9 +240,11 @@ def register(mcp: FastMCP) -> None:
                    canonical_key, source_trust, claimed_by
             FROM pending_handoffs
             WHERE status IN ({placeholders})
-            ORDER BY dispatched_at DESC, id DESC
+            {before_sql}
+            ORDER BY id DESC
+            LIMIT ?
             """,  # noqa: S608 — placeholders count a closed literal tuple
-            statuses,
+            params,
         )
         rows = await cursor.fetchall()
         return [

@@ -17,7 +17,7 @@ from bridge_db import config
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 # A migration post-hook runs after its DDL, before the version bump+commit
 # (e.g. FTS repopulation). Its return value is ignored.
@@ -33,6 +33,35 @@ CREATE TABLE IF NOT EXISTS context_sections (
     source_trust TEXT NOT NULL DEFAULT 'agent' CHECK(source_trust IN ('operator', 'agent', 'ingested')),
     version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1)
 );
+
+CREATE TRIGGER IF NOT EXISTS trg_context_total_bytes_insert
+BEFORE INSERT ON context_sections
+WHEN (
+    SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0)
+    FROM context_sections
+) + length(CAST(NEW.content AS BLOB)) > 1048576
+BEGIN
+    SELECT RAISE(ABORT, 'context.total_utf8_bytes_exceeded');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_context_total_bytes_update
+BEFORE UPDATE OF content ON context_sections
+WHEN (
+    SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0)
+    FROM context_sections
+    WHERE section_name != OLD.section_name
+) + length(CAST(NEW.content AS BLOB)) > 1048576
+AND (
+    SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0)
+    FROM context_sections
+    WHERE section_name != OLD.section_name
+) + length(CAST(NEW.content AS BLOB)) > (
+    SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0)
+    FROM context_sections
+)
+BEGIN
+    SELECT RAISE(ABORT, 'context.total_utf8_bytes_exceeded');
+END;
 
 CREATE TABLE IF NOT EXISTS context_section_export_state (
     section_name TEXT PRIMARY KEY,
@@ -118,13 +147,20 @@ CREATE TABLE IF NOT EXISTS write_conflicts (
     reason TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'acknowledged', 'resolved', 'ignored')),
     detail_json TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    identity_hash TEXT,
+    occurrence_count INTEGER NOT NULL DEFAULT 1 CHECK(occurrence_count >= 1),
+    last_seen_at TEXT,
+    aggregation_state TEXT NOT NULL DEFAULT 'legacy'
+        CHECK(aggregation_state IN ('legacy', 'exact_identity', 'capacity_overflow'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_write_conflicts_status_created
     ON write_conflicts(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_write_conflicts_surface_target
     ON write_conflicts(surface, target_key);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_write_conflicts_identity
+    ON write_conflicts(identity_hash) WHERE identity_hash IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS activity_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -591,6 +627,8 @@ CREATE INDEX IF NOT EXISTS idx_activity_created_id
 ON activity_log(created_at DESC, id DESC);
 """
 
+_MIGRATION_V20_TO_V21 = ""
+
 # Column definitions for the v14 ADD COLUMN step. Kept character-identical to the
 # activity_log block in _SCHEMA_DDL so a fresh install and a migrated DB converge
 # (see tests/test_schema_convergence_concurrency.py). NOTE: the synced/policy
@@ -797,6 +835,103 @@ async def _migrate_shipped_state_to_columns(db: aiosqlite.Connection) -> None:
     await db.execute("DROP TABLE IF EXISTS shipped_event_dispositions")
 
 
+async def _migrate_conflict_aggregation(db: aiosqlite.Connection) -> None:
+    """Add v21 aggregation fields without rewriting or deleting legacy receipts."""
+    if not await _table_exists(db, "write_conflicts"):
+        await db.executescript(
+            """
+            CREATE TABLE write_conflicts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                surface TEXT NOT NULL CHECK(surface IN ('context_section', 'markdown_sync', 'handoff')),
+                target_key TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                attempted_by TEXT,
+                principal TEXT,
+                stale_version INTEGER,
+                current_version INTEGER,
+                stale_updated_at TEXT,
+                current_updated_at TEXT,
+                attempted_source_trust TEXT,
+                current_source_trust TEXT,
+                attempted_content_sha256 TEXT,
+                current_content_sha256 TEXT,
+                reason TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'acknowledged', 'resolved', 'ignored')),
+                detail_json TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                identity_hash TEXT,
+                occurrence_count INTEGER NOT NULL DEFAULT 1 CHECK(occurrence_count >= 1),
+                last_seen_at TEXT,
+                aggregation_state TEXT NOT NULL DEFAULT 'legacy'
+                    CHECK(aggregation_state IN ('legacy', 'exact_identity', 'capacity_overflow'))
+            );
+            """
+        )
+    else:
+        cursor = await db.execute("PRAGMA table_info(write_conflicts)")
+        columns = {str(row["name"]) for row in await cursor.fetchall()}
+        additions = {
+            "identity_hash": "TEXT",
+            "occurrence_count": (
+                "INTEGER NOT NULL DEFAULT 1 CHECK(occurrence_count >= 1)"
+            ),
+            "last_seen_at": "TEXT",
+            "aggregation_state": (
+                "TEXT NOT NULL DEFAULT 'legacy' "
+                "CHECK(aggregation_state IN "
+                "('legacy', 'exact_identity', 'capacity_overflow'))"
+            ),
+        }
+        for name, declaration in additions.items():
+            if name not in columns:
+                await db.execute(
+                    f"ALTER TABLE write_conflicts ADD COLUMN {name} {declaration}"
+                )  # noqa: S608 — closed migration literals
+    await db.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_write_conflicts_status_created
+            ON write_conflicts(status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_write_conflicts_surface_target
+            ON write_conflicts(surface, target_key);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_write_conflicts_identity
+            ON write_conflicts(identity_hash) WHERE identity_hash IS NOT NULL;
+        """
+    )
+    if await _table_exists(db, "context_sections"):
+        await db.executescript(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_context_total_bytes_insert
+        BEFORE INSERT ON context_sections
+        WHEN (
+            SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0)
+            FROM context_sections
+        ) + length(CAST(NEW.content AS BLOB)) > 1048576
+        BEGIN
+            SELECT RAISE(ABORT, 'context.total_utf8_bytes_exceeded');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_context_total_bytes_update
+        BEFORE UPDATE OF content ON context_sections
+        WHEN (
+            SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0)
+            FROM context_sections
+            WHERE section_name != OLD.section_name
+        ) + length(CAST(NEW.content AS BLOB)) > 1048576
+        AND (
+            SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0)
+            FROM context_sections
+            WHERE section_name != OLD.section_name
+        ) + length(CAST(NEW.content AS BLOB)) > (
+            SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0)
+            FROM context_sections
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'context.total_utf8_bytes_exceeded');
+        END;
+        """
+        )
+
+
 async def ensure_schema(db: aiosqlite.Connection) -> None:
     """Create tables if not present; run any pending migrations in sequence."""
     cursor = await db.execute("PRAGMA user_version")
@@ -845,6 +980,7 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         (18, _MIGRATION_V17_TO_V18, None),
         (19, _MIGRATION_V18_TO_V19, None),
         (20, _MIGRATION_V19_TO_V20, None),
+        (21, _MIGRATION_V20_TO_V21, _migrate_conflict_aggregation),
     ]
     for target, ddl, post_hook in migrations:
         if current_version >= target:
@@ -888,6 +1024,76 @@ def content_sha256(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _bounded_conflict_detail(detail: dict[str, Any] | None) -> str:
+    encoded = json.dumps(detail or {}, sort_keys=True, separators=(",", ":"))
+    size = len(encoded.encode("utf-8"))
+    if size <= config.WRITE_CONFLICT_DETAIL_MAX_BYTES:
+        return encoded
+    return json.dumps(
+        {
+            "detail_truncated": True,
+            "original_utf8_bytes": size,
+            "sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _write_conflict_identity(**fields: Any) -> str:
+    canonical = json.dumps(fields, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+async def _upsert_write_conflict(
+    db: aiosqlite.Connection,
+    *,
+    values: tuple[Any, ...],
+    identity_hash: str,
+    aggregation_state: str,
+    enforce_identity_quota: bool,
+) -> int | None:
+    quota_sql = (
+        """
+        WHERE EXISTS (
+            SELECT 1 FROM write_conflicts WHERE identity_hash = ?
+        ) OR (
+            SELECT COUNT(*) FROM write_conflicts WHERE identity_hash IS NOT NULL
+        ) < ?
+        """
+        if enforce_identity_quota
+        else ""
+    )
+    quota_params: tuple[Any, ...] = (
+        (identity_hash, config.WRITE_CONFLICT_MAX_IDENTITIES)
+        if enforce_identity_quota
+        else ()
+    )
+    cursor = await db.execute(
+        f"""
+        INSERT INTO write_conflicts (
+            surface, target_key, operation, attempted_by, principal,
+            stale_version, current_version, stale_updated_at, current_updated_at,
+            attempted_source_trust, current_source_trust,
+            attempted_content_sha256, current_content_sha256,
+            reason, detail_json, identity_hash, occurrence_count, last_seen_at,
+            aggregation_state
+        )
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1,
+               strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?
+        {quota_sql}
+        ON CONFLICT(identity_hash) WHERE identity_hash IS NOT NULL DO UPDATE SET
+            occurrence_count = write_conflicts.occurrence_count + 1,
+            last_seen_at = excluded.last_seen_at,
+            detail_json = excluded.detail_json
+        RETURNING id
+        """,  # noqa: S608 — quota_sql is a closed literal
+        (*values, identity_hash, aggregation_state, *quota_params),
+    )
+    row = await cursor.fetchone()
+    return int(row["id"]) if row is not None else None
+
+
 async def record_write_conflict(
     db: aiosqlite.Connection,
     *,
@@ -907,39 +1113,87 @@ async def record_write_conflict(
     current_content_sha256: str | None = None,
     detail: dict[str, Any] | None = None,
 ) -> int:
-    """Stage a durable write-conflict receipt. Caller owns commit/rollback."""
-    cursor = await db.execute(
-        """
-        INSERT INTO write_conflicts (
-            surface, target_key, operation, attempted_by, principal,
-            stale_version, current_version, stale_updated_at, current_updated_at,
-            attempted_source_trust, current_source_trust,
-            attempted_content_sha256, current_content_sha256,
-            reason, detail_json
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            surface,
-            target_key,
-            operation,
-            attempted_by,
-            principal,
-            stale_version,
-            current_version,
-            stale_updated_at,
-            current_updated_at,
-            attempted_source_trust,
-            current_source_trust,
-            attempted_content_sha256,
-            current_content_sha256,
-            reason,
-            json.dumps(detail or {}, sort_keys=True),
+    """Stage or aggregate a durable write-conflict receipt."""
+    identity_fields = {
+        "surface": surface,
+        "target_key": target_key,
+        "operation": operation,
+        "attempted_by": attempted_by,
+        "principal": principal,
+        "stale_version": stale_version,
+        "current_version": current_version,
+        "stale_updated_at": stale_updated_at,
+        "current_updated_at": current_updated_at,
+        "attempted_source_trust": attempted_source_trust,
+        "current_source_trust": current_source_trust,
+        "attempted_content_sha256": attempted_content_sha256,
+        "current_content_sha256": current_content_sha256,
+        "reason": reason,
+    }
+    values = (
+        surface,
+        target_key,
+        operation,
+        attempted_by,
+        principal,
+        stale_version,
+        current_version,
+        stale_updated_at,
+        current_updated_at,
+        attempted_source_trust,
+        current_source_trust,
+        attempted_content_sha256,
+        current_content_sha256,
+        reason,
+        _bounded_conflict_detail(detail),
+    )
+    identity_hash = _write_conflict_identity(**identity_fields)
+    receipt_id = await _upsert_write_conflict(
+        db,
+        values=values,
+        identity_hash=identity_hash,
+        aggregation_state="exact_identity",
+        enforce_identity_quota=True,
+    )
+    if receipt_id is not None:
+        return receipt_id
+
+    overflow_hash = _write_conflict_identity(
+        aggregation_state="capacity_overflow", surface=surface
+    )
+    overflow_values = (
+        surface,
+        "__capacity_overflow__",
+        "aggregate_write_conflict",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        "distinct_identity_quota_exceeded",
+        _bounded_conflict_detail(
+            {
+                "detail_truncated": True,
+                "latest_identity_hash": identity_hash,
+                "identity_quota": config.WRITE_CONFLICT_MAX_IDENTITIES,
+            }
         ),
     )
-    if cursor.lastrowid is None:
-        raise RuntimeError("write_conflicts insert did not return a row id")
-    return int(cursor.lastrowid)
+    overflow_id = await _upsert_write_conflict(
+        db,
+        values=overflow_values,
+        identity_hash=overflow_hash,
+        aggregation_state="capacity_overflow",
+        enforce_identity_quota=False,
+    )
+    if overflow_id is None:
+        raise RuntimeError("write_conflicts overflow aggregation failed")
+    return overflow_id
 
 
 async def find_write_conflict(
@@ -982,54 +1236,18 @@ async def record_write_conflict_once(
     current_source_trust: str | None = None,
     detail: dict[str, Any] | None = None,
 ) -> int:
-    """Stage an insert-if-absent receipt on the dedupe key; return its id.
-
-    The existence check lives INSIDE the INSERT statement (WHERE NOT
-    EXISTS), so it is atomic at statement level — two concurrent retries
-    cannot both pass a separate SELECT and double-insert the way a
-    find-then-insert sequence could. First writer wins; the loser's call
-    resolves to the existing row's id. Caller owns commit/rollback.
-    """
-    await db.execute(
-        """
-        INSERT INTO write_conflicts (
-            surface, target_key, operation, attempted_by, principal,
-            current_source_trust, reason, detail_json
-        )
-        SELECT ?, ?, ?, ?, ?, ?, ?, ?
-        WHERE NOT EXISTS (
-            SELECT 1 FROM write_conflicts
-            WHERE surface = ? AND target_key = ? AND operation = ?
-              AND attempted_by IS ? AND reason = ?
-        )
-        """,
-        (
-            surface,
-            target_key,
-            operation,
-            attempted_by,
-            principal,
-            current_source_trust,
-            reason,
-            json.dumps(detail or {}, sort_keys=True),
-            surface,
-            target_key,
-            operation,
-            attempted_by,
-            reason,
-        ),
-    )
-    receipt_id = await find_write_conflict(
+    """Stage or aggregate a retry conflict using the full evidence identity."""
+    return await record_write_conflict(
         db,
         surface=surface,
         target_key=target_key,
         operation=operation,
         attempted_by=attempted_by,
+        principal=principal,
         reason=reason,
+        current_source_trust=current_source_trust,
+        detail=detail,
     )
-    if receipt_id is None:
-        raise RuntimeError("write_conflicts insert-if-absent left no row")
-    return receipt_id
 
 
 @asynccontextmanager
@@ -1181,6 +1399,10 @@ class InsertActivityResult(NamedTuple):
     pruned_rows: list[tuple[int, str]]  # (id, raw tags JSON) of pruned rows
 
 
+class ActivityProtectedQuotaExceeded(RuntimeError):
+    """A protected activity insert would exceed its per-source hard quota."""
+
+
 def protected_tags_predicate(column: str = "tags") -> tuple[str, list[str]]:
     """SQL fragment matching rows whose tags include a retention-protected tag.
 
@@ -1204,30 +1426,67 @@ async def insert_activity_row(
     branch: str | None = None,
     tags: list[str] | None = None,
     retention_limit: int | None = None,
+    protected_quota: int | None = None,
     canonical_key: str | None = None,
     source_trust: str = "agent",
 ) -> InsertActivityResult:
     """Insert an activity row, keep the FTS mirror in sync, and apply protected-aware retention."""
-    cursor = await db.execute(
-        """
-        INSERT INTO activity_log
-            (source, timestamp, project_name, summary, branch, tags, canonical_key, source_trust)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            source,
-            timestamp,
-            project_name,
-            summary,
-            branch,
-            json.dumps(tags or []),
-            canonical_key,
-            source_trust,
-        ),
+    raw_tags = json.dumps(tags or [])
+    is_protected = bool(
+        {tag.upper() for tag in tags or []} & config.LEDGER_PROTECTED_TAGS
     )
-    activity_id = cursor.lastrowid
-    if activity_id is None:
-        raise RuntimeError("activity_log insert did not return an id")
+    if is_protected and protected_quota is not None:
+        protected_sql, protected_params = protected_tags_predicate()
+        cursor = await db.execute(
+            f"""
+            INSERT INTO activity_log
+                (source, timestamp, project_name, summary, branch, tags, canonical_key, source_trust)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE (
+                SELECT COUNT(*) FROM activity_log
+                WHERE source = ? AND {protected_sql}
+            ) < ?
+            RETURNING id
+            """,  # noqa: S608 — predicate assembled from a closed literal set
+            (
+                source,
+                timestamp,
+                project_name,
+                summary,
+                branch,
+                raw_tags,
+                canonical_key,
+                source_trust,
+                source,
+                *protected_params,
+                protected_quota,
+            ),
+        )
+        inserted = await cursor.fetchone()
+        if inserted is None:
+            raise ActivityProtectedQuotaExceeded(source)
+        activity_id = int(inserted["id"])
+    else:
+        cursor = await db.execute(
+            """
+            INSERT INTO activity_log
+                (source, timestamp, project_name, summary, branch, tags, canonical_key, source_trust)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source,
+                timestamp,
+                project_name,
+                summary,
+                branch,
+                raw_tags,
+                canonical_key,
+                source_trust,
+            ),
+        )
+        activity_id = cursor.lastrowid
+        if activity_id is None:
+            raise RuntimeError("activity_log insert did not return an id")
 
     await upsert_fts_entry(
         db,

@@ -161,6 +161,12 @@ mcp__bridge_db__record_disposition(...) # terminal sync state: 'synced' receipt 
 mcp__bridge_db__get_cost_history()          # cost trend
 ```
 
+`get_pending_handoffs` is a bounded paged read. It returns at most 100 rows by
+default (maximum 200); pass the last returned `id` as `before_id` to fetch the
+next page. Creation is rejected atomically when 100 rows are already `pending`
+or `active`, so consumers must claim or clear existing work rather than grow an
+unbounded open queue.
+
 Use `get_recent_activity` when raw row-level activity is required. It includes
 each stored row, including Claude Code `SessionEnd` lifecycle telemetry tagged
 `session-boundary`. Use `get_activity_signal` for startup briefs, dashboards,
