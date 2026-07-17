@@ -34,13 +34,22 @@ def handoff_fns(db: aiosqlite.Connection) -> dict[str, Any]:
 
 
 @pytest.fixture(autouse=True)
-def patch_db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def patch_db_path(
+    db: aiosqlite.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Point health filesystem inputs at isolated matching fixtures."""
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
     (tmp_path / "test.db").touch()
     bridge = tmp_path / "bridge.md"
     bridge.write_text("# BridgeDB\n", encoding="utf-8")
     monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge)
+    await db.execute(
+        "INSERT INTO bridge_file_export_state (singleton, exported_content_sha256) "
+        "VALUES (1, 'tracked-test-projection')"
+    )
+    await db.commit()
 
 
 async def _seed_open_conflict(db: aiosqlite.Connection, target_key: str) -> int:

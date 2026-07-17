@@ -30,12 +30,21 @@ def fns(db: aiosqlite.Connection) -> dict[str, Any]:
 
 
 @pytest.fixture(autouse=True)
-def patch_db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def patch_db_path(
+    db: aiosqlite.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Point health filesystem inputs at isolated deterministic fixtures."""
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
     bridge = tmp_path / "bridge.md"
     bridge.write_text("# BridgeDB\n", encoding="utf-8")
     monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge)
+    await db.execute(
+        "INSERT INTO bridge_file_export_state (singleton, exported_content_sha256) "
+        "VALUES (1, 'test-export-state')"
+    )
+    await db.commit()
 
 
 async def test_health_returns_ok_on_healthy_db(
@@ -908,6 +917,26 @@ async def test_claude_ai_section_drift_in_sync(
     assert result["projection_health"] == "current"
 
 
+async def test_projection_health_is_untracked_without_whole_file_export_state(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "test.db").touch()
+    await db.execute("DELETE FROM bridge_file_export_state")
+    await db.commit()
+
+    result = await fns["health"](ctx=make_ctx(db))
+    assert result["claude_ai_section_drift"]["state"] == "current"
+    assert result["bridge_file_export_tracked"] is False
+    assert result["projection_health"] == "untracked"
+    assert result["ok"] is False
+
+    status = await fns["status"](ctx=make_ctx(db))
+    assert status["projection_health"] == "untracked"
+    assert status["overall"] == "degraded"
+
+
 async def test_claude_ai_section_drift_preserves_nested_h2_headings(
     db: aiosqlite.Connection,
     fns: dict[str, Any],
@@ -1005,6 +1034,27 @@ async def test_claude_ai_section_drift_unreadable_is_unknown_and_non_green(
         "drifted_sections": [],
     }
     assert result["storage_ok"] is True
+    assert result["projection_health"] == "unreadable"
+    assert result["ok"] is False
+
+
+async def test_claude_ai_section_drift_malformed_markers_are_non_green(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = tmp_path / "bridge.md"
+    bridge.write_text(
+        "## Career & Professional Target\n"
+        "<!-- bridge-db:owned-section:start:career -->\n"
+        "content without an end marker\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge)
+
+    result = await fns["health"](ctx=make_ctx(db))
+    assert result["claude_ai_section_drift"]["state"] == "unreadable"
     assert result["projection_health"] == "unreadable"
     assert result["ok"] is False
 

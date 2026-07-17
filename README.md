@@ -105,6 +105,16 @@ mode; unchanged content preserves its existing label. Promote reviewed content
 with `--promote-section <section>`: the TTY ceremony displays and confirms the
 exact version and digest, then rechecks it under a write lock before granting
 operator trust.
+
+Generated fallback files wrap each editable section in explicit
+`bridge-db:owned-section` HTML markers. This keeps nested Markdown headings
+inside long-form section content round-trippable. Pre-marker files remain
+readable through a strict legacy parser that recognizes only the four owned
+headings and known generated document headings as section boundaries. Health
+reports the projection as `untracked` until an authenticated export records the
+whole-file export state; matching section text alone is not sufficient proof
+that a legacy file is safe to overwrite.
+
 Exports to the real Claude.ai fallback path are also guarded against empty
 fixture-like output: bridge-db refuses to overwrite that file when all four core
 Claude.ai-owned sections would render as `_Not yet populated._`. Set
