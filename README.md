@@ -26,6 +26,7 @@ uv run pytest    # verify the install
 - Schema v12: adds the `session_classification` sidecar for heuristic cost-routing attribution while keeping `session_costs` as pure actuals. Schema v11 backfills activity `tags` into `content_index` so lifecycle tags (SHIPPED, DECISION, ...) are recall-able on existing DBs.
 - Schema v13: adds `claimed_by` to `pending_handoffs` (the INV-13 claimant gate for `clear_handoff`). Riding the same migration train, activity retention now exempts rows tagged `SHIPPED` or `LEDGER` (case-insensitive) from the 50-per-source prune — BD-INV-1: retention never deletes a protected row, its receipt, or its disposition.
 - Schema v14: collapses the shipped-sync trio (`shipped_sync_receipts` + `shipped_event_dispositions`) into `activity_log` `sync_*` disposition columns and drops the two child tables. A shipped event's terminal sync state (a `synced` downstream receipt or a policy disposition) now lives on the activity row itself, written by the single `record_disposition` verb. Because the state is the row, BD-INV-1's guarantee is structural — no FK-CASCADE can orphan a receipt.
+- Schema v21: adds non-destructive write-conflict identity aggregation. Exact repeat conflicts increment `occurrence_count`; distinct identity growth is capped at 10,000 and then rolls into an explicit per-surface overflow aggregate. Legacy receipts remain unchanged and are labeled `aggregation_state="legacy"`.
 - FTS5 `content_index` mirrors all content tables; `health` and `status` verify source-row / FTS-row alignment.
 - `status` includes a native freshness block for owner-specific snapshot, activity, handoff, and shipped-event attention. Freshness attention is advisory: top-level `ok` / `overall` remain tied to DB, schema, fallback-file, and FTS health.
 - 26 MCP tools across 10 modules (activity, handoffs, context, snapshots, cost, export, health, recall, audit, conflicts).
@@ -249,6 +250,32 @@ and `fts_missing=0` as primary clean signals, and use
 `actionable_unprocessed_shipped=0` with
 `dispositioned_unprocessed_shipped>0` when policy dispositions explain why raw
 `unprocessed_shipped` remains nonzero.
+
+## Capacity policy
+
+All new instruction-bearing writes are measured as UTF-8 and rejected before
+mutation with stable error codes. Existing oversized rows are never deleted,
+rewritten, or silently clipped; they remain readable and exportable.
+
+- Activity: project name 4 KiB, summary 64 KiB, branch 4 KiB, timestamp 128
+  bytes, at most 64 tags of 1 KiB each, and 128 KiB combined. Each source may
+  retain at most 1,000 protected `SHIPPED`/`LEDGER` rows; the atomic insert is
+  refused at quota without pruning protected history.
+- Handoffs: project name 4 KiB, project path 16 KiB, roadmap path 4 KiB, phase
+  64 KiB, and 72 KiB combined. At most 100 `pending` + `active` rows may be
+  open, and at most 10,000 total history rows may be retained. A full legacy
+  history is preserved and rejects new creation rather than deleting old
+  records. `get_pending_handoffs(limit=..., before_id=...)` pages newest IDs
+  with a default page of 100 and maximum of 200.
+- Snapshots: compact JSON is limited to 256 KiB, depth 32, and 10,000 JSON
+  nodes before insert or retention pruning.
+- Context: each section is limited to 256 KiB and the five-section registry to
+  1 MiB total. An over-budget legacy database may accept a bounded replacement
+  only when it reduces total bytes.
+- Write conflicts: full evidence identity includes the surface, target,
+  operation, principals, versions/timestamps, trust, content hashes, and
+  reason. Exact repeats aggregate into one row. Detail JSON is capped at 16 KiB
+  and replaced by an explicit size/hash truncation marker when larger.
 
 `get_recent_activity` is the raw compatibility feed: it returns individual
 activity rows exactly as stored, including high-volume lifecycle telemetry such

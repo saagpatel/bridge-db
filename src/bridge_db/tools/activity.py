@@ -11,6 +11,7 @@ from pydantic import Field
 
 from bridge_db import clock, config
 from bridge_db.audit import log_audit
+from bridge_db.capacity import require_combined_bytes, require_utf8_bytes
 from bridge_db.auth import (
     clamp_source_trust,
     get_principal,
@@ -18,6 +19,7 @@ from bridge_db.auth import (
     require_caller,
 )
 from bridge_db.db import (
+    ActivityProtectedQuotaExceeded,
     get_db,
     insert_activity_row,
     protected_tags_predicate,
@@ -47,6 +49,57 @@ _POLICY_DISPOSITION_TYPES = {
     "declined_mapping",
 }
 _ALL_DISPOSITIONS = {_SYNCED_DISPOSITION, *_POLICY_DISPOSITION_TYPES}
+
+
+def _validate_activity_payload(
+    *,
+    project_name: str,
+    summary: str,
+    branch: str | None,
+    tags: list[str] | None,
+    timestamp: str,
+) -> None:
+    tags = tags or []
+    if len(tags) > config.ACTIVITY_TAGS_MAX_ITEMS:
+        raise ToolError(
+            "activity.tags_items_exceeded: "
+            f"maximum={config.ACTIVITY_TAGS_MAX_ITEMS} actual={len(tags)}"
+        )
+    sizes = [
+        require_utf8_bytes(
+            project_name,
+            config.ACTIVITY_PROJECT_NAME_MAX_BYTES,
+            "activity.project_name_utf8_bytes_exceeded",
+        ),
+        require_utf8_bytes(
+            summary,
+            config.ACTIVITY_SUMMARY_MAX_BYTES,
+            "activity.summary_utf8_bytes_exceeded",
+        ),
+        require_utf8_bytes(
+            branch,
+            config.ACTIVITY_BRANCH_MAX_BYTES,
+            "activity.branch_utf8_bytes_exceeded",
+        ),
+        require_utf8_bytes(
+            timestamp,
+            config.ACTIVITY_TIMESTAMP_MAX_BYTES,
+            "activity.timestamp_utf8_bytes_exceeded",
+        ),
+    ]
+    sizes.extend(
+        require_utf8_bytes(
+            tag,
+            config.ACTIVITY_TAG_MAX_BYTES,
+            "activity.tag_utf8_bytes_exceeded",
+        )
+        for tag in tags
+    )
+    require_combined_bytes(
+        sizes,
+        config.ACTIVITY_COMBINED_MAX_BYTES,
+        "activity.combined_utf8_bytes_exceeded",
+    )
 
 
 def _audit_ref_fingerprint(value: str) -> str:
@@ -378,19 +431,34 @@ def register(mcp: FastMCP) -> None:
         # real time into DST runs and disagreed with snapshots' UTC date near
         # midnight.
         ts = timestamp or clock.now().date().isoformat()
-        resolution = resolve_project(project_name)
-        insert_result = await insert_activity_row(
-            db,
-            source=caller,
-            timestamp=ts,
+        _validate_activity_payload(
             project_name=project_name,
             summary=summary,
             branch=branch,
             tags=tags,
-            retention_limit=config.ACTIVITY_RETENTION_PER_SOURCE,
-            canonical_key=resolution.canonical_key,
-            source_trust=source_trust,
+            timestamp=ts,
         )
+        resolution = resolve_project(project_name)
+        try:
+            insert_result = await insert_activity_row(
+                db,
+                source=caller,
+                timestamp=ts,
+                project_name=project_name,
+                summary=summary,
+                branch=branch,
+                tags=tags,
+                retention_limit=config.ACTIVITY_RETENTION_PER_SOURCE,
+                protected_quota=config.ACTIVITY_PROTECTED_PER_SOURCE_QUOTA,
+                canonical_key=resolution.canonical_key,
+                source_trust=source_trust,
+            )
+        except ActivityProtectedQuotaExceeded as exc:
+            await db.rollback()
+            raise ToolError(
+                "activity.protected_per_source_quota_exceeded: "
+                f"maximum={config.ACTIVITY_PROTECTED_PER_SOURCE_QUOTA} source={caller}"
+            ) from exc
         await db.commit()
 
         log_audit("log_activity", caller, project_name, ok=True)

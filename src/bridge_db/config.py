@@ -44,6 +44,37 @@ LOG_LEVEL: str = os.environ.get("BRIDGE_DB_LOG_LEVEL", "INFO").upper()
 ACTIVITY_RETENTION_PER_SOURCE: int = 50
 SNAPSHOT_RETENTION_PER_SYSTEM: int = 10
 
+# Security capacity policy. Limits are measured after UTF-8 encoding and writes
+# are rejected before mutation; existing oversized rows remain readable.
+ACTIVITY_PROJECT_NAME_MAX_BYTES: int = 4 * 1024
+ACTIVITY_SUMMARY_MAX_BYTES: int = 64 * 1024
+ACTIVITY_BRANCH_MAX_BYTES: int = 4 * 1024
+ACTIVITY_TIMESTAMP_MAX_BYTES: int = 128
+ACTIVITY_TAG_MAX_BYTES: int = 1024
+ACTIVITY_TAGS_MAX_ITEMS: int = 64
+ACTIVITY_COMBINED_MAX_BYTES: int = 128 * 1024
+ACTIVITY_PROTECTED_PER_SOURCE_QUOTA: int = 1000
+
+HANDOFF_PROJECT_NAME_MAX_BYTES: int = 4 * 1024
+HANDOFF_PROJECT_PATH_MAX_BYTES: int = 16 * 1024
+HANDOFF_ROADMAP_FILE_MAX_BYTES: int = 4 * 1024
+HANDOFF_PHASE_MAX_BYTES: int = 64 * 1024
+HANDOFF_COMBINED_MAX_BYTES: int = 72 * 1024
+HANDOFF_OPEN_QUOTA: int = 100
+HANDOFF_TOTAL_ROWS_QUOTA: int = 10_000
+HANDOFF_PAGE_DEFAULT: int = 100
+HANDOFF_PAGE_MAX: int = 200
+
+SNAPSHOT_JSON_MAX_BYTES: int = 256 * 1024
+SNAPSHOT_JSON_MAX_DEPTH: int = 32
+SNAPSHOT_JSON_MAX_NODES: int = 10_000
+
+CONTEXT_SECTION_MAX_BYTES: int = 256 * 1024
+CONTEXT_TOTAL_MAX_BYTES: int = 1024 * 1024
+
+WRITE_CONFLICT_DETAIL_MAX_BYTES: int = 16 * 1024
+WRITE_CONFLICT_MAX_IDENTITIES: int = 10_000
+
 # Tags whose rows are permanently exempt from activity retention (BD-INV-1).
 # Matched case-insensitively. Do not add other systems' tag names here —
 # LEDGER is the universal opt-in for durable entries.

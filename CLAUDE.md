@@ -26,7 +26,7 @@ uv run python -m bridge_db --promote-handoff 42      # reviewed handoff promotio
 
 ## Architecture
 
-- **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=15000`). Schema at v14 — v6 added `canonical_key` to `pending_handoffs`; v7 added `source_trust` provenance columns to all four instruction-bearing tables; v8 added `shipped_event_dispositions`; v9 added `session_costs`; v10 added context-section integer `version` CAS, `context_section_export_state`, and durable `write_conflicts` receipts; v11 backfills activity `tags` into `content_index`; v12 adds the `session_classification` sidecar for heuristic cost-routing attribution while keeping `session_costs` as pure actuals; v13 adds `claimed_by` to `pending_handoffs` (the INV-13 claimant gate for `clear_handoff`); v14 collapses the shipped-sync trio (`shipped_sync_receipts` + `shipped_event_dispositions`) into `activity_log` `sync_*` disposition columns and drops the two child tables — a shipped event's sync state now lives on the activity row itself, so the old FK-CASCADE can no longer orphan a receipt. Auth state lives in `principals.json` (not the DB); no schema change for Stage-1 auth.
+- **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=15000`). Schema at v21. v10 added context-section CAS and durable `write_conflicts`; v13 added handoff claimants; v14 collapsed shipped-sync state onto `activity_log`; v15-v20 added projection/export/import receipts and the bounded lifecycle index; v21 adds non-destructive exact conflict aggregation and explicit overflow counters. Auth state lives in `principals.json` (not the DB).
 - **MCP transport**: stdio (stdout = JSON-RPC, all logging → stderr)
 - **MCP tools**: verify the current count with `rg '@mcp\.tool' src/bridge_db -c`. As of the 2026-07-12 v14 collapse there are 24 tools across 10 modules: activity, handoffs, context, snapshots, cost, export, health, recall (FTS5 lexical search; Phase −1 of the semantic memory layer), audit (read-side observability over the JSONL audit + recall query logs), and conflicts (`get_write_conflicts`). The shipped-sync trio (`confirm_shipped_sync` / `record_shipped_event_disposition` / `mark_shipped_processed`) collapsed into the single `record_disposition` verb (net −2 tools). `get_recent_activity` is the raw row-level feed; `get_activity_signal` is the operator-facing feed that compresses lifecycle `session-boundary` telemetry. `health` / `status` include signals for pending handoffs, raw and actionable unprocessed shipped events, receiptless processed shipped events, FTS index drift, WAL size, and bridge-file freshness.
 - **Context access**: `get_db(ctx)` helper casts lifespan context to `aiosqlite.Connection`
@@ -78,6 +78,10 @@ uv run python -m bridge_db --promote-handoff 42      # reviewed handoff promotio
 - **Write conflicts**: use `get_write_conflicts(status="open")` to inspect
   stale `update_section` attempts, stale markdown imports, and raced handoff
   claims. Receipts are diagnostic state, not instructions to retry blindly.
+  Exact evidence identities aggregate with `occurrence_count`, `first_seen_at`,
+  and `last_seen_at`; legacy rows remain labeled `legacy`. After 10,000 distinct
+  new identities, further novel conflicts aggregate into an explicit
+  `capacity_overflow` row per surface rather than growing the table.
   `health` reports `open_write_conflicts` + `oldest_open_conflict_age_hours`;
   `status` carries the count in `signals`; `--status`/`--dogfood` print it.
   All soft signals — never folded into `ok` and never a dogfood gate.
@@ -85,6 +89,13 @@ uv run python -m bridge_db --promote-handoff 42      # reviewed handoff promotio
   (`claimed_by`, `picked_up_at`) — the default stays `pending`.
 - **Shipped-event sync**: one verb, `record_disposition(caller, activity_id, disposition, ...)`, writes a SHIPPED row's terminal sync state onto the `activity_log` `sync_*` columns (schema v14). Every terminal disposition is source-owned and requires an exact channel-bound caller matching the activity row's `source`. `disposition='synced'` additionally REQUIRES `downstream_system` + `downstream_ref` and adds `PROCESSED`. A policy `disposition` (`unsynced_by_policy` / `no_durable_target` / `superseded_without_receipt` / `declined_mapping`) REQUIRES a `reason`, records why the event is not receipt-backed, and does NOT add `PROCESSED`. Cross-source receipt verification or policy adjudication needs an explicit delegation contract and cannot borrow the source caller. A row that already carries `synced` proof cannot be downgraded to a policy disposition. `get_shipped_events(unprocessed_only=True)` excludes both `PROCESSED` rows and any row with a `sync_disposition`. This replaces the former `confirm_shipped_sync` / `record_shipped_event_disposition` / `mark_shipped_processed` trio; the legacy non-shipped `PROCESSED`-marking path is retired (`record_disposition` is SHIPPED-only). NOTE: `~/.claude/hooks/mcp-guard.sh` still carries a now-dead `mark_shipped_processed` pattern — operator handles that separately.
 - **Durable ledger (BD-INV-1)**: rows tagged `SHIPPED` or `LEDGER` (case-insensitive) are retention-exempt; `log_activity`'s docstring distinguishes them (`SHIPPED` = downstream sync obligation, `LEDGER` = durable operator catch-up entry). Every prune emits a `log_activity.prune` audit line naming the deleted ids and tags. `get_activity_signal` surfaces protected rows as `kind:"ledger"` entries, and `export_bridge_markdown` renders a `## Pinned Ledger` section. See `docs/internal/ACTIVITY-LEDGER-DISCOVERY-2026-07-09.md` for the discovery audit that motivated this.
+- **Capacity limits**: new activity, handoff, snapshot, and context writes use
+  the documented UTF-8/JSON budgets in README. Oversized input is rejected
+  before mutation with a stable code. Legacy oversized rows remain readable;
+  no migration deletes or truncates them. The open handoff quota is 100 and
+  the total retained handoff quota is 10,000; a full legacy history rejects
+  creation without deleting rows. `get_pending_handoffs` pages with `limit` +
+  `before_id`.
 - **Semantic memory scope closed**: FTS5 + `recall` is the final layer (Phase −1). Vector/embedding layers are ruled out — most query misses reflect content not in `bridge.db`. See closure banner in `docs/internal/bridge-db-semantic-memory-IMPLEMENTATION-PLAN-v2.1.md`.
 - **Durable evidence lifecycle**: audit and minimized recall telemetry use
   locked, fsync'd, lossless active-file rotation; no segment is automatically

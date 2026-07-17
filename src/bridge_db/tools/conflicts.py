@@ -64,7 +64,8 @@ def register(mcp: FastMCP) -> None:
                 stale_version, current_version, stale_updated_at, current_updated_at,
                 attempted_source_trust, current_source_trust,
                 attempted_content_sha256, current_content_sha256,
-                reason, status, detail_json, created_at
+                reason, status, detail_json, identity_hash, occurrence_count,
+                last_seen_at, aggregation_state, created_at
             FROM write_conflicts
             {where}
             ORDER BY created_at DESC, id DESC
@@ -92,6 +93,11 @@ def register(mcp: FastMCP) -> None:
                 "reason": row["reason"],
                 "status": row["status"],
                 "detail": _decode_detail(row["detail_json"]),
+                "identity_hash": row["identity_hash"],
+                "occurrence_count": row["occurrence_count"],
+                "first_seen_at": row["created_at"],
+                "last_seen_at": row["last_seen_at"] or row["created_at"],
+                "aggregation_state": row["aggregation_state"],
                 "created_at": row["created_at"],
             }
             for row in rows

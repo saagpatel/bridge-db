@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from typing import Annotated, Any
 
+import aiosqlite
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
@@ -25,6 +26,7 @@ from bridge_db.db import (
     rollback_on_error,
     upsert_fts_entry,
 )
+from bridge_db.capacity import require_utf8_bytes
 from bridge_db.instruction_boundary import (
     instruction_boundary,
     is_markdown_boundary_line,
@@ -159,6 +161,14 @@ def _normalized_section_content(content: str) -> str:
     return content.strip("\n")
 
 
+def _validate_context_payload(content: str) -> None:
+    require_utf8_bytes(
+        content,
+        config.CONTEXT_SECTION_MAX_BYTES,
+        "context.section_utf8_bytes_exceeded",
+    )
+
+
 async def _upsert_section(
     db: Any,
     section_name: str,
@@ -184,6 +194,7 @@ async def _upsert_section(
     # transaction as the write decision, so the caller's single commit makes
     # both durable atomically — attempted_by/operation are required for that
     # reason.
+    _validate_context_payload(content)
     if if_match_version is not None or if_match_updated_at is not None:
         conditions = ["section_name = ?"]
         params: list[Any] = [content, source_trust, section_name]
@@ -193,17 +204,26 @@ async def _upsert_section(
         if if_match_updated_at is not None:
             conditions.append("updated_at = ?")
             params.append(if_match_updated_at)
-        cursor = await db.execute(
-            f"""
-            UPDATE context_sections SET
-                content = ?,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-                source_trust = COALESCE(?, 'agent'),
-                version = version + 1
-            WHERE {" AND ".join(conditions)}
-            """,  # noqa: S608 — conditions are assembled from fixed predicates only.
-            params,
-        )
+        try:
+            cursor = await db.execute(
+                f"""
+                UPDATE context_sections SET
+                    content = ?,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                    source_trust = COALESCE(?, 'agent'),
+                    version = version + 1
+                WHERE {" AND ".join(conditions)}
+                """,  # noqa: S608 — conditions are assembled from fixed predicates only.
+                params,
+            )
+        except aiosqlite.IntegrityError as exc:
+            if "context.total_utf8_bytes_exceeded" not in str(exc):
+                raise
+            await db.rollback()
+            raise ToolError(
+                "context.total_utf8_bytes_exceeded: "
+                f"maximum={config.CONTEXT_TOTAL_MAX_BYTES}"
+            ) from exc
         await always_tx(
             db,
             cursor.rowcount <= 1,
@@ -275,13 +295,22 @@ async def _upsert_section(
             "current": current,
         }
 
-    await db.execute(
-        """
-        INSERT INTO context_sections (section_name, owner, content, source_trust, updated_at)
-        VALUES (?, ?, ?, COALESCE(?, 'agent'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        """,
-        (section_name, owner, content, source_trust),
-    )
+    try:
+        await db.execute(
+            """
+            INSERT INTO context_sections (section_name, owner, content, source_trust, updated_at)
+            VALUES (?, ?, ?, COALESCE(?, 'agent'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            """,
+            (section_name, owner, content, source_trust),
+        )
+    except aiosqlite.IntegrityError as exc:
+        if "context.total_utf8_bytes_exceeded" not in str(exc):
+            raise
+        await db.rollback()
+        raise ToolError(
+            "context.total_utf8_bytes_exceeded: "
+            f"maximum={config.CONTEXT_TOTAL_MAX_BYTES}"
+        ) from exc
     await upsert_fts_entry(
         db, "section", section_name, fts_text_for_section(section_name, content)
     )
@@ -376,6 +405,8 @@ async def sync_owned_sections_from_file(
             unchanged.append(section_name)
             continue
 
+        _validate_context_payload(content)
+
         if current is not None:
             exported_cursor = await db.execute(
                 """
@@ -464,18 +495,22 @@ async def sync_owned_sections_from_file(
         # INV-5: on rejection the receipt is staged by _upsert_section in
         # the same transaction as the refused write; the batch commit below
         # makes both durable together.
-        result = await _upsert_section(
-            db=db,
-            section_name=section_name,
-            owner="claude_ai",
-            content=content,
-            source_trust="ingested",
-            attempted_by=principal,
-            operation="sync_from_file",
-            principal=principal,
-            receipt_surface="markdown_sync",
-            if_match_version=current["version"] if current is not None else None,
-        )
+        try:
+            result = await _upsert_section(
+                db=db,
+                section_name=section_name,
+                owner="claude_ai",
+                content=content,
+                source_trust="ingested",
+                attempted_by=principal,
+                operation="sync_from_file",
+                principal=principal,
+                receipt_surface="markdown_sync",
+                if_match_version=current["version"] if current is not None else None,
+            )
+        except ToolError:
+            await db.rollback()
+            raise
         if not result["written"]:
             refreshed = result["current"]
             conflicts.append(
