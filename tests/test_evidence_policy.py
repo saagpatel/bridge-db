@@ -105,7 +105,13 @@ def test_archive_is_verified_and_preserves_every_source(
     assert result["artifact_count"] == len(plan["artifacts"])
     assert result["source_preserved"] is True
     assert result["destructive_authority"] is False
-    assert policy.verify_evidence_archive(archive) == result
+    assert (
+        policy.verify_evidence_archive(
+            archive,
+            expected_snapshot_sha256=plan["snapshot_sha256"],
+        )
+        == result
+    )
     for source, expected_digest in source_digests.items():
         assert Path(source).exists()
         assert hashlib.sha256(Path(source).read_bytes()).hexdigest() == expected_digest
@@ -170,7 +176,27 @@ def test_archive_readback_rejects_tampering(evidence_paths: Path) -> None:
         handle.write(b"tamper")
 
     with pytest.raises(policy.EvidencePolicyError, match="digest mismatch"):
-        policy.verify_evidence_archive(archive)
+        policy.verify_evidence_archive(
+            archive,
+            expected_snapshot_sha256=plan["snapshot_sha256"],
+        )
+
+
+def test_archive_readback_requires_independent_plan_digest(
+    evidence_paths: Path,
+) -> None:
+    plan = policy.collect_evidence_plan()
+    archive = evidence_paths / "archive"
+    policy.create_evidence_archive(
+        archive,
+        expected_snapshot_sha256=plan["snapshot_sha256"],
+    )
+
+    with pytest.raises(policy.EvidencePolicyError, match="expected evidence plan"):
+        policy.verify_evidence_archive(
+            archive,
+            expected_snapshot_sha256="0" * 64,
+        )
 
 
 def test_plan_rejects_symlink_evidence(evidence_paths: Path, tmp_path: Path) -> None:
@@ -218,3 +244,34 @@ def test_plan_cli_emits_machine_readable_contract(
     assert output["schema"] == policy.PLAN_SCHEMA
     assert len(output["snapshot_sha256"]) == 64
     assert output["policy"]["destructive_actions"] == "blocked"
+
+
+def test_verify_cli_requires_and_reports_independent_plan_digest(
+    evidence_paths: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    plan = policy.collect_evidence_plan()
+    archive = evidence_paths / "archive"
+    policy.create_evidence_archive(
+        archive,
+        expected_snapshot_sha256=plan["snapshot_sha256"],
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "evidence_policy",
+            "verify",
+            "--archive",
+            str(archive),
+            "--expected-snapshot-sha256",
+            plan["snapshot_sha256"],
+        ],
+    )
+
+    policy.main()
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is True
+    assert output["snapshot_sha256"] == plan["snapshot_sha256"]

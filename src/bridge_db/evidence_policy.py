@@ -238,8 +238,12 @@ def _secure_and_fsync_archive_directories(root: Path) -> None:
             os.close(fd)
 
 
-def verify_evidence_archive(archive_path: Path) -> dict[str, Any]:
-    """Verify archive manifest, artifact digests, and path confinement."""
+def verify_evidence_archive(
+    archive_path: Path,
+    *,
+    expected_snapshot_sha256: str,
+) -> dict[str, Any]:
+    """Verify archive contents against an independently retained plan digest."""
     manifest_path = archive_path / "manifest.json"
     digest_path = archive_path / "manifest.sha256"
     try:
@@ -263,6 +267,8 @@ def verify_evidence_archive(archive_path: Path) -> dict[str, Any]:
         or any(character not in "0123456789abcdef" for character in snapshot_sha256)
     ):
         raise EvidencePolicyError("archive snapshot digest is invalid")
+    if snapshot_sha256 != expected_snapshot_sha256:
+        raise EvidencePolicyError("archive does not match expected evidence plan")
 
     artifacts_raw = manifest.get("artifacts")
     if not isinstance(artifacts_raw, list):
@@ -356,7 +362,10 @@ def create_evidence_archive(
             os.fsync(parent_fd)
         finally:
             os.close(parent_fd)
-        return verify_evidence_archive(archive_path)
+        return verify_evidence_archive(
+            archive_path,
+            expected_snapshot_sha256=expected_snapshot_sha256,
+        )
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
@@ -409,6 +418,12 @@ def main() -> None:
     )
     archive.add_argument("--destination", type=Path, required=True)
     archive.add_argument("--expected-snapshot-sha256", required=True)
+    verify = subparsers.add_parser(
+        "verify",
+        help="Verify an archive against an independently retained plan digest",
+    )
+    verify.add_argument("--archive", type=Path, required=True)
+    verify.add_argument("--expected-snapshot-sha256", required=True)
     acknowledge = subparsers.add_parser(
         "acknowledge",
         help="Record review of an exact plan; does not authorize cleanup",
@@ -424,6 +439,11 @@ def main() -> None:
         elif args.command == "archive":
             result = create_evidence_archive(
                 args.destination,
+                expected_snapshot_sha256=args.expected_snapshot_sha256,
+            )
+        elif args.command == "verify":
+            result = verify_evidence_archive(
+                args.archive,
                 expected_snapshot_sha256=args.expected_snapshot_sha256,
             )
         else:
