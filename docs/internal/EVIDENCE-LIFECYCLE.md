@@ -51,6 +51,17 @@ atomically published, and read-verified. A stale digest fails closed. Source
 evidence is never removed or rewritten, and the manifest explicitly carries
 `destructive_authority=false`. Archives can contain historical sensitive
 telemetry and require equivalent or stronger access controls than the source.
+Retain the plan digest independently and use it for later recovery checks:
+
+```console
+python -m bridge_db.evidence_policy verify \
+  --archive /protected/archive/bridge-db-evidence \
+  --expected-snapshot-sha256 <independently-retained-plan-digest>
+```
+
+The adjacent manifest checksum detects corruption; the independently retained
+plan digest prevents a replacement manifest and checksum from becoming
+self-authenticating.
 
 Plan review can be recorded without granting cleanup authority:
 

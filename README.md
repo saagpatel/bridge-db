@@ -195,9 +195,9 @@ args = ["run", "--directory", "/path/to/bridge-db", "python", "-m", "bridge_db"]
   [docs/internal/EVIDENCE-LIFECYCLE.md](docs/internal/EVIDENCE-LIFECYCLE.md).
 - Evidence policy: `uv run python -m bridge_db.evidence_policy plan` emits a
   non-sensitive, content-bound preservation plan. The companion `archive`
-  command creates and verifies an atomic private copy, while `acknowledge`
-  records review without granting cleanup authority. No command deletes or
-  rewrites source evidence.
+  command creates an atomic private copy, `verify` binds later readback to an
+  independently retained plan digest, and `acknowledge` records review without
+  granting cleanup authority. No command deletes or rewrites source evidence.
 - FTS repair: `uv run python -m bridge_db --rebuild-content-index` rebuilds the local `content_index` from source tables when health reports recall-index drift
 - Canonical-key reconcile: `uv run python -m bridge_db --reconcile-canonical-keys` rewrites stored `activity_log` and `pending_handoffs` `canonical_key` values through GithubRepoAuditor's registry, storing GHRA `repo_full_name` for repo-backed projects and leaving unresolvable rows `NULL`.
 - Session boundary logging: Claude Code's SessionEnd hook should call `uv run --directory /path/to/bridge-db python -m bridge_db --log-session-boundary <project>` rather than writing SQLite directly; this path adds the FTS row and does not run activity retention pruning
