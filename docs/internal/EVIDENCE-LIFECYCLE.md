@@ -44,7 +44,20 @@ python -m bridge_db --verify-recovery-anchor
 
 The first command is idempotent only in the preservation sense: if a bundle
 already exists, it verifies and preserves it instead of overwriting it. Health
-reports `current_recovery_anchor.state` as `verified`, `missing`, or `invalid`.
+reports `current_recovery_anchor.state` as:
+
+- `verified` when the bundle passes recovery verification and its semantic
+  fingerprint still matches the live database;
+- `stale` when the bundle remains internally valid but the live database has
+  changed since it was created. This is a freshness mismatch, not evidence of
+  bundle corruption, and current recovery readiness remains false until an
+  operator separately approves replacement;
+- `missing` when no current bundle exists; or
+- `invalid` when the bundle or live-source comparison cannot be verified.
+
+The standalone `--verify-recovery-anchor` command proves bundle integrity
+without requiring a readable live database; `health`, `status`, and `dogfood`
+add the live-source freshness comparison.
 It reports historical migration-backup provenance separately as `verified`,
 `readable_but_unknown`, or `mixed_or_unreadable`. A verified current anchor can
 establish present recovery readiness, but it does not change any legacy file or
