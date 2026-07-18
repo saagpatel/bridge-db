@@ -365,6 +365,7 @@ async def run_dogfood() -> bool:
 def run_create_recovery_anchor() -> bool:
     """Create exactly one current anchor, or verify the one already present."""
     from bridge_db import config
+    from bridge_db.audit import AuditUnavailableError, log_audit
     from bridge_db.db import SCHEMA_VERSION
     from bridge_db.recovery import (
         create_recovery_anchor,
@@ -385,6 +386,28 @@ def run_create_recovery_anchor() -> bool:
         disposition = "preserved_existing"
     except (OSError, RuntimeError) as exc:
         print(f"recovery anchor creation refused: {exc}")
+        return False
+
+    detail = (
+        f"disposition={disposition} state={result['state']} "
+        f"path={result['path']} sha256={result.get('sha256')}"
+    )
+    try:
+        audit_result = log_audit(
+            "recovery_anchor.create",
+            "operator-cli",
+            "bridge-db",
+            ok=bool(result["ready"]),
+            detail=detail,
+        )
+    except AuditUnavailableError as exc:
+        print(f"recovery anchor audit evidence unavailable: {exc}")
+        return False
+    if audit_result["audit_degraded"]:
+        print(
+            "recovery anchor audit evidence degraded; "
+            "refusing to report auditable success"
+        )
         return False
 
     print("bridge-db RecoveryAnchorV1")

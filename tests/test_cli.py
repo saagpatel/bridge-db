@@ -190,15 +190,63 @@ async def test_recovery_anchor_cli_creates_once_and_verifies(
     assert "State: verified" in created
     assert "Digest verified: True" in created
     assert "Semantic readback: True" in created
+    events = [
+        json.loads(line)
+        for line in cfg.AUDIT_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    ]
+    assert events[-1]["tool"] == "recovery_anchor.create"
+    assert events[-1]["caller"] == "operator-cli"
+    assert events[-1]["project"] == "bridge-db"
+    assert events[-1]["ok"] is True
+    assert "disposition=created" in events[-1]["detail"]
+    assert "state=verified" in events[-1]["detail"]
+    assert "sha256=" in events[-1]["detail"]
 
     assert run_create_recovery_anchor() is True
     preserved = capsys.readouterr().out
     assert "Result: preserved_existing" in preserved
+    events = [
+        json.loads(line)
+        for line in cfg.AUDIT_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    ]
+    assert "disposition=preserved_existing" in events[-1]["detail"]
 
     assert run_verify_recovery_anchor() is True
     verified = capsys.readouterr().out
     assert "RecoveryAnchorV1 verification" in verified
     assert "State: verified" in verified
+
+
+@pytest.mark.asyncio
+async def test_recovery_anchor_cli_refuses_success_when_audit_degrades(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    db = await open_db(db_path)
+    await db.close()
+
+    def degraded_audit(
+        _tool: str,
+        _caller: str | None,
+        _project: str | None,
+        ok: bool,
+        detail: str | None = None,
+    ) -> dict[str, object]:
+        del ok, detail
+        return {"audit_degraded": True}
+
+    monkeypatch.setattr(
+        "bridge_db.audit.log_audit",
+        degraded_audit,
+    )
+
+    assert run_create_recovery_anchor() is False
+    output = capsys.readouterr().out
+    assert "audit evidence degraded" in output
+    assert "RecoveryAnchorV1" not in output
 
 
 def test_recovery_anchor_cli_fails_closed_when_missing(
