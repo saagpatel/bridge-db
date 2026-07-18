@@ -18,6 +18,10 @@ RECOVERY_ANCHOR_SCHEMA = "RecoveryAnchorV1"
 RECOVERY_ANCHOR_SUFFIX = ".recovery-anchor-v1"
 RECOVERY_DATABASE_NAME = "anchor.sqlite"
 RECOVERY_MANIFEST_NAME = "manifest.json"
+RECOVERY_DATABASE_SIDECAR_NAMES = (
+    f"{RECOVERY_DATABASE_NAME}-wal",
+    f"{RECOVERY_DATABASE_NAME}-shm",
+)
 SEMANTIC_READBACK_TABLES = (
     "context_sections",
     "activity_log",
@@ -202,6 +206,12 @@ def verify_recovery_anchor(
     try:
         if anchor_path.stat().st_mode & 0o077:
             errors.append("anchor_permissions_not_private")
+    except OSError:
+        errors.append("anchor_unreadable")
+    try:
+        artifact_names = {path.name for path in anchor_path.iterdir()}
+        if artifact_names != {RECOVERY_DATABASE_NAME, RECOVERY_MANIFEST_NAME}:
+            errors.append("anchor_artifact_set_mismatch")
     except OSError:
         errors.append("anchor_unreadable")
 
@@ -420,9 +430,20 @@ def create_recovery_anchor(
         target = sqlite3.connect(database_path)
         try:
             source.backup(target)
+            mode_row = target.execute("PRAGMA journal_mode=DELETE").fetchone()
+            if mode_row is None or str(mode_row[0]).lower() != "delete":
+                raise RuntimeError(
+                    "online backup could not enter sidecar-free journal mode"
+                )
         finally:
             target.close()
             source.close()
+        for sidecar_name in RECOVERY_DATABASE_SIDECAR_NAMES:
+            sidecar = temporary / sidecar_name
+            if sidecar.exists() or sidecar.is_symlink():
+                sidecar.unlink()
+        if {path.name for path in temporary.iterdir()} != {RECOVERY_DATABASE_NAME}:
+            raise RuntimeError("online backup produced unexpected recovery artifacts")
         os.chmod(database_path, 0o600)
         _fsync_file(database_path)
 

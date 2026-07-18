@@ -180,6 +180,32 @@ def test_plan_and_archive_include_recovery_anchor_bundle(
     assert manifest.read_text(encoding="utf-8") == '{"schema":"RecoveryAnchorV1"}\n'
 
 
+def test_plan_preserves_existing_recovery_anchor_sidecars(
+    evidence_paths: Path,
+) -> None:
+    anchor = recovery.recovery_anchor_path(config.DB_PATH)
+    anchor.mkdir(mode=0o700)
+    (anchor / recovery.RECOVERY_DATABASE_NAME).write_bytes(b"recovery database")
+    (anchor / recovery.RECOVERY_MANIFEST_NAME).write_text(
+        '{"schema":"RecoveryAnchorV1"}\n',
+        encoding="utf-8",
+    )
+    sidecars = {
+        anchor / name for name in recovery.RECOVERY_DATABASE_SIDECAR_NAMES
+    }
+    for sidecar in sidecars:
+        sidecar.write_bytes(b"existing sidecar evidence")
+
+    plan = policy.collect_evidence_plan()
+    planned_sidecars = {
+        Path(item["source_path"])
+        for item in plan["artifacts"]
+        if item["kind"] == "recovery_anchor_sidecar"
+    }
+
+    assert planned_sidecars == sidecars
+
+
 def test_plan_refuses_partial_recovery_anchor_bundle(
     evidence_paths: Path,
 ) -> None:

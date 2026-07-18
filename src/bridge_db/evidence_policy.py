@@ -24,6 +24,7 @@ from bridge_db.evidence import (
 )
 from bridge_db.recovery import (
     RECOVERY_DATABASE_NAME,
+    RECOVERY_DATABASE_SIDECAR_NAMES,
     RECOVERY_MANIFEST_NAME,
     recovery_anchor_path,
 )
@@ -169,6 +170,12 @@ def collect_evidence_plan() -> dict[str, Any]:
             (RECOVERY_MANIFEST_NAME, "recovery_anchor_manifest"),
         ):
             artifacts.append(_artifact_record(anchor / name, kind=kind))
+        for name in RECOVERY_DATABASE_SIDECAR_NAMES:
+            sidecar = anchor / name
+            if sidecar.exists() or sidecar.is_symlink():
+                artifacts.append(
+                    _artifact_record(sidecar, kind="recovery_anchor_sidecar")
+                )
 
     artifacts.sort(key=lambda item: (item["kind"], item["source_path"]))
     snapshot = {

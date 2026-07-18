@@ -56,6 +56,12 @@ async def test_create_anchor_is_private_and_disposable_recovery_verifies(
     assert (
         anchor.joinpath(recovery.RECOVERY_MANIFEST_NAME).stat().st_mode & 0o777 == 0o600
     )
+    assert {path.name for path in anchor.iterdir()} == {
+        recovery.RECOVERY_DATABASE_NAME,
+        recovery.RECOVERY_MANIFEST_NAME,
+    }
+    with sqlite3.connect(anchor / recovery.RECOVERY_DATABASE_NAME) as restored:
+        assert restored.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
 
 
 async def test_anchor_creation_preserves_existing_verified_bundle(
@@ -261,6 +267,26 @@ async def test_anchor_verification_rejects_symlinked_bundle_file(
     assert "backup_symlink" in result["errors"]
 
 
+async def test_anchor_verification_rejects_unmanifested_sqlite_sidecar(
+    tmp_path: Path,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    anchor = recovery.recovery_anchor_path(db_path)
+    (anchor / f"{recovery.RECOVERY_DATABASE_NAME}-wal").write_bytes(b"untracked")
+
+    result = recovery.verify_recovery_anchor(
+        anchor,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    assert result["ready"] is False
+    assert result["errors"] == ["anchor_artifact_set_mismatch"]
+
+
 async def test_anchor_detects_truncated_backup(tmp_path: Path) -> None:
     db_path = await _source_database(tmp_path)
     recovery.create_recovery_anchor(
@@ -295,7 +321,10 @@ async def test_anchor_detects_missing_metadata(tmp_path: Path) -> None:
     )
 
     assert result["state"] == "invalid"
-    assert result["errors"] == ["metadata_missing"]
+    assert result["errors"] == [
+        "anchor_artifact_set_mismatch",
+        "metadata_missing",
+    ]
 
 
 async def test_anchor_detects_manifest_digest_mismatch(tmp_path: Path) -> None:
