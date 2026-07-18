@@ -10,8 +10,9 @@ import sqlite3
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 @dataclass(frozen=True)
@@ -208,7 +209,7 @@ def sha256_file(path: Path) -> str:
 
 
 def migration_backup_inventory(db_path: Path) -> dict[str, Any]:
-    """Inventory and verify sibling migration backups without deleting them."""
+    """Inventory sibling migration backups without inventing provenance."""
     backups: list[dict[str, Any]] = []
     for backup in sorted(db_path.parent.glob(f"{db_path.name}.*.bak")):
         manifest = Path(f"{backup}.sha256")
@@ -217,6 +218,7 @@ def migration_backup_inventory(db_path: Path) -> dict[str, Any]:
         schema_version: int | None = None
         integrity_ok = False
         digest_ok = False
+        metadata_ok = False
         try:
             expected = manifest.read_text(encoding="utf-8").strip()
             digest_ok = bool(expected) and expected == sha256_file(backup)
@@ -234,6 +236,34 @@ def migration_backup_inventory(db_path: Path) -> dict[str, Any]:
             errors.append("sqlite_unreadable")
         if not integrity_ok:
             errors.append("integrity_unverified")
+        try:
+            loaded_metadata = cast(
+                object,
+                json.loads(metadata.read_text(encoding="utf-8")),
+            )
+            if isinstance(loaded_metadata, dict):
+                metadata_record = cast(dict[object, object], loaded_metadata)
+                created_at = metadata_record.get("created_at")
+                created_at_ok = False
+                if isinstance(created_at, str):
+                    try:
+                        datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                        created_at_ok = True
+                    except ValueError:
+                        pass
+                metadata_ok = (
+                    metadata_record.get("schema") == "MigrationBackupEvidenceV1"
+                    and created_at_ok
+                    and metadata_record.get("source_schema_version") == schema_version
+                    and metadata_record.get("backup_bytes") == backup.stat().st_size
+                    and metadata_record.get("sha256") == sha256_file(backup)
+                    and metadata_record.get("recovery_readback") == "verified"
+                )
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            errors.append("metadata_unreadable")
+        if not metadata_ok:
+            errors.append("metadata_unverified")
+        creation_time_verified = digest_ok and integrity_ok and metadata_ok
         backups.append(
             {
                 "path": str(backup),
@@ -241,19 +271,41 @@ def migration_backup_inventory(db_path: Path) -> dict[str, Any]:
                 "manifest_path": str(manifest),
                 "metadata_path": str(metadata),
                 "metadata_exists": metadata.exists(),
+                "metadata_ok": metadata_ok,
                 "digest_ok": digest_ok,
                 "integrity_ok": integrity_ok,
                 "schema_version": schema_version,
                 "recovery_readback": "verified" if not errors else "unverified",
+                "sqlite_readable": integrity_ok,
+                "provenance": (
+                    "creation_time_verified"
+                    if creation_time_verified
+                    else "historical_unverified"
+                ),
                 "retention_policy": "operator_acknowledgement_required",
                 "cleanup": "approval_required",
                 "errors": sorted(set(errors)),
             }
         )
+    readable_count = sum(item["sqlite_readable"] for item in backups)
+    provenance_unverified_count = sum(
+        item["provenance"] == "historical_unverified" for item in backups
+    )
     return {
         "count": len(backups),
         "verified_count": sum(
             item["recovery_readback"] == "verified" for item in backups
+        ),
+        "readable_count": readable_count,
+        "provenance_unverified_count": provenance_unverified_count,
+        "provenance_state": (
+            "none"
+            if not backups
+            else "verified"
+            if not provenance_unverified_count
+            else "readable_but_unknown"
+            if readable_count == len(backups)
+            else "mixed_or_unreadable"
         ),
         "cleanup": "approval_required",
         "backups": backups,

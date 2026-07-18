@@ -9,7 +9,7 @@ import aiosqlite
 import pytest
 from conftest import CaptureMCP, make_ctx
 
-from bridge_db import config
+from bridge_db import config, recovery
 from bridge_db.db import (
     SCHEMA_VERSION,
     fts_text_for_activity,
@@ -121,6 +121,70 @@ async def test_health_accepts_completed_evidence_disposition(
     assert result["storage_ok"] is True
     assert result["evidence_lifecycle"]["disposition_degraded"] is False
     assert result["evidence_lifecycle"]["dispositions"]["completed_count"] == 1
+
+
+async def test_health_separates_verified_current_anchor_from_legacy_uncertainty(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "test.db"
+    legacy = tmp_path / "test.db.pre-v1.bak"
+    legacy.write_bytes(db_path.read_bytes())
+
+    without_anchor = await fns["health"](ctx=make_ctx(db))
+    assert without_anchor["storage_ok"] is False
+    assert (
+        without_anchor["evidence_lifecycle"]["current_recovery_anchor"]["state"]
+        == "missing"
+    )
+    assert (
+        without_anchor["evidence_lifecycle"]["migration_backups"]["provenance_state"]
+        == "readable_but_unknown"
+    )
+
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    with_anchor = await fns["health"](ctx=make_ctx(db))
+
+    assert with_anchor["storage_ok"] is True
+    assert with_anchor["evidence_lifecycle"]["current_recovery_ready"] is True
+    assert (
+        with_anchor["evidence_lifecycle"]["current_recovery_anchor"]["state"]
+        == "verified"
+    )
+    assert with_anchor["evidence_lifecycle"]["legacy_backup_provenance_ok"] is False
+    assert with_anchor["evidence_lifecycle"]["backup_integrity_ok"] is False
+    assert with_anchor["evidence_lifecycle"]["recovery_integrity_ok"] is True
+    assert (
+        with_anchor["evidence_lifecycle"]["migration_backups"][
+            "provenance_unverified_count"
+        ]
+        == 1
+    )
+    assert legacy.exists()
+
+
+async def test_health_degrades_when_current_anchor_is_invalid(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "test.db"
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    manifest = recovery.recovery_anchor_path(db_path) / recovery.RECOVERY_MANIFEST_NAME
+    manifest.write_text("{}", encoding="utf-8")
+
+    result = await fns["health"](ctx=make_ctx(db))
+
+    assert result["storage_ok"] is False
+    assert result["evidence_lifecycle"]["current_recovery_ready"] is False
+    assert result["evidence_lifecycle"]["current_recovery_anchor"]["state"] == "invalid"
 
 
 async def test_health_row_counts_reflect_data(

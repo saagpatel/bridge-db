@@ -16,6 +16,7 @@ import bridge_db.tools.recall as recall_tool
 from bridge_db import auth, config
 from bridge_db.__main__ import (
     run_cancel_handoff,
+    run_create_recovery_anchor,
     run_dogfood,
     run_enroll,
     run_list_principals,
@@ -29,6 +30,7 @@ from bridge_db.__main__ import (
     run_revoke_principal,
     run_status,
     run_upgrade_principals_v2,
+    run_verify_recovery_anchor,
 )
 from bridge_db.db import (
     collect_fts_index_metrics,
@@ -169,6 +171,47 @@ async def test_run_status_reports_healthy_summary(
     assert "dogfood will fail until cleared" in captured
     assert "cc=2026-04-17" in captured
     assert '"cc": "2026-04-17 (bridge-db)"' in captured
+
+
+@pytest.mark.asyncio
+async def test_recovery_anchor_cli_creates_once_and_verifies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    db = await open_db(db_path)
+    await db.close()
+
+    assert run_create_recovery_anchor() is True
+    created = capsys.readouterr().out
+    assert "Result: created" in created
+    assert "State: verified" in created
+    assert "Digest verified: True" in created
+    assert "Semantic readback: True" in created
+
+    assert run_create_recovery_anchor() is True
+    preserved = capsys.readouterr().out
+    assert "Result: preserved_existing" in preserved
+
+    assert run_verify_recovery_anchor() is True
+    verified = capsys.readouterr().out
+    assert "RecoveryAnchorV1 verification" in verified
+    assert "State: verified" in verified
+
+
+def test_recovery_anchor_cli_fails_closed_when_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cfg, "DB_PATH", tmp_path / "missing.db")
+
+    assert run_verify_recovery_anchor() is False
+    output = capsys.readouterr().out
+    assert "State: missing" in output
+    assert "anchor_missing" in output
 
 
 @pytest.mark.asyncio
