@@ -77,10 +77,18 @@ def _semantic_value(value: object) -> list[object]:
 
 
 def _sqlite_semantic_fingerprint(path: Path) -> str:
-    """Hash the recovery-relevant row content without exposing stored values."""
+    """Hash all persisted user-table content without exposing stored values."""
     digest = hashlib.sha256()
     with sqlite3.connect(_sqlite_ro_uri(path), uri=True) as check:
-        for table in SEMANTIC_READBACK_TABLES:
+        tables = [
+            str(row[0])
+            for row in check.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
+                "ORDER BY name"
+            )
+        ]
+        for table in tables:
             cursor = check.execute(f'SELECT * FROM "{table}"')  # noqa: S608
             columns = [str(column[0]) for column in cursor.description or ()]
             row_hashes: list[str] = []

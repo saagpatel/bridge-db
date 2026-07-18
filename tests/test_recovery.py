@@ -123,6 +123,30 @@ async def test_anchor_inventory_becomes_stale_after_same_count_update(
     assert result["source_current"] is False
 
 
+async def test_anchor_inventory_includes_bridge_sidecar_state(
+    tmp_path: Path,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    with sqlite3.connect(db_path) as changed:
+        changed.execute(
+            "INSERT INTO bridge_file_export_state "
+            "(singleton, exported_content_sha256) VALUES (1, ?)",
+            ("a" * 64,),
+        )
+
+    result = recovery.recovery_anchor_inventory(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    assert result["state"] == "stale"
+    assert result["source_current"] is False
+
+
 async def test_anchor_supports_sqlite_uri_characters_in_source_path(
     tmp_path: Path,
 ) -> None:
