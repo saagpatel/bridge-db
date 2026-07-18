@@ -335,6 +335,9 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         backup_inventory["count"] > 0
         and backup_inventory["count"] == backup_inventory["verified_count"]
     )
+    backup_integrity_ok = (
+        backup_inventory["count"] == backup_inventory["verified_count"]
+    )
     recovery_anchor = recovery_anchor_inventory(
         Path(open_main_path),
         expected_schema_version=SCHEMA_VERSION,
@@ -371,7 +374,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "recovery_integrity_ok": recovery_integrity_ok,
         # Preserve the established key's historical meaning for consumers that
         # use it specifically to inspect migration-backup verification.
-        "backup_integrity_ok": legacy_backup_provenance_ok,
+        "backup_integrity_ok": backup_integrity_ok,
         "destructive_actions": "approval_required",
     }
 
@@ -810,7 +813,7 @@ async def collect_status_summary(
                 "disposition_degraded"
             ],
             "migration_backup_integrity_ok": health["evidence_lifecycle"][
-                "legacy_backup_provenance_ok"
+                "backup_integrity_ok"
             ],
             "current_recovery_anchor_ready": health["evidence_lifecycle"][
                 "current_recovery_ready"

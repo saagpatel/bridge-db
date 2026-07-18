@@ -92,6 +92,9 @@ async def test_health_degrades_when_recovery_evidence_is_missing(
     assert result["storage_ok"] is False
     assert result["evidence_lifecycle"]["migration_backups"]["count"] == 0
     assert result["evidence_lifecycle"]["legacy_backup_provenance_ok"] is False
+    assert result["evidence_lifecycle"]["backup_integrity_ok"] is True
+    status = await fns["status"](ctx=make_ctx(db))
+    assert status["signals"]["migration_backup_integrity_ok"] is True
     assert result["evidence_lifecycle"]["current_recovery_anchor"]["state"] == "missing"
     assert result["evidence_lifecycle"]["recovery_integrity_ok"] is False
 
