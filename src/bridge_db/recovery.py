@@ -40,8 +40,13 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _sqlite_ro_uri(path: Path) -> str:
+    """Return a percent-escaped SQLite read-only URI for any valid path."""
+    return f"{path.resolve().as_uri()}?mode=ro"
+
+
 def _sqlite_readback(path: Path) -> tuple[int, dict[str, int], bool]:
-    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as check:
+    with sqlite3.connect(_sqlite_ro_uri(path), uri=True) as check:
         integrity_row = check.execute("PRAGMA integrity_check").fetchone()
         integrity_ok = integrity_row is not None and integrity_row[0] == "ok"
         version_row = check.execute("PRAGMA user_version").fetchone()
@@ -61,6 +66,42 @@ def _sqlite_readback(path: Path) -> tuple[int, dict[str, int], bool]:
                 raise sqlite3.DatabaseError(f"row count unavailable: {table}")
             row_counts[table] = int(count_row[0])
     return schema_version, row_counts, integrity_ok
+
+
+def _semantic_value(value: object) -> list[object]:
+    if isinstance(value, bytes):
+        return ["bytes", value.hex()]
+    if isinstance(value, float):
+        return ["float", repr(value)]
+    return [type(value).__name__, value]
+
+
+def _sqlite_semantic_fingerprint(path: Path) -> str:
+    """Hash the recovery-relevant row content without exposing stored values."""
+    digest = hashlib.sha256()
+    with sqlite3.connect(_sqlite_ro_uri(path), uri=True) as check:
+        for table in SEMANTIC_READBACK_TABLES:
+            cursor = check.execute(f'SELECT * FROM "{table}"')  # noqa: S608
+            columns = [str(column[0]) for column in cursor.description or ()]
+            row_hashes: list[str] = []
+            for row in cursor:
+                encoded = json.dumps(
+                    [_semantic_value(value) for value in row],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
+                row_hashes.append(hashlib.sha256(encoded).hexdigest())
+            digest.update(table.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(
+                json.dumps(columns, separators=(",", ":")).encode("utf-8")
+            )
+            digest.update(b"\0")
+            for row_hash in sorted(row_hashes):
+                digest.update(row_hash.encode("ascii"))
+                digest.update(b"\n")
+    return digest.hexdigest()
 
 
 def _write_private_file(path: Path, content: bytes) -> None:
@@ -289,10 +330,37 @@ def recovery_anchor_inventory(
     expected_schema_version: int,
 ) -> dict[str, Any]:
     """Return non-sensitive readiness for the stable current anchor."""
-    return verify_recovery_anchor(
+    result = verify_recovery_anchor(
         recovery_anchor_path(db_path),
         expected_schema_version=expected_schema_version,
     )
+    if not result["ready"]:
+        return result
+    try:
+        anchor_fingerprint = _sqlite_semantic_fingerprint(
+            recovery_anchor_path(db_path) / RECOVERY_DATABASE_NAME
+        )
+        source_fingerprint = _sqlite_semantic_fingerprint(db_path)
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return {
+            **result,
+            "state": "invalid",
+            "ready": False,
+            "source_current": None,
+            "recovery_readback": "unverified",
+            "errors": sorted([*result["errors"], "source_fingerprint_unavailable"]),
+        }
+    source_current = source_fingerprint == anchor_fingerprint
+    if source_current:
+        return {**result, "source_current": True}
+    return {
+        **result,
+        "state": "stale",
+        "ready": False,
+        "source_current": False,
+        "recovery_readback": "stale",
+        "errors": sorted([*result["errors"], "source_changed_since_anchor"]),
+    }
 
 
 def create_recovery_anchor(
@@ -323,7 +391,7 @@ def create_recovery_anchor(
     published = False
     try:
         database_path = temporary / RECOVERY_DATABASE_NAME
-        source = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        source = sqlite3.connect(_sqlite_ro_uri(db_path), uri=True)
         target = sqlite3.connect(database_path)
         try:
             source.backup(target)

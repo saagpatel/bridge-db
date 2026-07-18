@@ -187,6 +187,33 @@ async def test_health_degrades_when_current_anchor_is_invalid(
     assert result["evidence_lifecycle"]["current_recovery_anchor"]["state"] == "invalid"
 
 
+async def test_health_degrades_when_current_anchor_is_stale(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "test.db"
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary) "
+        "VALUES ('codex', '2026-07-18', 'bridge-db', 'after anchor')"
+    )
+    await db.commit()
+
+    result = await fns["health"](ctx=make_ctx(db))
+
+    assert result["storage_ok"] is False
+    assert result["evidence_lifecycle"]["current_recovery_ready"] is False
+    assert result["evidence_lifecycle"]["current_recovery_anchor"]["state"] == "stale"
+    assert (
+        "source_changed_since_anchor"
+        in result["evidence_lifecycle"]["current_recovery_anchor"]["errors"]
+    )
+
+
 async def test_health_row_counts_reflect_data(
     db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
 ) -> None:
