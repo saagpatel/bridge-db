@@ -524,7 +524,7 @@ def create_recovery_anchor(
     if not db_path.is_file():
         raise FileNotFoundError(f"database does not exist: {db_path}")
     anchor_path = recovery_anchor_path(db_path)
-    if anchor_path.exists():
+    if anchor_path.exists() or anchor_path.is_symlink():
         raise FileExistsError(f"recovery anchor already exists: {anchor_path}")
 
     db_path.parent.mkdir(parents=True, exist_ok=True)

@@ -81,6 +81,24 @@ async def test_anchor_creation_preserves_existing_verified_bundle(
         )
 
 
+async def test_anchor_creation_preserves_dangling_symlink(
+    tmp_path: Path,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    anchor = recovery.recovery_anchor_path(db_path)
+    anchor.symlink_to(tmp_path / "missing-recovery-evidence", target_is_directory=True)
+
+    with pytest.raises(FileExistsError, match="recovery anchor already exists"):
+        recovery.create_recovery_anchor(
+            db_path,
+            expected_schema_version=SCHEMA_VERSION,
+        )
+
+    assert anchor.is_symlink()
+    assert not anchor.exists()
+    assert list(tmp_path.glob(f".{anchor.name}.tmp-*")) == []
+
+
 async def test_anchor_inventory_becomes_stale_after_source_insert(
     tmp_path: Path,
 ) -> None:
