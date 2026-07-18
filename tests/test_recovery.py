@@ -378,6 +378,49 @@ async def test_anchor_detects_truncated_backup(tmp_path: Path) -> None:
     assert "disposable_recovery_failed" in result["errors"]
 
 
+async def test_anchor_rejects_replacement_during_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    anchor = recovery.recovery_anchor_path(db_path)
+    database = anchor / recovery.RECOVERY_DATABASE_NAME
+    original_copy = recovery._copy_to_private_file  # pyright: ignore[reportPrivateUsage]
+    replaced = False
+
+    def copy_then_replace(path: Path, source: object) -> None:
+        nonlocal replaced
+        original_copy(path, source)  # type: ignore[arg-type]
+        if replaced:
+            return
+        replacement = anchor / "replacement.sqlite"
+        replacement.write_bytes(database.read_bytes())
+        with sqlite3.connect(replacement) as changed:
+            changed.execute(
+                "UPDATE context_sections SET content = ? WHERE section_name = ?",
+                ("concurrent replacement", "career"),
+            )
+        replacement.chmod(0o600)
+        os.replace(replacement, database)
+        replaced = True
+
+    monkeypatch.setattr(recovery, "_copy_to_private_file", copy_then_replace)
+
+    result = recovery.verify_recovery_anchor(
+        anchor,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    assert replaced is True
+    assert result["state"] == "invalid"
+    assert result["ready"] is False
+    assert "backup_changed_during_verification" in result["errors"]
+
+
 async def test_anchor_detects_missing_metadata(tmp_path: Path) -> None:
     db_path = await _source_database(tmp_path)
     recovery.create_recovery_anchor(

@@ -108,9 +108,7 @@ def _sqlite_semantic_fingerprint(path: Path) -> str:
                 row_hashes.append(hashlib.sha256(encoded).hexdigest())
             digest.update(table.encode("utf-8"))
             digest.update(b"\0")
-            digest.update(
-                json.dumps(columns, separators=(",", ":")).encode("utf-8")
-            )
+            digest.update(json.dumps(columns, separators=(",", ":")).encode("utf-8"))
             digest.update(b"\0")
             for row_hash in sorted(row_hashes):
                 digest.update(row_hash.encode("ascii"))
@@ -151,6 +149,17 @@ def _copy_to_private_file(path: Path, source: BinaryIO) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _stable_stat_signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    """Return the fields that expose replacement or in-place mutation."""
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
 
 
 def _fsync_directory(path: Path) -> None:
@@ -230,9 +239,7 @@ def verify_recovery_anchor(
             if not manifest_regular:
                 errors.append("metadata_not_regular")
             else:
-                manifest_permissions_private = not bool(
-                    manifest_stat.st_mode & 0o077
-                )
+                manifest_permissions_private = not bool(manifest_stat.st_mode & 0o077)
                 if not manifest_permissions_private:
                     errors.append("metadata_permissions_not_private")
         except FileNotFoundError:
@@ -248,7 +255,9 @@ def verify_recovery_anchor(
             if isinstance(loaded, dict):
                 loaded_map = cast(dict[object, object], loaded)
                 manifest = {
-                    key: value for key, value in loaded_map.items() if isinstance(key, str)
+                    key: value
+                    for key, value in loaded_map.items()
+                    if isinstance(key, str)
                 }
             else:
                 errors.append("metadata_invalid")
@@ -258,6 +267,7 @@ def verify_recovery_anchor(
     backup_bytes: int | None = None
     actual_digest: str | None = None
     database_regular = False
+    database_stat: os.stat_result | None = None
     if database_path.is_symlink():
         errors.append("backup_symlink")
     else:
@@ -274,13 +284,6 @@ def verify_recovery_anchor(
             errors.append("backup_missing")
         except OSError:
             errors.append("backup_unreadable")
-    if database_regular:
-        try:
-            backup_bytes = database_path.stat().st_size
-            actual_digest = _sha256_file(database_path)
-        except OSError:
-            errors.append("backup_unreadable")
-
     manifest_counts: dict[str, int] | None = None
     if manifest is not None:
         required_types = {
@@ -307,18 +310,6 @@ def verify_recovery_anchor(
             and manifest["source_schema_version"] != expected_schema_version
         ):
             errors.append("schema_incompatible")
-        if (
-            backup_bytes is not None
-            and isinstance(manifest.get("backup_bytes"), int)
-            and manifest["backup_bytes"] != backup_bytes
-        ):
-            errors.append("byte_size_mismatch")
-        if (
-            actual_digest is not None
-            and isinstance(manifest.get("sha256"), str)
-            and manifest["sha256"] != actual_digest
-        ):
-            errors.append("digest_mismatch")
         semantic = manifest.get("semantic_readback")
         raw_counts: object = None
         if isinstance(semantic, dict):
@@ -342,13 +333,50 @@ def verify_recovery_anchor(
         try:
             with tempfile.TemporaryDirectory(prefix="bridge-recovery-verify-") as temp:
                 disposable = Path(temp) / "restored.sqlite"
-                with database_path.open("rb") as source:
+                source_flags = os.O_RDONLY
+                if hasattr(os, "O_CLOEXEC"):
+                    source_flags |= os.O_CLOEXEC
+                if hasattr(os, "O_NOFOLLOW"):
+                    source_flags |= os.O_NOFOLLOW
+                source_fd = os.open(database_path, source_flags)
+                with os.fdopen(source_fd, "rb") as source:
+                    source_before = os.fstat(source.fileno())
+                    if not stat.S_ISREG(source_before.st_mode):
+                        raise OSError("recovery anchor changed to a non-regular file")
+                    database_permissions_private = not bool(
+                        source_before.st_mode & 0o077
+                    )
+                    if not database_permissions_private:
+                        errors.append("backup_permissions_not_private")
                     _copy_to_private_file(disposable, source)
-                (
-                    restored_schema_version,
-                    restored_counts,
-                    integrity_ok,
-                ) = _sqlite_readback(disposable)
+                    source_after_copy = os.fstat(source.fileno())
+                    path_after_copy = database_path.lstat()
+
+                    backup_bytes = disposable.stat().st_size
+                    actual_digest = _sha256_file(disposable)
+                    (
+                        restored_schema_version,
+                        restored_counts,
+                        integrity_ok,
+                    ) = _sqlite_readback(disposable)
+
+                    source_after_readback = os.fstat(source.fileno())
+                    path_after_readback = database_path.lstat()
+                    source_signature = _stable_stat_signature(source_before)
+                    if (
+                        database_stat is None
+                        or _stable_stat_signature(database_stat) != source_signature
+                        or any(
+                            _stable_stat_signature(value) != source_signature
+                            for value in (
+                                source_after_copy,
+                                path_after_copy,
+                                source_after_readback,
+                                path_after_readback,
+                            )
+                        )
+                    ):
+                        errors.append("backup_changed_during_verification")
             if not integrity_ok:
                 errors.append("integrity_check_failed")
             if restored_schema_version != expected_schema_version:
@@ -359,6 +387,21 @@ def verify_recovery_anchor(
                     errors.append("semantic_readback_mismatch")
         except (OSError, sqlite3.Error, TypeError, ValueError):
             errors.append("disposable_recovery_failed")
+
+    if (
+        backup_bytes is not None
+        and manifest is not None
+        and isinstance(manifest.get("backup_bytes"), int)
+        and manifest["backup_bytes"] != backup_bytes
+    ):
+        errors.append("byte_size_mismatch")
+    if (
+        actual_digest is not None
+        and manifest is not None
+        and isinstance(manifest.get("sha256"), str)
+        and manifest["sha256"] != actual_digest
+    ):
+        errors.append("digest_mismatch")
 
     errors = sorted(set(errors))
     permission_checks = (
@@ -541,7 +584,9 @@ def create_recovery_anchor(
         if _sqlite_semantic_fingerprint(db_path) != _sqlite_semantic_fingerprint(
             database_path
         ):
-            raise RuntimeError("source database changed during recovery anchor creation")
+            raise RuntimeError(
+                "source database changed during recovery anchor creation"
+            )
 
         os.replace(temporary, anchor_path)
         published = True
