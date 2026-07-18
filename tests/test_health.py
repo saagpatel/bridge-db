@@ -12,6 +12,7 @@ from conftest import CaptureMCP, make_ctx
 from bridge_db import config, recovery
 from bridge_db.db import (
     SCHEMA_VERSION,
+    _backup_db_file,  # pyright: ignore[reportPrivateUsage]
     fts_text_for_activity,
     fts_text_for_handoff,
     fts_text_for_section,
@@ -45,6 +46,7 @@ async def patch_db_path(
         "VALUES (1, 'test-export-state')"
     )
     await db.commit()
+    await _backup_db_file(db, "health-fixture")
 
 
 async def test_health_returns_ok_on_healthy_db(
@@ -63,6 +65,24 @@ async def test_health_returns_ok_on_healthy_db(
         result["evidence_lifecycle"]["acknowledgements"]["authority"]
         == "review_only_no_cleanup_authority"
     )
+
+
+async def test_health_degrades_when_recovery_evidence_is_missing(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    for path in tmp_path.glob("test.db.*.bak*"):
+        path.unlink()
+
+    result = await fns["health"](ctx=make_ctx(db))
+
+    assert result["ok"] is False
+    assert result["storage_ok"] is False
+    assert result["evidence_lifecycle"]["migration_backups"]["count"] == 0
+    assert result["evidence_lifecycle"]["legacy_backup_provenance_ok"] is False
+    assert result["evidence_lifecycle"]["current_recovery_anchor"]["state"] == "missing"
+    assert result["evidence_lifecycle"]["recovery_integrity_ok"] is False
 
 
 async def test_health_degrades_on_durable_audit_failure_receipt(
@@ -553,9 +573,7 @@ async def test_status_latest_activity_uses_server_recorded_time(
 
     result = await mod.collect_status_summary(db, now=FIXED_NOW)
 
-    assert result["latest_activity"]["cc"] == (
-        "2026-07-14T12:00:00Z (CurrentEvidence)"
-    )
+    assert result["latest_activity"]["cc"] == ("2026-07-14T12:00:00Z (CurrentEvidence)")
 
 
 FIXED_NOW = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)

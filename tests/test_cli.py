@@ -13,7 +13,7 @@ import pytest
 
 import bridge_db.config as cfg
 import bridge_db.tools.recall as recall_tool
-from bridge_db import auth, config
+from bridge_db import auth, config, recovery
 from bridge_db.__main__ import (
     run_cancel_handoff,
     run_create_recovery_anchor,
@@ -33,6 +33,7 @@ from bridge_db.__main__ import (
     run_verify_recovery_anchor,
 )
 from bridge_db.db import (
+    SCHEMA_VERSION,
     collect_fts_index_metrics,
     fts_text_for_activity,
     fts_text_for_section,
@@ -49,6 +50,13 @@ async def _seed_bridge_export_state(db: aiosqlite.Connection) -> None:
     await db.execute(
         "INSERT INTO bridge_file_export_state (singleton, exported_content_sha256) "
         "VALUES (1, 'tracked-test-projection')"
+    )
+
+
+def _create_cli_recovery_anchor(db_path: Path) -> None:
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
     )
 
 
@@ -153,6 +161,7 @@ async def test_run_status_reports_healthy_summary(
         await db.commit()
     finally:
         await db.close()
+    _create_cli_recovery_anchor(db_path)
 
     ok = await run_status()
     captured = capsys.readouterr().out
@@ -335,6 +344,7 @@ async def test_run_status_clarifies_dispositioned_unprocessed_shipped(
         await db.commit()
     finally:
         await db.close()
+    _create_cli_recovery_anchor(db_path)
 
     ok = await run_status()
     captured = capsys.readouterr().out
@@ -387,6 +397,7 @@ async def test_run_status_reports_freshness_attention_without_degrading_health(
         await db.commit()
     finally:
         await db.close()
+    _create_cli_recovery_anchor(db_path)
 
     ok = await run_status(now=FIXED_NOW)
     captured = capsys.readouterr().out
@@ -415,6 +426,7 @@ async def test_run_status_degraded_exit_code_stays_tied_to_bridge_health(
         await db.commit()
     finally:
         await db.close()
+    _create_cli_recovery_anchor(db_path)
 
     ok = await run_status(now=FIXED_NOW)
     captured = capsys.readouterr().out
@@ -445,6 +457,7 @@ async def test_run_status_freshness_actions_use_safe_operator_names(
         await db.commit()
     finally:
         await db.close()
+    _create_cli_recovery_anchor(db_path)
 
     ok = await run_status(now=FIXED_NOW)
     captured = capsys.readouterr().out
@@ -504,6 +517,7 @@ async def test_run_dogfood_reports_read_only_observability(
         await db.commit()
     finally:
         await db.close()
+    _create_cli_recovery_anchor(db_path)
 
     ok = await run_dogfood()
     captured = capsys.readouterr().out
@@ -727,7 +741,8 @@ def test_cli_entrypoints_smoke(flag: str, expected_text: str, tmp_path: Path) ->
 import asyncio
 import os
 from pathlib import Path
-from bridge_db.db import open_db
+from bridge_db import recovery
+from bridge_db.db import SCHEMA_VERSION, open_db
 
 
 async def main() -> None:
@@ -738,6 +753,10 @@ async def main() -> None:
     )
     await db.commit()
     await db.close()
+    recovery.create_recovery_anchor(
+        Path(os.environ["BRIDGE_DB_PATH"]),
+        expected_schema_version=SCHEMA_VERSION,
+    )
 
 
 asyncio.run(main())
@@ -842,6 +861,7 @@ def test_upgrade_principals_v2_preserves_hashes_and_adds_grants(
     )
     monkeypatch.setattr(config, "PRINCIPALS_PATH", path)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
     def confirm_upgrade(_prompt: str) -> str:
         return "upgrade"
 
@@ -871,6 +891,7 @@ async def test_cancel_handoff_requires_exact_operator_ceremony(
     await db.commit()
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
     def confirm_cancel(_prompt: str) -> str:
         return "cancel"
 
@@ -936,6 +957,7 @@ async def test_quarantine_and_exact_restore_preserve_recovery_evidence(
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     confirmations = iter(["quarantine", "restore"])
+
     def confirm_recovery(_prompt: str) -> str:
         return next(confirmations)
 

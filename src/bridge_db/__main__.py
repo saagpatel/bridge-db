@@ -75,7 +75,7 @@ async def _run_doctor() -> bool:
             config.DB_PATH,
             expected_schema_version=SCHEMA_VERSION,
         )
-        legacy_ok = legacy["count"] == legacy["verified_count"]
+        legacy_ok = legacy["count"] > 0 and legacy["count"] == legacy["verified_count"]
         recovery_ok = current["ready"] or (current["state"] == "missing" and legacy_ok)
         checks.append(
             (
@@ -678,7 +678,9 @@ def run_upgrade_principals_v2() -> bool:
         print("principals registry is already version 2")
         return True
     if data.get("version") != 1:
-        print(f"refused: unsupported principals registry version {data.get('version')!r}")
+        print(
+            f"refused: unsupported principals registry version {data.get('version')!r}"
+        )
         return False
 
     principals = cast(dict[str, Any], data["principals"])
@@ -824,7 +826,9 @@ async def run_promote_section(section_name: str) -> bool:
         print(cast(str, row["content"]))
         print("--- end reviewed content ---")
         try:
-            confirmed = input("Promote this exact section version to operator trust? [y/N] ")
+            confirmed = input(
+                "Promote this exact section version to operator trust? [y/N] "
+            )
         except EOFError:
             confirmed = ""
         if confirmed.strip().lower() not in {"y", "yes"}:
@@ -932,9 +936,7 @@ async def run_promote_handoff(handoff_id: int) -> bool:
             print(f"no stored handoff {handoff_id}")
             return False
         if row["status"] != "pending":
-            print(
-                f"refused: handoff {handoff_id} is {row['status']}, not pending"
-            )
+            print(f"refused: handoff {handoff_id} is {row['status']}, not pending")
             return False
         if row["source_trust"] == "operator":
             print(f"handoff {handoff_id} is already operator-trusted")
@@ -949,7 +951,9 @@ async def run_promote_handoff(handoff_id: int) -> bool:
             f"sha256={reviewed_digest}"
         )
         try:
-            confirmed = input("Promote this exact pending handoff to operator trust? [y/N] ")
+            confirmed = input(
+                "Promote this exact pending handoff to operator trust? [y/N] "
+            )
         except EOFError:
             confirmed = ""
         if confirmed.strip().lower() not in {"y", "yes"}:
@@ -1482,12 +1486,12 @@ def main() -> None:
             else 1
         )
     if args.quarantine_cleared_operator_handoffs:
-        sys.exit(
-            0 if asyncio.run(run_quarantine_cleared_operator_handoffs()) else 1
-        )
+        sys.exit(0 if asyncio.run(run_quarantine_cleared_operator_handoffs()) else 1)
     if args.restore_handoff_trust is not None:
         sys.exit(
-            0 if asyncio.run(run_restore_handoff_trust(args.restore_handoff_trust)) else 1
+            0
+            if asyncio.run(run_restore_handoff_trust(args.restore_handoff_trust))
+            else 1
         )
 
     from bridge_db.server import mcp

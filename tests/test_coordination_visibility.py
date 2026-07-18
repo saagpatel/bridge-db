@@ -13,8 +13,8 @@ import aiosqlite
 import pytest
 from conftest import CaptureMCP, make_ctx
 
-from bridge_db import config
-from bridge_db.db import record_write_conflict
+from bridge_db import config, recovery
+from bridge_db.db import SCHEMA_VERSION, record_write_conflict
 from bridge_db.tools import handoffs as handoffs_mod
 from bridge_db.tools import health as health_mod
 
@@ -69,7 +69,9 @@ async def _seed_open_conflict(db: aiosqlite.Connection, target_key: str) -> int:
 
 
 async def test_health_counts_open_conflicts_without_folding_into_ok(
-    db: aiosqlite.Connection, health_fns: dict[str, Any]
+    db: aiosqlite.Connection,
+    health_fns: dict[str, Any],
+    tmp_path: Path,
 ) -> None:
     await _seed_open_conflict(db, "career")
     resolved_id = await _seed_open_conflict(db, "speaking")
@@ -77,6 +79,10 @@ async def test_health_counts_open_conflicts_without_folding_into_ok(
         "UPDATE write_conflicts SET status = 'resolved' WHERE id = ?", (resolved_id,)
     )
     await db.commit()
+    recovery.create_recovery_anchor(
+        tmp_path / "test.db",
+        expected_schema_version=SCHEMA_VERSION,
+    )
 
     result = await health_fns["health"](ctx=make_ctx(db))
     assert result["open_write_conflicts"] == 1

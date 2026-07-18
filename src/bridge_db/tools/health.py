@@ -332,7 +332,8 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     )
     backup_inventory = migration_backup_inventory(Path(open_main_path))
     legacy_backup_provenance_ok = (
-        backup_inventory["count"] == backup_inventory["verified_count"]
+        backup_inventory["count"] > 0
+        and backup_inventory["count"] == backup_inventory["verified_count"]
     )
     recovery_anchor = recovery_anchor_inventory(
         Path(open_main_path),
@@ -658,8 +659,7 @@ def _freshness_overall(
     shipped_events: dict[str, Any],
 ) -> str:
     if any(
-        snapshot["state"] in {"stale", "superseded"}
-        for snapshot in snapshots.values()
+        snapshot["state"] in {"stale", "superseded"} for snapshot in snapshots.values()
     ):
         return "stale"
     if handoffs["stale_pending_count"] or handoffs["stale_active_count"]:
