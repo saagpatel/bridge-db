@@ -287,6 +287,36 @@ async def test_anchor_verification_rejects_unmanifested_sqlite_sidecar(
     assert result["errors"] == ["anchor_artifact_set_mismatch"]
 
 
+@pytest.mark.parametrize(
+    ("name", "expected_error"),
+    (
+        (recovery.RECOVERY_DATABASE_NAME, "backup_not_regular"),
+        (recovery.RECOVERY_MANIFEST_NAME, "metadata_not_regular"),
+    ),
+)
+async def test_anchor_verification_rejects_fifo_before_reading(
+    tmp_path: Path,
+    name: str,
+    expected_error: str,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    path = recovery.recovery_anchor_path(db_path) / name
+    path.unlink()
+    os.mkfifo(path, mode=0o600)
+
+    result = recovery.verify_recovery_anchor(
+        recovery.recovery_anchor_path(db_path),
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    assert result["ready"] is False
+    assert expected_error in result["errors"]
+
+
 async def test_anchor_detects_truncated_backup(tmp_path: Path) -> None:
     db_path = await _source_database(tmp_path)
     recovery.create_recovery_anchor(

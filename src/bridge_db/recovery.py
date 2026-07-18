@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -215,9 +216,20 @@ def verify_recovery_anchor(
     except OSError:
         errors.append("anchor_unreadable")
 
+    manifest_regular = False
     if manifest_path.is_symlink():
         errors.append("metadata_symlink")
     else:
+        try:
+            manifest_stat = manifest_path.lstat()
+            manifest_regular = stat.S_ISREG(manifest_stat.st_mode)
+            if not manifest_regular:
+                errors.append("metadata_not_regular")
+        except FileNotFoundError:
+            errors.append("metadata_missing")
+        except OSError:
+            errors.append("metadata_unreadable")
+    if manifest_regular:
         try:
             loaded = cast(
                 object,
@@ -230,23 +242,30 @@ def verify_recovery_anchor(
                 }
             else:
                 errors.append("metadata_invalid")
-        except FileNotFoundError:
-            errors.append("metadata_missing")
         except (OSError, json.JSONDecodeError, UnicodeError):
             errors.append("metadata_unreadable")
 
     backup_bytes: int | None = None
     actual_digest: str | None = None
+    database_regular = False
     if database_path.is_symlink():
         errors.append("backup_symlink")
     else:
         try:
-            backup_bytes = database_path.stat().st_size
-            if database_path.stat().st_mode & 0o077:
+            database_stat = database_path.lstat()
+            database_regular = stat.S_ISREG(database_stat.st_mode)
+            if not database_regular:
+                errors.append("backup_not_regular")
+            elif database_stat.st_mode & 0o077:
                 errors.append("backup_permissions_not_private")
-            actual_digest = _sha256_file(database_path)
         except FileNotFoundError:
             errors.append("backup_missing")
+        except OSError:
+            errors.append("backup_unreadable")
+    if database_regular:
+        try:
+            backup_bytes = database_path.stat().st_size
+            actual_digest = _sha256_file(database_path)
         except OSError:
             errors.append("backup_unreadable")
 
@@ -312,7 +331,7 @@ def verify_recovery_anchor(
     restored_schema_version: int | None = None
     integrity_ok = False
     semantic_readback_ok = False
-    if database_path.is_file() and not database_path.is_symlink():
+    if database_regular:
         try:
             with tempfile.TemporaryDirectory(prefix="bridge-recovery-verify-") as temp:
                 disposable = Path(temp) / "restored.sqlite"
