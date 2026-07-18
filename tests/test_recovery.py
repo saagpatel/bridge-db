@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -671,3 +672,30 @@ async def test_anchor_refuses_publication_when_source_changes_after_backup(
     assert source_changed is True
     assert not anchor.exists()
     assert list(tmp_path.glob(f".{anchor.name}.tmp-*")) == []
+
+
+async def test_anchor_writer_guard_uses_project_contention_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    original_connect = recovery.sqlite3.connect
+    writer_timeouts: list[float | None] = []
+
+    def track_connect(
+        database: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> sqlite3.Connection:
+        if database == db_path and not kwargs.get("uri", False):
+            writer_timeouts.append(kwargs.get("timeout"))
+        return original_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(recovery.sqlite3, "connect", track_connect)
+
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    assert writer_timeouts == [recovery.SQLITE_WRITER_BUSY_TIMEOUT_SECONDS]

@@ -22,6 +22,7 @@ RECOVERY_ANCHOR_SCHEMA = "RecoveryAnchorV1"
 RECOVERY_ANCHOR_SUFFIX = ".recovery-anchor-v1"
 RECOVERY_DATABASE_NAME = "anchor.sqlite"
 RECOVERY_MANIFEST_NAME = "manifest.json"
+SQLITE_WRITER_BUSY_TIMEOUT_SECONDS = 15.0
 RECOVERY_DATABASE_SIDECAR_NAMES = (
     f"{RECOVERY_DATABASE_NAME}-wal",
     f"{RECOVERY_DATABASE_NAME}-shm",
@@ -678,7 +679,10 @@ def create_recovery_anchor(
         # post-publish inventory. A prior concurrent commit changes the
         # fingerprint and refuses publication; a later writer waits until this
         # verified-current anchor is durably published.
-        source_guard = sqlite3.connect(db_path)
+        source_guard = sqlite3.connect(
+            db_path,
+            timeout=SQLITE_WRITER_BUSY_TIMEOUT_SECONDS,
+        )
         source_guard.execute("BEGIN IMMEDIATE")
         if _sqlite_semantic_fingerprint(db_path) != _sqlite_semantic_fingerprint(
             database_path
