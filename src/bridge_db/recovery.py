@@ -182,6 +182,9 @@ def verify_recovery_anchor(
     manifest_path = anchor_path / RECOVERY_MANIFEST_NAME
     errors: list[str] = []
     manifest: dict[str, object] | None = None
+    anchor_permissions_private: bool | None = None
+    database_permissions_private: bool | None = None
+    manifest_permissions_private: bool | None = None
 
     if anchor_path.is_symlink():
         return {
@@ -205,7 +208,8 @@ def verify_recovery_anchor(
         }
 
     try:
-        if anchor_path.stat().st_mode & 0o077:
+        anchor_permissions_private = not bool(anchor_path.stat().st_mode & 0o077)
+        if not anchor_permissions_private:
             errors.append("anchor_permissions_not_private")
     except OSError:
         errors.append("anchor_unreadable")
@@ -225,6 +229,12 @@ def verify_recovery_anchor(
             manifest_regular = stat.S_ISREG(manifest_stat.st_mode)
             if not manifest_regular:
                 errors.append("metadata_not_regular")
+            else:
+                manifest_permissions_private = not bool(
+                    manifest_stat.st_mode & 0o077
+                )
+                if not manifest_permissions_private:
+                    errors.append("metadata_permissions_not_private")
         except FileNotFoundError:
             errors.append("metadata_missing")
         except OSError:
@@ -256,8 +266,10 @@ def verify_recovery_anchor(
             database_regular = stat.S_ISREG(database_stat.st_mode)
             if not database_regular:
                 errors.append("backup_not_regular")
-            elif database_stat.st_mode & 0o077:
-                errors.append("backup_permissions_not_private")
+            else:
+                database_permissions_private = not bool(database_stat.st_mode & 0o077)
+                if not database_permissions_private:
+                    errors.append("backup_permissions_not_private")
         except FileNotFoundError:
             errors.append("backup_missing")
         except OSError:
@@ -271,11 +283,6 @@ def verify_recovery_anchor(
 
     manifest_counts: dict[str, int] | None = None
     if manifest is not None:
-        try:
-            if manifest_path.stat().st_mode & 0o077:
-                errors.append("metadata_permissions_not_private")
-        except OSError:
-            errors.append("metadata_unreadable")
         required_types = {
             "schema": str,
             "created_at": str,
@@ -354,6 +361,18 @@ def verify_recovery_anchor(
             errors.append("disposable_recovery_failed")
 
     errors = sorted(set(errors))
+    permission_checks = (
+        anchor_permissions_private,
+        database_permissions_private,
+        manifest_permissions_private,
+    )
+    permissions = (
+        "not_private"
+        if False in permission_checks
+        else "private"
+        if all(check is True for check in permission_checks)
+        else "unknown"
+    )
     return {
         "state": "verified" if not errors else "invalid",
         "ready": not errors,
@@ -371,7 +390,7 @@ def verify_recovery_anchor(
         "integrity_ok": integrity_ok,
         "semantic_readback_ok": semantic_readback_ok,
         "recovery_readback": "verified" if not errors else "unverified",
-        "permissions": "private",
+        "permissions": permissions,
         "cleanup": "approval_required",
         "errors": errors,
     }

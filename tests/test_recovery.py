@@ -45,6 +45,7 @@ async def test_create_anchor_is_private_and_disposable_recovery_verifies(
     assert result["digest_ok"] is True
     assert result["integrity_ok"] is True
     assert result["semantic_readback_ok"] is True
+    assert result["permissions"] == "private"
     assert manifest["schema"] == "RecoveryAnchorV1"
     assert manifest["source_schema_version"] == SCHEMA_VERSION
     assert manifest["semantic_readback"]["row_counts"]["context_sections"] == 1
@@ -285,6 +286,47 @@ async def test_anchor_verification_rejects_unmanifested_sqlite_sidecar(
 
     assert result["ready"] is False
     assert result["errors"] == ["anchor_artifact_set_mismatch"]
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "mode", "expected_error"),
+    (
+        (None, 0o755, "anchor_permissions_not_private"),
+        (
+            recovery.RECOVERY_DATABASE_NAME,
+            0o644,
+            "backup_permissions_not_private",
+        ),
+        (
+            recovery.RECOVERY_MANIFEST_NAME,
+            0o644,
+            "metadata_permissions_not_private",
+        ),
+    ),
+)
+async def test_anchor_reports_non_private_permissions_honestly(
+    tmp_path: Path,
+    relative_path: str | None,
+    mode: int,
+    expected_error: str,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    anchor = recovery.recovery_anchor_path(db_path)
+    target = anchor if relative_path is None else anchor / relative_path
+    target.chmod(mode)
+
+    result = recovery.verify_recovery_anchor(
+        anchor,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    assert result["ready"] is False
+    assert result["permissions"] == "not_private"
+    assert expected_error in result["errors"]
 
 
 @pytest.mark.parametrize(
