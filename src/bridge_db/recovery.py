@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import json
 import os
 import shutil
 import sqlite3
 import stat
-import tempfile
-import ctypes
-import errno
 import sys
-from datetime import datetime
+import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO, cast
 
@@ -228,6 +228,52 @@ def _rename_directory_no_replace(source: Path, destination: Path) -> None:
         if error == errno.EEXIST:
             raise FileExistsError(error, os.strerror(error), str(destination))
         raise OSError(error, os.strerror(error), str(destination))
+
+
+def _swap_directories(first: Path, second: Path) -> None:
+    """Atomically exchange two directories on supported local filesystems."""
+    libc: Any = ctypes.CDLL(None, use_errno=True)
+    encoded_first = os.fsencode(first)
+    encoded_second = os.fsencode(second)
+    if sys.platform == "darwin":
+        rename_swap = libc.renamex_np
+        rename_swap.argtypes = (
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename_swap.restype = ctypes.c_int
+        result = rename_swap(
+            encoded_first,
+            encoded_second,
+            0x00000002,  # RENAME_SWAP
+        )
+    elif sys.platform.startswith("linux"):
+        rename_exchange = libc.renameat2
+        rename_exchange.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename_exchange.restype = ctypes.c_int
+        result = rename_exchange(
+            -100,  # AT_FDCWD
+            encoded_first,
+            -100,
+            encoded_second,
+            0x2,  # RENAME_EXCHANGE
+        )
+    else:
+        raise OSError(
+            errno.ENOTSUP,
+            "atomic recovery-anchor exchange is unsupported",
+            str(first),
+        )
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), str(first))
 
 
 def _fsync_directory(path: Path) -> None:
@@ -539,21 +585,22 @@ def verify_recovery_anchor(
     }
 
 
-def recovery_anchor_inventory(
+def _recovery_anchor_inventory_at(
     db_path: Path,
+    anchor_path: Path,
     *,
     expected_schema_version: int,
 ) -> dict[str, Any]:
-    """Return non-sensitive readiness for the stable current anchor."""
+    """Return non-sensitive readiness for one anchor against the live source."""
     result = verify_recovery_anchor(
-        recovery_anchor_path(db_path),
+        anchor_path,
         expected_schema_version=expected_schema_version,
     )
     if not result["ready"]:
         return result
     try:
         anchor_fingerprint = _sqlite_semantic_fingerprint(
-            recovery_anchor_path(db_path) / RECOVERY_DATABASE_NAME
+            anchor_path / RECOVERY_DATABASE_NAME
         )
         source_fingerprint = _sqlite_semantic_fingerprint(db_path)
     except (OSError, sqlite3.Error, TypeError, ValueError):
@@ -578,20 +625,28 @@ def recovery_anchor_inventory(
     }
 
 
-def create_recovery_anchor(
+def recovery_anchor_inventory(
     db_path: Path,
     *,
     expected_schema_version: int,
 ) -> dict[str, Any]:
-    """Create one atomically published RecoveryAnchorV1 bundle.
+    """Return non-sensitive readiness for the stable current anchor."""
+    return _recovery_anchor_inventory_at(
+        db_path,
+        recovery_anchor_path(db_path),
+        expected_schema_version=expected_schema_version,
+    )
 
-    Existing anchors are never overwritten. Callers may verify an existing
-    bundle, but replacing or deleting recovery evidence requires separate
-    operator authority.
-    """
+
+def _create_recovery_anchor_at(
+    db_path: Path,
+    anchor_path: Path,
+    *,
+    expected_schema_version: int,
+) -> dict[str, Any]:
+    """Create and verify one anchor at an unoccupied sibling path."""
     if not db_path.is_file():
         raise FileNotFoundError(f"database does not exist: {db_path}")
-    anchor_path = recovery_anchor_path(db_path)
     if anchor_path.exists() or anchor_path.is_symlink():
         raise FileExistsError(f"recovery anchor already exists: {anchor_path}")
 
@@ -695,8 +750,9 @@ def create_recovery_anchor(
         published = True
         _fsync_directory(db_path.parent)
 
-        verified = recovery_anchor_inventory(
+        verified = _recovery_anchor_inventory_at(
             db_path,
+            anchor_path,
             expected_schema_version=expected_schema_version,
         )
         if not verified["ready"]:
@@ -713,3 +769,200 @@ def create_recovery_anchor(
                 source_guard.close()
         if not published:
             shutil.rmtree(temporary, ignore_errors=True)
+
+
+def create_recovery_anchor(
+    db_path: Path,
+    *,
+    expected_schema_version: int,
+) -> dict[str, Any]:
+    """Create one atomically published RecoveryAnchorV1 bundle.
+
+    Existing anchors are never overwritten. Callers may verify an existing
+    bundle, but replacing or deleting recovery evidence requires separate
+    operator authority.
+    """
+    return _create_recovery_anchor_at(
+        db_path,
+        recovery_anchor_path(db_path),
+        expected_schema_version=expected_schema_version,
+    )
+
+
+def _superseded_anchor_path(
+    anchor_path: Path,
+    *,
+    digest: str,
+) -> Path:
+    rotated_at = clock.now().astimezone(UTC)
+    stamp = rotated_at.strftime("%Y%m%dT%H%M%S%fZ")
+    return anchor_path.with_name(
+        f"{anchor_path.name}.superseded-{stamp}-{digest[:12]}"
+    )
+
+
+def rotate_recovery_anchor(
+    db_path: Path,
+    *,
+    expected_schema_version: int,
+) -> dict[str, Any]:
+    """Atomically replace a stale anchor while preserving the prior bundle."""
+    anchor_path = recovery_anchor_path(db_path)
+    current = recovery_anchor_inventory(
+        db_path,
+        expected_schema_version=expected_schema_version,
+    )
+    if current["ready"]:
+        preservation_guard = sqlite3.connect(
+            db_path,
+            timeout=SQLITE_WRITER_BUSY_TIMEOUT_SECONDS,
+        )
+        try:
+            preservation_guard.execute("BEGIN IMMEDIATE")
+            current = recovery_anchor_inventory(
+                db_path,
+                expected_schema_version=expected_schema_version,
+            )
+            if current["ready"]:
+                return {
+                    **current,
+                    "disposition": "preserved_current",
+                    "rotated": False,
+                    "superseded_path": None,
+                    "superseded_sha256": None,
+                }
+        finally:
+            try:
+                preservation_guard.rollback()
+            finally:
+                preservation_guard.close()
+
+    previous = verify_recovery_anchor(
+        anchor_path,
+        expected_schema_version=expected_schema_version,
+    )
+    if not previous["ready"] or not isinstance(previous.get("sha256"), str):
+        raise RuntimeError(
+            "current recovery anchor is not valid rotation evidence: "
+            + ",".join(previous["errors"])
+        )
+    previous_digest = cast(str, previous["sha256"])
+    previous_root_signature = _stable_stat_signature(anchor_path.lstat())
+    superseded_path = _superseded_anchor_path(
+        anchor_path,
+        digest=previous_digest,
+    )
+    if superseded_path.exists() or superseded_path.is_symlink():
+        raise FileExistsError(
+            f"superseded recovery anchor already exists: {superseded_path}"
+        )
+
+    source_guard: sqlite3.Connection | None = None
+    candidate_owned = False
+    swapped = False
+    committed = False
+    try:
+        try:
+            _create_recovery_anchor_at(
+                db_path,
+                superseded_path,
+                expected_schema_version=expected_schema_version,
+            )
+        except FileExistsError:
+            raise
+        except BaseException:
+            if superseded_path.is_dir() and not superseded_path.is_symlink():
+                shutil.rmtree(superseded_path, ignore_errors=True)
+            raise
+        candidate_owned = True
+        candidate_root_signature = _stable_stat_signature(superseded_path.lstat())
+        source_guard = sqlite3.connect(
+            db_path,
+            timeout=SQLITE_WRITER_BUSY_TIMEOUT_SECONDS,
+        )
+        source_guard.execute("BEGIN IMMEDIATE")
+
+        staged = _recovery_anchor_inventory_at(
+            db_path,
+            superseded_path,
+            expected_schema_version=expected_schema_version,
+        )
+        if (
+            _stable_stat_signature(superseded_path.lstat())
+            != candidate_root_signature
+        ):
+            candidate_owned = False
+            raise RuntimeError("staged recovery anchor changed during rotation")
+        if not staged["ready"]:
+            raise RuntimeError(
+                "staged recovery anchor is no longer current: "
+                + ",".join(staged["errors"])
+            )
+        previous_recheck = verify_recovery_anchor(
+            anchor_path,
+            expected_schema_version=expected_schema_version,
+        )
+        if (
+            not previous_recheck["ready"]
+            or previous_recheck.get("sha256") != previous_digest
+            or _stable_stat_signature(anchor_path.lstat())
+            != previous_root_signature
+        ):
+            raise RuntimeError("current recovery anchor changed during rotation")
+
+        _swap_directories(anchor_path, superseded_path)
+        swapped = True
+        _fsync_directory(db_path.parent)
+
+        verified = recovery_anchor_inventory(
+            db_path,
+            expected_schema_version=expected_schema_version,
+        )
+        if not verified["ready"]:
+            raise RuntimeError(
+                "rotated recovery anchor failed current-source verification: "
+                + ",".join(verified["errors"])
+            )
+        superseded = verify_recovery_anchor(
+            superseded_path,
+            expected_schema_version=expected_schema_version,
+        )
+        if (
+            not superseded["ready"]
+            or superseded.get("sha256") != previous_digest
+        ):
+            raise RuntimeError("superseded recovery anchor changed during rotation")
+
+        committed = True
+        return {
+            **verified,
+            "disposition": "rotated",
+            "rotated": True,
+            "superseded_path": str(superseded_path),
+            "superseded_sha256": previous_digest,
+        }
+    except BaseException:
+        if swapped and not committed:
+            try:
+                _swap_directories(anchor_path, superseded_path)
+                swapped = False
+                _fsync_directory(db_path.parent)
+            except BaseException as rollback_exc:
+                raise RuntimeError(
+                    "recovery-anchor rotation failed and atomic rollback failed; "
+                    f"superseded evidence remains at {superseded_path}"
+                ) from rollback_exc
+        raise
+    finally:
+        if source_guard is not None:
+            try:
+                source_guard.rollback()
+            finally:
+                source_guard.close()
+        if (
+            candidate_owned
+            and not swapped
+            and not committed
+            and superseded_path.is_dir()
+        ):
+            shutil.rmtree(superseded_path, ignore_errors=True)

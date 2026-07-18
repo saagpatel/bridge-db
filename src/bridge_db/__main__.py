@@ -449,6 +449,62 @@ def run_verify_recovery_anchor() -> bool:
     return bool(result["ready"])
 
 
+def run_rotate_recovery_anchor() -> bool:
+    """Rotate a stale current anchor while preserving the superseded bundle."""
+    from bridge_db import config
+    from bridge_db.audit import AuditUnavailableError, log_audit
+    from bridge_db.db import SCHEMA_VERSION
+    from bridge_db.recovery import rotate_recovery_anchor
+
+    try:
+        result = rotate_recovery_anchor(
+            config.DB_PATH,
+            expected_schema_version=SCHEMA_VERSION,
+        )
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
+        print(f"recovery anchor rotation refused: {exc}")
+        return False
+
+    detail = (
+        f"disposition={result['disposition']} state={result['state']} "
+        f"path={result['path']} sha256={result.get('sha256')} "
+        f"superseded_path={result.get('superseded_path')} "
+        f"superseded_sha256={result.get('superseded_sha256')}"
+    )
+    try:
+        audit_result = log_audit(
+            "recovery_anchor.rotate",
+            "operator-cli",
+            "bridge-db",
+            ok=bool(result["ready"]),
+            detail=detail,
+        )
+    except AuditUnavailableError as exc:
+        print(f"recovery anchor rotation audit evidence unavailable: {exc}")
+        return False
+    if audit_result["audit_degraded"]:
+        print(
+            "recovery anchor rotation audit evidence degraded; "
+            "refusing to report auditable success"
+        )
+        return False
+
+    print("bridge-db RecoveryAnchorV1 rotation")
+    print(f"  Result: {result['disposition']}")
+    print(f"  State: {result['state']}")
+    print(f"  Path: {result['path']}")
+    print(f"  Schema: v{result.get('schema_version')}")
+    print(f"  Bytes: {result.get('backup_bytes')}")
+    print(f"  Digest verified: {result.get('digest_ok')}")
+    print(f"  SQLite integrity: {result.get('integrity_ok')}")
+    print(f"  Semantic readback: {result.get('semantic_readback_ok')}")
+    print(f"  Superseded path: {result.get('superseded_path')}")
+    print(f"  Superseded digest: {result.get('superseded_sha256')}")
+    if result["errors"]:
+        print(f"  Errors: {','.join(result['errors'])}")
+    return bool(result["ready"])
+
+
 async def run_rebuild_content_index() -> bool:
     """Rebuild FTS content_index and verify it matches source tables."""
     from bridge_db import config
@@ -1362,6 +1418,14 @@ def main() -> None:
         help="Verify the current RecoveryAnchorV1 bundle using a disposable copy",
     )
     parser.add_argument(
+        "--rotate-recovery-anchor",
+        action="store_true",
+        help=(
+            "Atomically refresh a stale RecoveryAnchorV1 bundle and preserve "
+            "the superseded evidence"
+        ),
+    )
+    parser.add_argument(
         "--rebuild-content-index",
         action="store_true",
         help="Rebuild the FTS content_index from source tables and verify it",
@@ -1450,6 +1514,8 @@ def main() -> None:
         sys.exit(0 if run_create_recovery_anchor() else 1)
     if args.verify_recovery_anchor:
         sys.exit(0 if run_verify_recovery_anchor() else 1)
+    if args.rotate_recovery_anchor:
+        sys.exit(0 if run_rotate_recovery_anchor() else 1)
     if args.rebuild_content_index:
         ok = asyncio.run(run_rebuild_content_index())
         sys.exit(0 if ok else 1)

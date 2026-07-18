@@ -20,7 +20,7 @@ or recovery artifact is deleted automatically.
 | Recall telemetry | `recall` | `recall_query_log.jsonl` plus immutable segments | Review-only; new records contain no raw query; historical query text may be redacted only from an exact verified archive snapshot | Locked, fsync'd, atomic rename at configured byte boundary | Telemetry failure does not break read-only recall; failure is logged to stderr. Redaction writes a durable prepared receipt before publication; an incomplete transaction degrades health | `recall_stats` scans a bounded horizon across active + segments. Redaction readback proves record count, digest, and zero remaining raw-query fields | `health.evidence_lifecycle.recall` plus `dispositions`, including bounded legacy raw-query and open-transaction inventory | Record/segment deletion, archive deletion, automatic retention, and external-copy cleanup require separate approval |
 | Audit events | `log_audit` callers | `audit.jsonl` plus immutable segments | Preserve all pending policy | Locked, fsync'd, atomic rename at configured byte boundary | Primary failure writes independent minimized failure receipt and continues degraded; dual failure raises | `audit_tail` scans a bounded horizon across active + segments | `health/status/dogfood` expose bytes, segments, and degradation | Segment deletion or rewrite requires approval |
 | Audit failure receipts | `log_audit` fallback | `audit_failures.jsonl` plus immutable segments | Preserve until an operator-defined acknowledgement/reconciliation policy exists | Same lossless rotation | Failure to persist this receipt raises; no silent success | Receipt contains event digest and non-sensitive attribution, not original detail | Any receipt makes storage health non-green | Acknowledge/archive/delete policy requires approval |
-| Current recovery anchor | Explicit `--create-recovery-anchor` command | Private `bridge.db.recovery-anchor-v1/` bundle with `anchor.sqlite` and `manifest.json` | Preserve pending operator approval; existing bundle is never overwritten | One atomic directory publication | Staging or publication failure leaves no partial current bundle; invalid or incomplete published state fails closed | SQLite online backup, SHA-256 and byte binding, schema/integrity checks, and bounded table-count readback against a disposable copy | `health/status/dogfood` expose `current_recovery_anchor` independently from legacy provenance | Replacement or deletion requires separate approval |
+| Current recovery anchor | Explicit `--create-recovery-anchor` or separately approved `--rotate-recovery-anchor` command | Private `bridge.db.recovery-anchor-v1/` bundle with `anchor.sqlite` and `manifest.json`; rotations retain the prior bundle under a timestamped `.superseded-*` sibling | Preserve pending operator approval; creation never overwrites and rotation never deletes the prior bundle | One atomic directory publication for creation; one atomic exchange places the new bundle at the current path and the prior bundle at its final superseded path | Staging failure leaves the current bundle untouched; post-exchange verification failure swaps the directories back; invalid or incomplete evidence fails closed | SQLite online backup, SHA-256 and byte binding, schema/integrity checks, bounded table-count readback against a disposable copy, and live-source fingerprint comparison under SQLite's writer slot | `health/status/dogfood` expose `current_recovery_anchor` independently from legacy provenance; rotation CLI returns both current and superseded digests | Rotation requires separate approval; deletion of current or superseded evidence requires another separate approval |
 | Migration backups | Destructive schema migration hook | Verified `.bak`, `.sha256`, and `.meta.json` siblings; pre-verification backups remain `legacy-unverified` | Review-only; preserve all | One immutable backup per migration label | Missing/bad manifest, digest, SQLite integrity, or schema evidence blocks destructive migration/reuse | Online SQLite backup includes committed WAL state; digest + integrity + schema readback verified. Missing historical provenance is never reconstructed retroactively | `health.evidence_lifecycle.migration_backups` inventories every sibling and its verification state | Backup/manifest/metadata deletion requires separate approval |
 | Evidence disposition receipts | Approved lifecycle operation | `evidence_dispositions.jsonl` plus immutable segments | Preserve all pending policy | Same lossless rotation | `prepared` is durable before source publication; `completed` follows readback; pre-publish failure appends `aborted`; post-publish interruption leaves an open `prepared` receipt | Latest state is reconstructed across active + rotated files | Any open or malformed transaction makes storage health non-green | Receipt deletion, reconciliation rewrite, or automatic expiry requires separate approval |
 
@@ -58,6 +58,25 @@ reports `current_recovery_anchor.state` as:
 The standalone `--verify-recovery-anchor` command proves bundle integrity
 without requiring a readable live database; `health`, `status`, and `dogfood`
 add the live-source freshness comparison.
+
+After a separately approved BridgeDB write makes a valid anchor stale, rotate
+it without deleting or overwriting recovery evidence:
+
+```console
+python -m bridge_db --rotate-recovery-anchor
+```
+
+If the current anchor is already verified and current, rotation is
+preservation-idempotent and reports `preserved_current`. For a stale but
+internally verified anchor, the command stages and verifies a new bundle,
+acquires SQLite's writer slot, atomically exchanges the current and staged
+directories so the prior bundle lands directly under a collision-resistant
+`bridge.db.recovery-anchor-v1.superseded-<timestamp>-<digest>` sibling. If
+source state changes, the current evidence changes, the atomic exchange fails,
+or post-exchange verification cannot complete, the command fails closed. A
+post-exchange verification failure swaps the directories back before removing
+only the unpublished candidate. Invalid current evidence is never rotated.
+
 It reports historical migration-backup provenance separately as `verified`,
 `readable_but_unknown`, or `mixed_or_unreadable`. A verified current anchor can
 establish present recovery readiness, but it does not change any legacy file or

@@ -26,6 +26,7 @@ from bridge_db.__main__ import (
     run_rebuild_content_index,
     run_reconcile_canonical_keys,
     run_quarantine_cleared_operator_handoffs,
+    run_rotate_recovery_anchor,
     run_restore_handoff_trust,
     run_revoke_principal,
     run_status,
@@ -244,6 +245,51 @@ async def test_recovery_anchor_cli_verifies_when_live_database_is_missing(
     output = capsys.readouterr().out
     assert "State: verified" in output
     assert "Digest verified: True" in output
+
+
+@pytest.mark.asyncio
+async def test_recovery_anchor_cli_rotates_stale_bundle_and_preserves_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    db = await open_db(db_path)
+    await db.close()
+    assert run_create_recovery_anchor() is True
+    capsys.readouterr()
+    original = recovery.verify_recovery_anchor(
+        recovery.recovery_anchor_path(db_path),
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    with sqlite3.connect(db_path) as changed:
+        changed.execute(
+            "INSERT INTO activity_log "
+            "(source, timestamp, project_name, summary) VALUES (?, ?, ?, ?)",
+            ("codex", "2026-07-18T09:00:00Z", "bridge-db", "after anchor"),
+        )
+
+    assert run_rotate_recovery_anchor() is True
+    rotated = capsys.readouterr().out
+    assert "RecoveryAnchorV1 rotation" in rotated
+    assert "Result: rotated" in rotated
+    assert "State: verified" in rotated
+    assert "Superseded path:" in rotated
+    assert str(original["sha256"]) in rotated
+    events = [
+        json.loads(line)
+        for line in cfg.AUDIT_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    ]
+    assert events[-1]["tool"] == "recovery_anchor.rotate"
+    assert events[-1]["caller"] == "operator-cli"
+    assert events[-1]["ok"] is True
+    assert "disposition=rotated" in events[-1]["detail"]
+    assert "superseded_path=" in events[-1]["detail"]
+
+    assert run_rotate_recovery_anchor() is True
+    preserved = capsys.readouterr().out
+    assert "Result: preserved_current" in preserved
 
 
 @pytest.mark.asyncio
