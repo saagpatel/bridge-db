@@ -398,6 +398,7 @@ def create_recovery_anchor(
     )
     os.chmod(temporary, 0o700)
     published = False
+    source_guard: sqlite3.Connection | None = None
     try:
         database_path = temporary / RECOVERY_DATABASE_NAME
         source = sqlite3.connect(_sqlite_ro_uri(db_path), uri=True)
@@ -433,6 +434,7 @@ def create_recovery_anchor(
                 "row_counts": row_counts,
             },
             "publication": "atomic_directory_replace",
+            "source_consistency": "sqlite_write_guard_and_semantic_fingerprint",
             "retention_policy": "preserve_pending_operator_approval",
             "cleanup": "approval_required",
         }
@@ -454,20 +456,38 @@ def create_recovery_anchor(
                 + ",".join(staged["errors"])
             )
 
+        # The online backup is a valid point-in-time snapshot, but a writer may
+        # commit while its manifest is being built. Acquire SQLite's writer slot
+        # before the final source comparison and hold it through publication and
+        # post-publish inventory. A prior concurrent commit changes the
+        # fingerprint and refuses publication; a later writer waits until this
+        # verified-current anchor is durably published.
+        source_guard = sqlite3.connect(db_path)
+        source_guard.execute("BEGIN IMMEDIATE")
+        if _sqlite_semantic_fingerprint(db_path) != _sqlite_semantic_fingerprint(
+            database_path
+        ):
+            raise RuntimeError("source database changed during recovery anchor creation")
+
         os.replace(temporary, anchor_path)
         published = True
         _fsync_directory(db_path.parent)
+
+        verified = recovery_anchor_inventory(
+            db_path,
+            expected_schema_version=expected_schema_version,
+        )
+        if not verified["ready"]:
+            raise RuntimeError(
+                "published recovery anchor failed current-source verification: "
+                + ",".join(verified["errors"])
+            )
+        return verified
     finally:
+        if source_guard is not None:
+            try:
+                source_guard.rollback()
+            finally:
+                source_guard.close()
         if not published:
             shutil.rmtree(temporary, ignore_errors=True)
-
-    verified = verify_recovery_anchor(
-        anchor_path,
-        expected_schema_version=expected_schema_version,
-    )
-    if not verified["ready"]:
-        raise RuntimeError(
-            "published recovery anchor failed verification: "
-            + ",".join(verified["errors"])
-        )
-    return verified

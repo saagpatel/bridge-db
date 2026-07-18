@@ -323,3 +323,53 @@ async def test_anchor_atomic_publication_failure_leaves_no_partial_bundle(
 
     assert not anchor.exists()
     assert list(tmp_path.glob(f".{anchor.name}.tmp-*")) == []
+
+
+async def test_anchor_refuses_publication_when_source_changes_after_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    anchor = recovery.recovery_anchor_path(db_path)
+    original_verify = recovery.verify_recovery_anchor
+    source_changed = False
+
+    def verify_then_change_source(
+        candidate: Path,
+        *,
+        expected_schema_version: int,
+    ) -> dict[str, object]:
+        nonlocal source_changed
+        result = original_verify(
+            candidate,
+            expected_schema_version=expected_schema_version,
+        )
+        if candidate != anchor and result["ready"] and not source_changed:
+            with sqlite3.connect(db_path) as changed:
+                changed.execute(
+                    "INSERT INTO activity_log "
+                    "(source, timestamp, project_name, summary) VALUES (?, ?, ?, ?)",
+                    (
+                        "codex",
+                        "2026-07-18T10:00:00Z",
+                        "bridge-db",
+                        "concurrent commit",
+                    ),
+                )
+            source_changed = True
+        return result
+
+    monkeypatch.setattr(recovery, "verify_recovery_anchor", verify_then_change_source)
+
+    with pytest.raises(
+        RuntimeError,
+        match="source database changed during recovery anchor creation",
+    ):
+        recovery.create_recovery_anchor(
+            db_path,
+            expected_schema_version=SCHEMA_VERSION,
+        )
+
+    assert source_changed is True
+    assert not anchor.exists()
+    assert list(tmp_path.glob(f".{anchor.name}.tmp-*")) == []
