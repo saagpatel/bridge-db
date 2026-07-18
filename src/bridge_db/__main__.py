@@ -75,8 +75,7 @@ async def _run_doctor() -> bool:
             config.DB_PATH,
             expected_schema_version=SCHEMA_VERSION,
         )
-        legacy_ok = legacy["count"] > 0 and legacy["count"] == legacy["verified_count"]
-        recovery_ok = current["ready"] or (current["state"] == "missing" and legacy_ok)
+        recovery_ok = current["ready"]
         checks.append(
             (
                 "Recovery integrity",

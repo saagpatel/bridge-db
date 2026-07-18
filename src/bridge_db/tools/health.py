@@ -339,9 +339,10 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         Path(open_main_path),
         expected_schema_version=SCHEMA_VERSION,
     )
-    recovery_integrity_ok = recovery_anchor["ready"] or (
-        recovery_anchor["state"] == "missing" and legacy_backup_provenance_ok
-    )
+    # Migration backups prove that a historical migration had a readable
+    # rollback point. They are not compared with the live database after later
+    # writes, so they cannot establish present-day recovery readiness.
+    recovery_integrity_ok = recovery_anchor["ready"]
     evidence_lifecycle = {
         "audit": audit_inventory,
         "recall": {
