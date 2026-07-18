@@ -84,7 +84,8 @@ def _sqlite_semantic_fingerprint(path: Path) -> str:
             str(row[0])
             for row in check.execute(
                 "SELECT name FROM sqlite_master "
-                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
+                "WHERE type = 'table' "
+                "AND (name NOT LIKE 'sqlite_%' OR name = 'sqlite_sequence') "
                 "ORDER BY name"
             )
         ]

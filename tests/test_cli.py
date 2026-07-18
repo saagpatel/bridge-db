@@ -218,6 +218,26 @@ async def test_recovery_anchor_cli_creates_once_and_verifies(
 
 
 @pytest.mark.asyncio
+async def test_recovery_anchor_cli_verifies_when_live_database_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    db = await open_db(db_path)
+    await db.close()
+    assert run_create_recovery_anchor() is True
+    capsys.readouterr()
+    db_path.unlink()
+
+    assert run_verify_recovery_anchor() is True
+    output = capsys.readouterr().out
+    assert "State: verified" in output
+    assert "Digest verified: True" in output
+
+
+@pytest.mark.asyncio
 async def test_recovery_anchor_cli_refuses_success_when_audit_degrades(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

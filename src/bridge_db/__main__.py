@@ -429,10 +429,13 @@ def run_verify_recovery_anchor() -> bool:
     """Read-verify the current recovery anchor without changing it."""
     from bridge_db import config
     from bridge_db.db import SCHEMA_VERSION
-    from bridge_db.recovery import recovery_anchor_inventory
+    from bridge_db.recovery import (
+        recovery_anchor_path,
+        verify_recovery_anchor,
+    )
 
-    result = recovery_anchor_inventory(
-        config.DB_PATH,
+    result = verify_recovery_anchor(
+        recovery_anchor_path(config.DB_PATH),
         expected_schema_version=SCHEMA_VERSION,
     )
     print("bridge-db RecoveryAnchorV1 verification")

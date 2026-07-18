@@ -147,6 +147,31 @@ async def test_anchor_inventory_includes_bridge_sidecar_state(
     assert result["source_current"] is False
 
 
+async def test_anchor_inventory_includes_autoincrement_sequence_state(
+    tmp_path: Path,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    with sqlite3.connect(db_path) as changed:
+        cursor = changed.execute(
+            "INSERT INTO activity_log "
+            "(source, timestamp, project_name, summary) VALUES (?, ?, ?, ?)",
+            ("codex", "2026-07-18T09:00:00Z", "bridge-db", "transient"),
+        )
+        changed.execute("DELETE FROM activity_log WHERE id = ?", (cursor.lastrowid,))
+
+    result = recovery.recovery_anchor_inventory(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    assert result["state"] == "stale"
+    assert result["source_current"] is False
+
+
 async def test_anchor_supports_sqlite_uri_characters_in_source_path(
     tmp_path: Path,
 ) -> None:
