@@ -176,6 +176,19 @@ def collect_evidence_plan() -> dict[str, Any]:
                 artifacts.append(
                     _artifact_record(sidecar, kind="recovery_anchor_sidecar")
                 )
+        known_names = {
+            RECOVERY_DATABASE_NAME,
+            RECOVERY_MANIFEST_NAME,
+            *RECOVERY_DATABASE_SIDECAR_NAMES,
+        }
+        for unexpected in sorted(anchor.iterdir(), key=lambda path: path.name):
+            if unexpected.name not in known_names:
+                artifacts.append(
+                    _artifact_record(
+                        unexpected,
+                        kind="recovery_anchor_unexpected_artifact",
+                    )
+                )
 
     artifacts.sort(key=lambda item: (item["kind"], item["source_path"]))
     snapshot = {

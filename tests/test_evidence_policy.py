@@ -195,6 +195,8 @@ def test_plan_preserves_existing_recovery_anchor_sidecars(
     }
     for sidecar in sidecars:
         sidecar.write_bytes(b"existing sidecar evidence")
+    unexpected = anchor / "operator-note.bin"
+    unexpected.write_bytes(b"unexpected recovery evidence")
 
     plan = policy.collect_evidence_plan()
     planned_sidecars = {
@@ -204,6 +206,27 @@ def test_plan_preserves_existing_recovery_anchor_sidecars(
     }
 
     assert planned_sidecars == sidecars
+    assert any(
+        item["kind"] == "recovery_anchor_unexpected_artifact"
+        and Path(item["source_path"]) == unexpected
+        for item in plan["artifacts"]
+    )
+
+
+def test_plan_refuses_nonregular_unexpected_recovery_anchor_artifact(
+    evidence_paths: Path,
+) -> None:
+    anchor = recovery.recovery_anchor_path(config.DB_PATH)
+    anchor.mkdir(mode=0o700)
+    (anchor / recovery.RECOVERY_DATABASE_NAME).write_bytes(b"recovery database")
+    (anchor / recovery.RECOVERY_MANIFEST_NAME).write_text(
+        '{"schema":"RecoveryAnchorV1"}\n',
+        encoding="utf-8",
+    )
+    (anchor / "unexpected-directory").mkdir()
+
+    with pytest.raises(policy.EvidencePolicyError, match="not a regular file"):
+        policy.collect_evidence_plan()
 
 
 def test_plan_refuses_partial_recovery_anchor_bundle(
