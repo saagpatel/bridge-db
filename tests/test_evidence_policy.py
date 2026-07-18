@@ -191,6 +191,18 @@ def test_plan_refuses_partial_recovery_anchor_bundle(
         policy.collect_evidence_plan()
 
 
+def test_plan_refuses_dangling_recovery_anchor_symlink(
+    evidence_paths: Path,
+) -> None:
+    anchor = recovery.recovery_anchor_path(config.DB_PATH)
+    anchor.symlink_to(evidence_paths / "missing-anchor", target_is_directory=True)
+
+    assert anchor.is_symlink()
+    assert not anchor.exists()
+    with pytest.raises(policy.EvidencePolicyError, match="not a regular directory"):
+        policy.collect_evidence_plan()
+
+
 def test_archive_refuses_stale_plan_without_creating_destination(
     evidence_paths: Path,
 ) -> None:

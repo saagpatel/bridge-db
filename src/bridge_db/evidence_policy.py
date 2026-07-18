@@ -155,8 +155,12 @@ def collect_evidence_plan() -> dict[str, Any]:
             if sidecar.exists():
                 artifacts.append(_artifact_record(sidecar, kind=kind))
     anchor = recovery_anchor_path(config.DB_PATH)
+    if anchor.is_symlink():
+        raise EvidencePolicyError(
+            f"recovery anchor path is not a regular directory: {anchor}"
+        )
     if anchor.exists():
-        if not anchor.is_dir() or anchor.is_symlink():
+        if not anchor.is_dir():
             raise EvidencePolicyError(
                 f"recovery anchor path is not a regular directory: {anchor}"
             )
