@@ -193,6 +193,15 @@ args = ["run", "--directory", "/path/to/bridge-db", "python", "-m", "bridge_db"]
   independently with `uv run python -m bridge_db --verify-recovery-anchor`;
   verification opens a disposable copy, runs SQLite integrity and schema
   checks, and compares bounded table counts without returning database content.
+  After a separately approved write makes that valid bundle stale, use
+  `uv run python -m bridge_db --rotate-recovery-anchor`. Rotation is
+  preservation-idempotent when the anchor is already current; otherwise it
+  stages and verifies a new bundle, atomically exchanges it into the stable
+  current path under SQLite's writer slot, and retains the prior bundle under a
+  timestamped `.superseded-*` sibling. Invalid evidence, source races,
+  unsupported atomic exchange, and post-exchange verification failures fail
+  closed; a failed post-exchange verification rolls back to the previous
+  current anchor.
 - Evidence lifecycle: audit and recall JSONL active files rotate losslessly at
   configurable byte boundaries under an inter-process lock. All segments are
   preserved pending an approved retention policy. `health`/`status` expose

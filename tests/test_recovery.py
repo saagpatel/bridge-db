@@ -100,6 +100,286 @@ async def test_anchor_creation_preserves_dangling_symlink(
     assert list(tmp_path.glob(f".{anchor.name}.tmp-*")) == []
 
 
+async def test_rotate_stale_anchor_preserves_previous_and_publishes_current(
+    tmp_path: Path,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    original = recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    anchor = recovery.recovery_anchor_path(db_path)
+    original_database = (anchor / recovery.RECOVERY_DATABASE_NAME).read_bytes()
+    original_manifest = (anchor / recovery.RECOVERY_MANIFEST_NAME).read_bytes()
+    with sqlite3.connect(db_path) as changed:
+        changed.execute(
+            "INSERT INTO activity_log "
+            "(source, timestamp, project_name, summary) VALUES (?, ?, ?, ?)",
+            ("codex", "2026-07-18T09:00:00Z", "bridge-db", "after anchor"),
+        )
+
+    result = recovery.rotate_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    superseded = Path(result["superseded_path"])
+    assert result["disposition"] == "rotated"
+    assert result["rotated"] is True
+    assert result["ready"] is True
+    assert result["source_current"] is True
+    assert result["sha256"] != original["sha256"]
+    assert result["superseded_sha256"] == original["sha256"]
+    assert superseded.is_dir()
+    assert superseded.stat().st_mode & 0o777 == 0o700
+    assert (
+        superseded.joinpath(recovery.RECOVERY_DATABASE_NAME).read_bytes()
+        == original_database
+    )
+    assert (
+        superseded.joinpath(recovery.RECOVERY_MANIFEST_NAME).read_bytes()
+        == original_manifest
+    )
+    superseded_result = recovery.verify_recovery_anchor(
+        superseded,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    assert superseded_result["ready"] is True
+    assert superseded_result["sha256"] == original["sha256"]
+    assert recovery.recovery_anchor_inventory(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )["ready"] is True
+    assert list(tmp_path.glob(f".{anchor.name}.rotation-*")) == []
+
+
+async def test_rotate_current_anchor_is_preservation_idempotent(
+    tmp_path: Path,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    original = recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    result = recovery.rotate_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    assert result["disposition"] == "preserved_current"
+    assert result["rotated"] is False
+    assert result["sha256"] == original["sha256"]
+    assert result["superseded_path"] is None
+    assert list(tmp_path.glob("bridge.db.recovery-anchor-v1.superseded-*")) == []
+
+
+async def test_rotate_invalid_anchor_fails_closed_and_preserves_it(
+    tmp_path: Path,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    anchor = recovery.recovery_anchor_path(db_path)
+    database = anchor / recovery.RECOVERY_DATABASE_NAME
+    with database.open("ab") as handle:
+        handle.write(b"tamper")
+    invalid_bytes = database.read_bytes()
+
+    with pytest.raises(
+        RuntimeError,
+        match="current recovery anchor is not valid rotation evidence",
+    ):
+        recovery.rotate_recovery_anchor(
+            db_path,
+            expected_schema_version=SCHEMA_VERSION,
+        )
+
+    assert database.read_bytes() == invalid_bytes
+    assert list(tmp_path.glob("bridge.db.recovery-anchor-v1.superseded-*")) == []
+    assert list(tmp_path.glob(f".{anchor.name}.rotation-*")) == []
+
+
+async def test_rotate_preserves_current_when_atomic_exchange_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    original = recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    anchor = recovery.recovery_anchor_path(db_path)
+    original_database = (anchor / recovery.RECOVERY_DATABASE_NAME).read_bytes()
+    with sqlite3.connect(db_path) as changed:
+        changed.execute(
+            "INSERT INTO activity_log "
+            "(source, timestamp, project_name, summary) VALUES (?, ?, ?, ?)",
+            ("codex", "2026-07-18T09:00:00Z", "bridge-db", "after anchor"),
+        )
+
+    def fail_exchange(_first: Path, _second: Path) -> None:
+        raise OSError("simulated atomic exchange failure")
+
+    monkeypatch.setattr(
+        recovery,
+        "_swap_directories",
+        fail_exchange,
+    )
+
+    with pytest.raises(OSError, match="simulated atomic exchange failure"):
+        recovery.rotate_recovery_anchor(
+            db_path,
+            expected_schema_version=SCHEMA_VERSION,
+        )
+
+    assert (
+        anchor.joinpath(recovery.RECOVERY_DATABASE_NAME).read_bytes()
+        == original_database
+    )
+    assert recovery.verify_recovery_anchor(
+        anchor,
+        expected_schema_version=SCHEMA_VERSION,
+    )["sha256"] == original["sha256"]
+    assert recovery.recovery_anchor_inventory(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )["state"] == "stale"
+    assert list(tmp_path.glob("bridge.db.recovery-anchor-v1.superseded-*")) == []
+    assert list(tmp_path.glob(f".{anchor.name}.rotation-*")) == []
+
+
+async def test_rotate_rolls_back_when_post_exchange_verification_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    original = recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    anchor = recovery.recovery_anchor_path(db_path)
+    original_inventory = recovery.recovery_anchor_inventory
+    original_swap = recovery._swap_directories  # pyright: ignore[reportPrivateUsage]
+    exchange_completed = False
+    with sqlite3.connect(db_path) as changed:
+        changed.execute(
+            "INSERT INTO activity_log "
+            "(source, timestamp, project_name, summary) VALUES (?, ?, ?, ?)",
+            ("codex", "2026-07-18T09:00:00Z", "bridge-db", "after anchor"),
+        )
+
+    def track_exchange(first: Path, second: Path) -> None:
+        nonlocal exchange_completed
+        original_swap(first, second)
+        exchange_completed = not exchange_completed
+
+    def fail_new_current_verification(
+        source_path: Path,
+        *,
+        expected_schema_version: int,
+    ) -> dict[str, Any]:
+        result = original_inventory(
+            source_path,
+            expected_schema_version=expected_schema_version,
+        )
+        if exchange_completed and result["ready"]:
+            return {
+                **result,
+                "state": "invalid",
+                "ready": False,
+                "errors": ["simulated_post_exchange_failure"],
+            }
+        return result
+
+    monkeypatch.setattr(recovery, "_swap_directories", track_exchange)
+    monkeypatch.setattr(
+        recovery,
+        "recovery_anchor_inventory",
+        fail_new_current_verification,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="rotated recovery anchor failed current-source verification",
+    ):
+        recovery.rotate_recovery_anchor(
+            db_path,
+            expected_schema_version=SCHEMA_VERSION,
+        )
+
+    assert exchange_completed is False
+    assert recovery.verify_recovery_anchor(
+        anchor,
+        expected_schema_version=SCHEMA_VERSION,
+    )["sha256"] == original["sha256"]
+    assert list(tmp_path.glob("bridge.db.recovery-anchor-v1.superseded-*")) == []
+
+
+async def test_rotate_refuses_if_source_changes_after_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    original = recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    anchor = recovery.recovery_anchor_path(db_path)
+    with sqlite3.connect(db_path) as changed:
+        changed.execute(
+            "INSERT INTO activity_log "
+            "(source, timestamp, project_name, summary) VALUES (?, ?, ?, ?)",
+            ("codex", "2026-07-18T09:00:00Z", "bridge-db", "after anchor"),
+        )
+    original_create_at = (
+        recovery._create_recovery_anchor_at  # pyright: ignore[reportPrivateUsage]
+    )
+
+    def create_then_change_source(
+        source_path: Path,
+        candidate_path: Path,
+        *,
+        expected_schema_version: int,
+    ) -> dict[str, Any]:
+        result = original_create_at(
+            source_path,
+            candidate_path,
+            expected_schema_version=expected_schema_version,
+        )
+        with sqlite3.connect(db_path) as changed:
+            changed.execute(
+                "INSERT INTO activity_log "
+                "(source, timestamp, project_name, summary) VALUES (?, ?, ?, ?)",
+                ("codex", "2026-07-18T10:00:00Z", "bridge-db", "raced source"),
+            )
+        return result
+
+    monkeypatch.setattr(
+        recovery,
+        "_create_recovery_anchor_at",
+        create_then_change_source,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="staged recovery anchor is no longer current",
+    ):
+        recovery.rotate_recovery_anchor(
+            db_path,
+            expected_schema_version=SCHEMA_VERSION,
+        )
+
+    assert recovery.verify_recovery_anchor(
+        anchor,
+        expected_schema_version=SCHEMA_VERSION,
+    )["sha256"] == original["sha256"]
+    assert list(tmp_path.glob("bridge.db.recovery-anchor-v1.superseded-*")) == []
+    assert list(tmp_path.glob(f".{anchor.name}.rotation-*")) == []
+
+
 async def test_anchor_inventory_becomes_stale_after_source_insert(
     tmp_path: Path,
 ) -> None:
