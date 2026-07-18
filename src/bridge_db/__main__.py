@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import secrets
+import sqlite3
 import sys
 import tempfile
 from datetime import UTC, datetime, timedelta
@@ -384,7 +385,7 @@ def run_create_recovery_anchor() -> bool:
             expected_schema_version=SCHEMA_VERSION,
         )
         disposition = "preserved_existing"
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
         print(f"recovery anchor creation refused: {exc}")
         return False
 

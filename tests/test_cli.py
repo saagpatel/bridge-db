@@ -262,6 +262,21 @@ def test_recovery_anchor_cli_fails_closed_when_missing(
     assert "anchor_missing" in output
 
 
+def test_recovery_anchor_cli_fails_closed_for_corrupt_sqlite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    db_path.write_bytes(b"not a sqlite database")
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+
+    assert run_create_recovery_anchor() is False
+    output = capsys.readouterr().out
+    assert "recovery anchor creation refused" in output
+    assert "Traceback" not in output
+
+
 @pytest.mark.asyncio
 async def test_run_status_clarifies_dispositioned_unprocessed_shipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
