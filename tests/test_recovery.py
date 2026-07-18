@@ -214,6 +214,53 @@ async def test_anchor_detects_backup_tampering(tmp_path: Path) -> None:
     assert "byte_size_mismatch" in result["errors"]
 
 
+async def test_anchor_verification_rejects_symlinked_bundle_root(
+    tmp_path: Path,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    anchor = recovery.recovery_anchor_path(db_path)
+    moved = tmp_path / "moved-anchor"
+    anchor.rename(moved)
+    anchor.symlink_to(moved, target_is_directory=True)
+
+    result = recovery.recovery_anchor_inventory(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    assert result["state"] == "invalid"
+    assert result["ready"] is False
+    assert result["errors"] == ["anchor_symlink"]
+
+
+async def test_anchor_verification_rejects_symlinked_bundle_file(
+    tmp_path: Path,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    anchor = recovery.recovery_anchor_path(db_path)
+    database = anchor / recovery.RECOVERY_DATABASE_NAME
+    moved = anchor / "moved.sqlite"
+    database.rename(moved)
+    database.symlink_to(moved)
+
+    result = recovery.recovery_anchor_inventory(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    assert result["state"] == "invalid"
+    assert result["ready"] is False
+    assert "backup_symlink" in result["errors"]
+
+
 async def test_anchor_detects_truncated_backup(tmp_path: Path) -> None:
     db_path = await _source_database(tmp_path)
     recovery.create_recovery_anchor(

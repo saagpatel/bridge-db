@@ -178,6 +178,15 @@ def verify_recovery_anchor(
     errors: list[str] = []
     manifest: dict[str, object] | None = None
 
+    if anchor_path.is_symlink():
+        return {
+            "state": "invalid",
+            "ready": False,
+            "path": str(anchor_path),
+            "database_path": str(database_path),
+            "manifest_path": str(manifest_path),
+            "errors": ["anchor_symlink"],
+        }
     if not anchor_path.is_dir():
         return {
             "state": "missing" if not anchor_path.exists() else "invalid",
@@ -196,34 +205,40 @@ def verify_recovery_anchor(
     except OSError:
         errors.append("anchor_unreadable")
 
-    try:
-        loaded = cast(
-            object,
-            json.loads(manifest_path.read_text(encoding="utf-8")),
-        )
-        if isinstance(loaded, dict):
-            loaded_map = cast(dict[object, object], loaded)
-            manifest = {
-                key: value for key, value in loaded_map.items() if isinstance(key, str)
-            }
-        else:
-            errors.append("metadata_invalid")
-    except FileNotFoundError:
-        errors.append("metadata_missing")
-    except (OSError, json.JSONDecodeError, UnicodeError):
-        errors.append("metadata_unreadable")
+    if manifest_path.is_symlink():
+        errors.append("metadata_symlink")
+    else:
+        try:
+            loaded = cast(
+                object,
+                json.loads(manifest_path.read_text(encoding="utf-8")),
+            )
+            if isinstance(loaded, dict):
+                loaded_map = cast(dict[object, object], loaded)
+                manifest = {
+                    key: value for key, value in loaded_map.items() if isinstance(key, str)
+                }
+            else:
+                errors.append("metadata_invalid")
+        except FileNotFoundError:
+            errors.append("metadata_missing")
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            errors.append("metadata_unreadable")
 
     backup_bytes: int | None = None
     actual_digest: str | None = None
-    try:
-        backup_bytes = database_path.stat().st_size
-        if database_path.stat().st_mode & 0o077:
-            errors.append("backup_permissions_not_private")
-        actual_digest = _sha256_file(database_path)
-    except FileNotFoundError:
-        errors.append("backup_missing")
-    except OSError:
-        errors.append("backup_unreadable")
+    if database_path.is_symlink():
+        errors.append("backup_symlink")
+    else:
+        try:
+            backup_bytes = database_path.stat().st_size
+            if database_path.stat().st_mode & 0o077:
+                errors.append("backup_permissions_not_private")
+            actual_digest = _sha256_file(database_path)
+        except FileNotFoundError:
+            errors.append("backup_missing")
+        except OSError:
+            errors.append("backup_unreadable")
 
     manifest_counts: dict[str, int] | None = None
     if manifest is not None:
@@ -287,7 +302,7 @@ def verify_recovery_anchor(
     restored_schema_version: int | None = None
     integrity_ok = False
     semantic_readback_ok = False
-    if database_path.is_file():
+    if database_path.is_file() and not database_path.is_symlink():
         try:
             with tempfile.TemporaryDirectory(prefix="bridge-recovery-verify-") as temp:
                 disposable = Path(temp) / "restored.sqlite"
