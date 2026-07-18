@@ -9,6 +9,9 @@ import shutil
 import sqlite3
 import stat
 import tempfile
+import ctypes
+import errno
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, BinaryIO, cast
@@ -85,6 +88,22 @@ def _sqlite_semantic_fingerprint(path: Path) -> str:
     """Hash all persisted user-table content without exposing stored values."""
     digest = hashlib.sha256()
     with sqlite3.connect(_sqlite_ro_uri(path), uri=True) as check:
+        schema_rows = check.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema "
+            "WHERE name NOT LIKE 'sqlite_%' "
+            "ORDER BY type, name, tbl_name, sql"
+        )
+        for row in schema_rows:
+            digest.update(b"schema\0")
+            digest.update(
+                json.dumps(
+                    [_semantic_value(value) for value in row],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
+            )
+            digest.update(b"\n")
         tables = [
             str(row[0])
             for row in check.execute(
@@ -160,6 +179,54 @@ def _stable_stat_signature(value: os.stat_result) -> tuple[int, int, int, int, i
         value.st_mtime_ns,
         value.st_ctime_ns,
     )
+
+
+def _rename_directory_no_replace(source: Path, destination: Path) -> None:
+    """Atomically publish a directory while preserving any existing path."""
+    libc: Any = ctypes.CDLL(None, use_errno=True)
+    encoded_source = os.fsencode(source)
+    encoded_destination = os.fsencode(destination)
+    if sys.platform == "darwin":
+        rename_exclusive = libc.renamex_np
+        rename_exclusive.argtypes = (
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename_exclusive.restype = ctypes.c_int
+        result = rename_exclusive(
+            encoded_source,
+            encoded_destination,
+            0x00000004,  # RENAME_EXCL
+        )
+    elif sys.platform.startswith("linux"):
+        rename_noreplace = libc.renameat2
+        rename_noreplace.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename_noreplace.restype = ctypes.c_int
+        result = rename_noreplace(
+            -100,  # AT_FDCWD
+            encoded_source,
+            -100,
+            encoded_destination,
+            0x1,  # RENAME_NOREPLACE
+        )
+    else:
+        raise OSError(
+            errno.ENOTSUP,
+            "atomic no-replace directory publication is unsupported",
+            str(destination),
+        )
+    if result != 0:
+        error = ctypes.get_errno()
+        if error == errno.EEXIST:
+            raise FileExistsError(error, os.strerror(error), str(destination))
+        raise OSError(error, os.strerror(error), str(destination))
 
 
 def _fsync_directory(path: Path) -> None:
@@ -620,7 +687,7 @@ def create_recovery_anchor(
                 "source database changed during recovery anchor creation"
             )
 
-        os.replace(temporary, anchor_path)
+        _rename_directory_no_replace(temporary, anchor_path)
         published = True
         _fsync_directory(db_path.parent)
 

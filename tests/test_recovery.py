@@ -197,6 +197,26 @@ async def test_anchor_inventory_includes_autoincrement_sequence_state(
     assert result["source_current"] is False
 
 
+async def test_anchor_inventory_includes_schema_objects(
+    tmp_path: Path,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    with sqlite3.connect(db_path) as changed:
+        changed.execute("DROP TRIGGER trg_context_total_bytes_insert")
+
+    result = recovery.recovery_anchor_inventory(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    assert result["state"] == "stale"
+    assert result["source_current"] is False
+
+
 async def test_anchor_supports_sqlite_uri_characters_in_source_path(
     tmp_path: Path,
 ) -> None:
@@ -560,7 +580,7 @@ async def test_anchor_atomic_publication_failure_leaves_no_partial_bundle(
     def fail_replace(_source: Path, _destination: Path) -> None:
         raise OSError("simulated publication failure")
 
-    monkeypatch.setattr(recovery.os, "replace", fail_replace)
+    monkeypatch.setattr(recovery, "_rename_directory_no_replace", fail_replace)
 
     with pytest.raises(OSError, match="simulated publication failure"):
         recovery.create_recovery_anchor(
@@ -569,6 +589,37 @@ async def test_anchor_atomic_publication_failure_leaves_no_partial_bundle(
         )
 
     assert not anchor.exists()
+    assert list(tmp_path.glob(f".{anchor.name}.tmp-*")) == []
+
+
+async def test_anchor_publication_preserves_raced_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    anchor = recovery.recovery_anchor_path(db_path)
+    original_publish = (
+        recovery._rename_directory_no_replace  # pyright: ignore[reportPrivateUsage]
+    )
+
+    def race_destination(source: Path, destination: Path) -> None:
+        destination.mkdir()
+        (destination / "suspicious-partial").write_text("preserve", encoding="utf-8")
+        original_publish(source, destination)
+
+    monkeypatch.setattr(
+        recovery,
+        "_rename_directory_no_replace",
+        race_destination,
+    )
+
+    with pytest.raises(FileExistsError):
+        recovery.create_recovery_anchor(
+            db_path,
+            expected_schema_version=SCHEMA_VERSION,
+        )
+
+    assert (anchor / "suspicious-partial").read_text(encoding="utf-8") == "preserve"
     assert list(tmp_path.glob(f".{anchor.name}.tmp-*")) == []
 
 
