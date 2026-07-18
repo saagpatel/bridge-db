@@ -1,6 +1,7 @@
 """Tests for the health MCP tool."""
 
 import json
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -9,9 +10,10 @@ import aiosqlite
 import pytest
 from conftest import CaptureMCP, make_ctx
 
-from bridge_db import config
+from bridge_db import config, recovery
 from bridge_db.db import (
     SCHEMA_VERSION,
+    _backup_db_file,  # pyright: ignore[reportPrivateUsage]
     fts_text_for_activity,
     fts_text_for_handoff,
     fts_text_for_section,
@@ -27,6 +29,14 @@ def fns(db: aiosqlite.Connection) -> dict[str, Any]:
     cap = CaptureMCP()
     mod.register(cap)
     return cap.fns
+
+
+def _replace_test_anchor(db_path: Path) -> None:
+    shutil.rmtree(recovery.recovery_anchor_path(db_path), ignore_errors=True)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +55,8 @@ async def patch_db_path(
         "VALUES (1, 'test-export-state')"
     )
     await db.commit()
+    await _backup_db_file(db, "health-fixture")
+    _replace_test_anchor(config.DB_PATH)
 
 
 async def test_health_returns_ok_on_healthy_db(
@@ -63,6 +75,43 @@ async def test_health_returns_ok_on_healthy_db(
         result["evidence_lifecycle"]["acknowledgements"]["authority"]
         == "review_only_no_cleanup_authority"
     )
+
+
+async def test_health_degrades_when_recovery_evidence_is_missing(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    for path in tmp_path.glob("test.db.*.bak*"):
+        path.unlink()
+    shutil.rmtree(recovery.recovery_anchor_path(tmp_path / "test.db"))
+
+    result = await fns["health"](ctx=make_ctx(db))
+
+    assert result["ok"] is False
+    assert result["storage_ok"] is False
+    assert result["evidence_lifecycle"]["migration_backups"]["count"] == 0
+    assert result["evidence_lifecycle"]["legacy_backup_provenance_ok"] is False
+    assert result["evidence_lifecycle"]["backup_integrity_ok"] is True
+    status = await fns["status"](ctx=make_ctx(db))
+    assert status["signals"]["migration_backup_integrity_ok"] is True
+    assert result["evidence_lifecycle"]["current_recovery_anchor"]["state"] == "missing"
+    assert result["evidence_lifecycle"]["recovery_integrity_ok"] is False
+
+
+async def test_health_degrades_without_current_anchor_even_with_verified_legacy_backup(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    shutil.rmtree(recovery.recovery_anchor_path(tmp_path / "test.db"))
+
+    result = await fns["health"](ctx=make_ctx(db))
+
+    assert result["evidence_lifecycle"]["legacy_backup_provenance_ok"] is True
+    assert result["evidence_lifecycle"]["current_recovery_anchor"]["state"] == "missing"
+    assert result["evidence_lifecycle"]["recovery_integrity_ok"] is False
+    assert result["storage_ok"] is False
 
 
 async def test_health_degrades_on_durable_audit_failure_receipt(
@@ -121,6 +170,100 @@ async def test_health_accepts_completed_evidence_disposition(
     assert result["storage_ok"] is True
     assert result["evidence_lifecycle"]["disposition_degraded"] is False
     assert result["evidence_lifecycle"]["dispositions"]["completed_count"] == 1
+
+
+async def test_health_separates_verified_current_anchor_from_legacy_uncertainty(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "test.db"
+    shutil.rmtree(recovery.recovery_anchor_path(db_path))
+    legacy = tmp_path / "test.db.pre-v1.bak"
+    legacy.write_bytes(db_path.read_bytes())
+
+    without_anchor = await fns["health"](ctx=make_ctx(db))
+    assert without_anchor["storage_ok"] is False
+    assert (
+        without_anchor["evidence_lifecycle"]["current_recovery_anchor"]["state"]
+        == "missing"
+    )
+    assert (
+        without_anchor["evidence_lifecycle"]["migration_backups"]["provenance_state"]
+        == "readable_but_unknown"
+    )
+
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    with_anchor = await fns["health"](ctx=make_ctx(db))
+
+    assert with_anchor["storage_ok"] is True
+    assert with_anchor["evidence_lifecycle"]["current_recovery_ready"] is True
+    assert (
+        with_anchor["evidence_lifecycle"]["current_recovery_anchor"]["state"]
+        == "verified"
+    )
+    assert with_anchor["evidence_lifecycle"]["legacy_backup_provenance_ok"] is False
+    assert with_anchor["evidence_lifecycle"]["backup_integrity_ok"] is False
+    assert with_anchor["evidence_lifecycle"]["recovery_integrity_ok"] is True
+    assert (
+        with_anchor["evidence_lifecycle"]["migration_backups"][
+            "provenance_unverified_count"
+        ]
+        == 1
+    )
+    assert legacy.exists()
+
+
+async def test_health_degrades_when_current_anchor_is_invalid(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "test.db"
+    shutil.rmtree(recovery.recovery_anchor_path(db_path))
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    manifest = recovery.recovery_anchor_path(db_path) / recovery.RECOVERY_MANIFEST_NAME
+    manifest.write_text("{}", encoding="utf-8")
+
+    result = await fns["health"](ctx=make_ctx(db))
+
+    assert result["storage_ok"] is False
+    assert result["evidence_lifecycle"]["current_recovery_ready"] is False
+    assert result["evidence_lifecycle"]["current_recovery_anchor"]["state"] == "invalid"
+
+
+async def test_health_degrades_when_current_anchor_is_stale(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "test.db"
+    shutil.rmtree(recovery.recovery_anchor_path(db_path))
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary) "
+        "VALUES ('codex', '2026-07-18', 'bridge-db', 'after anchor')"
+    )
+    await db.commit()
+
+    result = await fns["health"](ctx=make_ctx(db))
+
+    assert result["storage_ok"] is False
+    assert result["evidence_lifecycle"]["current_recovery_ready"] is False
+    assert result["evidence_lifecycle"]["current_recovery_anchor"]["state"] == "stale"
+    assert (
+        "source_changed_since_anchor"
+        in result["evidence_lifecycle"]["current_recovery_anchor"]["errors"]
+    )
 
 
 async def test_health_row_counts_reflect_data(
@@ -422,6 +565,7 @@ async def test_status_returns_compact_operator_summary(
         fts_text_for_activity("bridge-db", "checked operator status", None),
     )
     await db.commit()
+    _replace_test_anchor(tmp_path / "test.db")
 
     ctx = make_ctx(db)
     result = await fns["status"](ctx=ctx)
@@ -462,9 +606,7 @@ async def test_status_latest_activity_uses_server_recorded_time(
 
     result = await mod.collect_status_summary(db, now=FIXED_NOW)
 
-    assert result["latest_activity"]["cc"] == (
-        "2026-07-14T12:00:00Z (CurrentEvidence)"
-    )
+    assert result["latest_activity"]["cc"] == ("2026-07-14T12:00:00Z (CurrentEvidence)")
 
 
 FIXED_NOW = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
@@ -577,6 +719,7 @@ async def test_status_marks_snapshot_superseded_by_newer_same_source_activity(
     await _seed_snapshot(db, "codex", "2026-07-07", "2026-07-07T11:00:00Z")
     activity_id = await _seed_activity(db, "cc", "2026-07-07T11:30:00Z")
     await db.commit()
+    _replace_test_anchor(tmp_path / "test.db")
 
     result = await mod.collect_status_summary(db, now=FIXED_NOW)
 
@@ -601,6 +744,7 @@ async def test_status_ignores_lifecycle_only_activity_for_snapshot_supersession(
         tags=["session-boundary"],
     )
     await db.commit()
+    _replace_test_anchor(tmp_path / "test.db")
 
     result = await mod.collect_status_summary(db, now=FIXED_NOW)
 
@@ -642,6 +786,7 @@ async def test_status_freshness_reports_stale_snapshots_without_degrading_health
     await _seed_snapshot(db, "cc", "2026-07-04", "2026-07-04T11:00:00Z")
     await _seed_snapshot(db, "codex", "2026-07-07", "2026-07-07T11:00:00Z")
     await db.commit()
+    _replace_test_anchor(tmp_path / "test.db")
 
     result = await mod.collect_status_summary(db, now=FIXED_NOW)
 
@@ -714,6 +859,7 @@ async def test_status_freshness_reports_stale_pending_and_active_handoffs(
         picked_up_at="2026-07-04T11:00:00Z",
     )
     await db.commit()
+    _replace_test_anchor(tmp_path / "test.db")
 
     result = await mod.collect_status_summary(db, now=FIXED_NOW)
 
@@ -743,6 +889,7 @@ async def test_status_freshness_shipped_event_next_actions(
         db, "codex", "2026-07-07T11:00:00Z", tags=["SHIPPED", "PROCESSED"]
     )
     await db.commit()
+    _replace_test_anchor(tmp_path / "test.db")
 
     result = await mod.collect_status_summary(db, now=FIXED_NOW)
 
@@ -844,6 +991,7 @@ async def test_status_freshness_preserves_existing_keys_and_top_level_health(
     await _make_status_health_ready(tmp_path, monkeypatch)
     await _seed_snapshot(db, "cc", "2026-07-04", "2026-07-04T11:00:00Z")
     await db.commit()
+    _replace_test_anchor(tmp_path / "test.db")
 
     result = await mod.collect_status_summary(db, now=FIXED_NOW)
 
@@ -911,6 +1059,7 @@ async def test_status_breaks_latest_ties_by_id(
             fts_text_for_activity(project_name, "checked operator status", None),
         )
     await db.commit()
+    _replace_test_anchor(tmp_path / "test.db")
 
     result = await fns["status"](ctx=make_ctx(db))
 
@@ -981,6 +1130,20 @@ async def test_health_ok_unaffected_by_wal_warning(
     monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge)
     monkeypatch.setattr(config, "WAL_SIZE_WARN_BYTES", 100)
     (tmp_path / "test.db-wal").write_bytes(b"x" * 1024)
+
+    def verified_anchor(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "state": "verified",
+            "ready": True,
+            "source_current": True,
+            "errors": [],
+        }
+
+    monkeypatch.setattr(
+        mod,
+        "recovery_anchor_inventory",
+        verified_anchor,
+    )
 
     result = await fns["health"](ctx=make_ctx(db))
     assert result["wal_warning"] is True
@@ -1083,6 +1246,7 @@ async def test_claude_ai_section_drift_detects_mismatch(
     bridge = tmp_path / "bridge.md"
     bridge.write_text("## Career & Professional Target\nHand-edited but unsynced.\n")
     monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge)
+    _replace_test_anchor(tmp_path / "test.db")
 
     result = await fns["health"](ctx=make_ctx(db))
     drift = result["claude_ai_section_drift"]

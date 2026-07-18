@@ -187,11 +187,20 @@ args = ["run", "--directory", "/path/to/bridge-db", "python", "-m", "bridge_db"]
 - Health check: `health` MCP tool or `uv run python -m bridge_db --doctor`
 - Operator summary: `uv run python -m bridge_db --status`
 - Dogfood pass: `uv run python -m bridge_db --dogfood` bundles the status, FTS index, WAL, recall, and shipped-sync audit checks used after bridge-sync runs
+- Current recovery anchor: `uv run python -m bridge_db --create-recovery-anchor`
+  creates one private, atomically published `RecoveryAnchorV1` bundle using
+  SQLite's online-backup API. It never overwrites an existing anchor. Verify it
+  independently with `uv run python -m bridge_db --verify-recovery-anchor`;
+  verification opens a disposable copy, runs SQLite integrity and schema
+  checks, and compares bounded table counts without returning database content.
 - Evidence lifecycle: audit and recall JSONL active files rotate losslessly at
   configurable byte boundaries under an inter-process lock. All segments are
   preserved pending an approved retention policy. `health`/`status` expose
   active/segment bytes, audit degradation, historical raw-query inventory, and
-  verified migration-backup inventory. See
+  current recovery readiness separately from historical migration-backup
+  provenance. Legacy backups without creation-time manifests remain
+  `historical_unverified` even when SQLite-readable; a verified current anchor
+  never rewrites or retroactively blesses them. See
   [docs/internal/EVIDENCE-LIFECYCLE.md](docs/internal/EVIDENCE-LIFECYCLE.md).
 - Evidence policy: `uv run python -m bridge_db.evidence_policy plan` emits a
   non-sensitive, content-bound preservation plan. The companion `archive`

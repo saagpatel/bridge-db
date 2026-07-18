@@ -1,0 +1,715 @@
+"""Atomic, content-bound recovery anchors for the current BridgeDB database."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import sqlite3
+import stat
+import tempfile
+import ctypes
+import errno
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Any, BinaryIO, cast
+
+from bridge_db import clock
+
+RECOVERY_ANCHOR_SCHEMA = "RecoveryAnchorV1"
+RECOVERY_ANCHOR_SUFFIX = ".recovery-anchor-v1"
+RECOVERY_DATABASE_NAME = "anchor.sqlite"
+RECOVERY_MANIFEST_NAME = "manifest.json"
+SQLITE_WRITER_BUSY_TIMEOUT_SECONDS = 15.0
+RECOVERY_DATABASE_SIDECAR_NAMES = (
+    f"{RECOVERY_DATABASE_NAME}-wal",
+    f"{RECOVERY_DATABASE_NAME}-shm",
+)
+SEMANTIC_READBACK_TABLES = (
+    "context_sections",
+    "activity_log",
+    "pending_handoffs",
+    "system_snapshots",
+    "cost_records",
+)
+
+
+def recovery_anchor_path(db_path: Path) -> Path:
+    """Return the stable, non-legacy path for the current recovery anchor."""
+    return db_path.with_name(f"{db_path.name}{RECOVERY_ANCHOR_SUFFIX}")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sqlite_ro_uri(path: Path) -> str:
+    """Return a percent-escaped SQLite read-only URI for any valid path."""
+    return f"{path.resolve().as_uri()}?mode=ro"
+
+
+def _sqlite_readback(path: Path) -> tuple[int, dict[str, int], bool]:
+    with sqlite3.connect(_sqlite_ro_uri(path), uri=True) as check:
+        integrity_row = check.execute("PRAGMA integrity_check").fetchone()
+        integrity_ok = integrity_row is not None and integrity_row[0] == "ok"
+        version_row = check.execute("PRAGMA user_version").fetchone()
+        schema_version = int(version_row[0]) if version_row is not None else -1
+        row_counts: dict[str, int] = {}
+        for table in SEMANTIC_READBACK_TABLES:
+            table_row = check.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone()
+            if table_row is None:
+                raise sqlite3.DatabaseError(f"required table missing: {table}")
+            count_row = check.execute(
+                f'SELECT COUNT(*) FROM "{table}"'  # noqa: S608
+            ).fetchone()
+            if count_row is None:
+                raise sqlite3.DatabaseError(f"row count unavailable: {table}")
+            row_counts[table] = int(count_row[0])
+    return schema_version, row_counts, integrity_ok
+
+
+def _semantic_value(value: object) -> list[object]:
+    if isinstance(value, bytes):
+        return ["bytes", value.hex()]
+    if isinstance(value, float):
+        return ["float", repr(value)]
+    return [type(value).__name__, value]
+
+
+def _sqlite_semantic_fingerprint(path: Path) -> str:
+    """Hash all persisted user-table content without exposing stored values."""
+    digest = hashlib.sha256()
+    with sqlite3.connect(_sqlite_ro_uri(path), uri=True) as check:
+        schema_rows = check.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema "
+            "WHERE name NOT LIKE 'sqlite_%' "
+            "ORDER BY type, name, tbl_name, sql"
+        )
+        for row in schema_rows:
+            digest.update(b"schema\0")
+            digest.update(
+                json.dumps(
+                    [_semantic_value(value) for value in row],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
+            )
+            digest.update(b"\n")
+        tables = [
+            str(row[0])
+            for row in check.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' "
+                "AND (name NOT LIKE 'sqlite_%' OR name = 'sqlite_sequence') "
+                "ORDER BY name"
+            )
+        ]
+        for table in tables:
+            cursor = check.execute(f'SELECT * FROM "{table}"')  # noqa: S608
+            columns = [str(column[0]) for column in cursor.description or ()]
+            row_hashes: list[str] = []
+            for row in cursor:
+                encoded = json.dumps(
+                    [_semantic_value(value) for value in row],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
+                row_hashes.append(hashlib.sha256(encoded).hexdigest())
+            digest.update(table.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(json.dumps(columns, separators=(",", ":")).encode("utf-8"))
+            digest.update(b"\0")
+            for row_hash in sorted(row_hashes):
+                digest.update(row_hash.encode("ascii"))
+                digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _write_private_file(path: Path, content: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    fd = os.open(path, flags, 0o600)
+    try:
+        view = memoryview(content)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short recovery-anchor write")
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _copy_to_private_file(path: Path, source: BinaryIO) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    fd = os.open(path, flags, 0o600)
+    try:
+        while chunk := source.read(1024 * 1024):
+            view = memoryview(chunk)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("short recovery-copy write")
+                view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _stable_stat_signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    """Return the fields that expose replacement or in-place mutation."""
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _rename_directory_no_replace(source: Path, destination: Path) -> None:
+    """Atomically publish a directory while preserving any existing path."""
+    libc: Any = ctypes.CDLL(None, use_errno=True)
+    encoded_source = os.fsencode(source)
+    encoded_destination = os.fsencode(destination)
+    if sys.platform == "darwin":
+        rename_exclusive = libc.renamex_np
+        rename_exclusive.argtypes = (
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename_exclusive.restype = ctypes.c_int
+        result = rename_exclusive(
+            encoded_source,
+            encoded_destination,
+            0x00000004,  # RENAME_EXCL
+        )
+    elif sys.platform.startswith("linux"):
+        rename_noreplace = libc.renameat2
+        rename_noreplace.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename_noreplace.restype = ctypes.c_int
+        result = rename_noreplace(
+            -100,  # AT_FDCWD
+            encoded_source,
+            -100,
+            encoded_destination,
+            0x1,  # RENAME_NOREPLACE
+        )
+    else:
+        raise OSError(
+            errno.ENOTSUP,
+            "atomic no-replace directory publication is unsupported",
+            str(destination),
+        )
+    if result != 0:
+        error = ctypes.get_errno()
+        if error == errno.EEXIST:
+            raise FileExistsError(error, os.strerror(error), str(destination))
+        raise OSError(error, os.strerror(error), str(destination))
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_file(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def verify_recovery_anchor(
+    anchor_path: Path,
+    *,
+    expected_schema_version: int,
+) -> dict[str, Any]:
+    """Verify one anchor using a disposable recovery copy and bounded reads."""
+    database_path = anchor_path / RECOVERY_DATABASE_NAME
+    manifest_path = anchor_path / RECOVERY_MANIFEST_NAME
+    errors: list[str] = []
+    manifest: dict[str, object] | None = None
+    anchor_permissions_private: bool | None = None
+    database_permissions_private: bool | None = None
+    manifest_permissions_private: bool | None = None
+
+    if anchor_path.is_symlink():
+        return {
+            "state": "invalid",
+            "ready": False,
+            "path": str(anchor_path),
+            "database_path": str(database_path),
+            "manifest_path": str(manifest_path),
+            "errors": ["anchor_symlink"],
+        }
+    if not anchor_path.is_dir():
+        return {
+            "state": "missing" if not anchor_path.exists() else "invalid",
+            "ready": False,
+            "path": str(anchor_path),
+            "database_path": str(database_path),
+            "manifest_path": str(manifest_path),
+            "errors": [
+                "anchor_missing" if not anchor_path.exists() else "anchor_not_directory"
+            ],
+        }
+
+    try:
+        anchor_permissions_private = not bool(anchor_path.stat().st_mode & 0o077)
+        if not anchor_permissions_private:
+            errors.append("anchor_permissions_not_private")
+    except OSError:
+        errors.append("anchor_unreadable")
+    try:
+        artifact_names = {path.name for path in anchor_path.iterdir()}
+        if artifact_names != {RECOVERY_DATABASE_NAME, RECOVERY_MANIFEST_NAME}:
+            errors.append("anchor_artifact_set_mismatch")
+    except OSError:
+        errors.append("anchor_unreadable")
+
+    manifest_regular = False
+    manifest_stat: os.stat_result | None = None
+    manifest_signature: tuple[int, int, int, int, int] | None = None
+    if manifest_path.is_symlink():
+        errors.append("metadata_symlink")
+    else:
+        try:
+            manifest_stat = manifest_path.lstat()
+            manifest_regular = stat.S_ISREG(manifest_stat.st_mode)
+            if not manifest_regular:
+                errors.append("metadata_not_regular")
+            else:
+                manifest_permissions_private = not bool(manifest_stat.st_mode & 0o077)
+                if not manifest_permissions_private:
+                    errors.append("metadata_permissions_not_private")
+        except FileNotFoundError:
+            errors.append("metadata_missing")
+        except OSError:
+            errors.append("metadata_unreadable")
+    if manifest_regular:
+        try:
+            manifest_flags = os.O_RDONLY
+            if hasattr(os, "O_CLOEXEC"):
+                manifest_flags |= os.O_CLOEXEC
+            if hasattr(os, "O_NOFOLLOW"):
+                manifest_flags |= os.O_NOFOLLOW
+            manifest_fd = os.open(manifest_path, manifest_flags)
+            with os.fdopen(manifest_fd, "rb") as source:
+                manifest_before = os.fstat(source.fileno())
+                if not stat.S_ISREG(manifest_before.st_mode):
+                    raise OSError("recovery manifest changed to a non-regular file")
+                manifest_permissions_private = not bool(manifest_before.st_mode & 0o077)
+                if not manifest_permissions_private:
+                    errors.append("metadata_permissions_not_private")
+                manifest_content = source.read()
+                manifest_after = os.fstat(source.fileno())
+            manifest_path_after = manifest_path.lstat()
+            manifest_signature = _stable_stat_signature(manifest_before)
+            if (
+                manifest_stat is None
+                or _stable_stat_signature(manifest_stat) != manifest_signature
+                or _stable_stat_signature(manifest_after) != manifest_signature
+                or _stable_stat_signature(manifest_path_after) != manifest_signature
+            ):
+                errors.append("metadata_changed_during_verification")
+            loaded = cast(
+                object,
+                json.loads(manifest_content.decode("utf-8")),
+            )
+            if isinstance(loaded, dict):
+                loaded_map = cast(dict[object, object], loaded)
+                manifest = {
+                    key: value
+                    for key, value in loaded_map.items()
+                    if isinstance(key, str)
+                }
+            else:
+                errors.append("metadata_invalid")
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            errors.append("metadata_unreadable")
+
+    backup_bytes: int | None = None
+    actual_digest: str | None = None
+    database_regular = False
+    database_stat: os.stat_result | None = None
+    if database_path.is_symlink():
+        errors.append("backup_symlink")
+    else:
+        try:
+            database_stat = database_path.lstat()
+            database_regular = stat.S_ISREG(database_stat.st_mode)
+            if not database_regular:
+                errors.append("backup_not_regular")
+            else:
+                database_permissions_private = not bool(database_stat.st_mode & 0o077)
+                if not database_permissions_private:
+                    errors.append("backup_permissions_not_private")
+        except FileNotFoundError:
+            errors.append("backup_missing")
+        except OSError:
+            errors.append("backup_unreadable")
+    manifest_counts: dict[str, int] | None = None
+    if manifest is not None:
+        required_types = {
+            "schema": str,
+            "created_at": str,
+            "source_schema_version": int,
+            "backup_bytes": int,
+            "sha256": str,
+            "semantic_readback": dict,
+        }
+        for key, expected_type in required_types.items():
+            if not isinstance(manifest.get(key), expected_type):
+                errors.append(f"metadata_{key}_invalid")
+        if manifest.get("schema") != RECOVERY_ANCHOR_SCHEMA:
+            errors.append("metadata_schema_invalid")
+        created_at = manifest.get("created_at")
+        if isinstance(created_at, str):
+            try:
+                datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            except ValueError:
+                errors.append("metadata_created_at_invalid")
+        if (
+            isinstance(manifest.get("source_schema_version"), int)
+            and manifest["source_schema_version"] != expected_schema_version
+        ):
+            errors.append("schema_incompatible")
+        semantic = manifest.get("semantic_readback")
+        raw_counts: object = None
+        if isinstance(semantic, dict):
+            semantic_map = cast(dict[object, object], semantic)
+            raw_counts = semantic_map.get("row_counts")
+        parsed_counts: dict[str, int] = {}
+        if isinstance(raw_counts, dict):
+            raw_counts_map = cast(dict[object, object], raw_counts)
+            for key, value in raw_counts_map.items():
+                if isinstance(key, str) and isinstance(value, int) and value >= 0:
+                    parsed_counts[key] = value
+        if set(parsed_counts) == set(SEMANTIC_READBACK_TABLES):
+            manifest_counts = parsed_counts
+        else:
+            errors.append("semantic_metadata_invalid")
+
+    restored_schema_version: int | None = None
+    integrity_ok = False
+    semantic_readback_ok = False
+    if database_regular:
+        try:
+            with tempfile.TemporaryDirectory(prefix="bridge-recovery-verify-") as temp:
+                disposable = Path(temp) / "restored.sqlite"
+                source_flags = os.O_RDONLY
+                if hasattr(os, "O_CLOEXEC"):
+                    source_flags |= os.O_CLOEXEC
+                if hasattr(os, "O_NOFOLLOW"):
+                    source_flags |= os.O_NOFOLLOW
+                source_fd = os.open(database_path, source_flags)
+                with os.fdopen(source_fd, "rb") as source:
+                    source_before = os.fstat(source.fileno())
+                    if not stat.S_ISREG(source_before.st_mode):
+                        raise OSError("recovery anchor changed to a non-regular file")
+                    database_permissions_private = not bool(
+                        source_before.st_mode & 0o077
+                    )
+                    if not database_permissions_private:
+                        errors.append("backup_permissions_not_private")
+                    _copy_to_private_file(disposable, source)
+                    source_after_copy = os.fstat(source.fileno())
+                    path_after_copy = database_path.lstat()
+
+                    backup_bytes = disposable.stat().st_size
+                    actual_digest = _sha256_file(disposable)
+                    (
+                        restored_schema_version,
+                        restored_counts,
+                        integrity_ok,
+                    ) = _sqlite_readback(disposable)
+
+                    source_after_readback = os.fstat(source.fileno())
+                    path_after_readback = database_path.lstat()
+                    source_signature = _stable_stat_signature(source_before)
+                    if (
+                        database_stat is None
+                        or _stable_stat_signature(database_stat) != source_signature
+                        or any(
+                            _stable_stat_signature(value) != source_signature
+                            for value in (
+                                source_after_copy,
+                                path_after_copy,
+                                source_after_readback,
+                                path_after_readback,
+                            )
+                        )
+                    ):
+                        errors.append("backup_changed_during_verification")
+            if not integrity_ok:
+                errors.append("integrity_check_failed")
+            if restored_schema_version != expected_schema_version:
+                errors.append("schema_incompatible")
+            if manifest_counts is not None:
+                semantic_readback_ok = restored_counts == manifest_counts
+                if not semantic_readback_ok:
+                    errors.append("semantic_readback_mismatch")
+        except (OSError, sqlite3.Error, TypeError, ValueError):
+            errors.append("disposable_recovery_failed")
+
+    if (
+        backup_bytes is not None
+        and manifest is not None
+        and isinstance(manifest.get("backup_bytes"), int)
+        and manifest["backup_bytes"] != backup_bytes
+    ):
+        errors.append("byte_size_mismatch")
+    if (
+        actual_digest is not None
+        and manifest is not None
+        and isinstance(manifest.get("sha256"), str)
+        and manifest["sha256"] != actual_digest
+    ):
+        errors.append("digest_mismatch")
+    if manifest_signature is not None:
+        try:
+            if _stable_stat_signature(manifest_path.lstat()) != manifest_signature:
+                errors.append("metadata_changed_during_verification")
+        except OSError:
+            errors.append("metadata_changed_during_verification")
+
+    errors = sorted(set(errors))
+    permission_checks = (
+        anchor_permissions_private,
+        database_permissions_private,
+        manifest_permissions_private,
+    )
+    permissions = (
+        "not_private"
+        if False in permission_checks
+        else "private"
+        if all(check is True for check in permission_checks)
+        else "unknown"
+    )
+    return {
+        "state": "verified" if not errors else "invalid",
+        "ready": not errors,
+        "path": str(anchor_path),
+        "database_path": str(database_path),
+        "manifest_path": str(manifest_path),
+        "created_at": manifest.get("created_at") if manifest is not None else None,
+        "schema_version": restored_schema_version,
+        "expected_schema_version": expected_schema_version,
+        "backup_bytes": backup_bytes,
+        "sha256": actual_digest,
+        "digest_ok": actual_digest is not None
+        and manifest is not None
+        and manifest.get("sha256") == actual_digest,
+        "integrity_ok": integrity_ok,
+        "semantic_readback_ok": semantic_readback_ok,
+        "recovery_readback": "verified" if not errors else "unverified",
+        "permissions": permissions,
+        "cleanup": "approval_required",
+        "errors": errors,
+    }
+
+
+def recovery_anchor_inventory(
+    db_path: Path,
+    *,
+    expected_schema_version: int,
+) -> dict[str, Any]:
+    """Return non-sensitive readiness for the stable current anchor."""
+    result = verify_recovery_anchor(
+        recovery_anchor_path(db_path),
+        expected_schema_version=expected_schema_version,
+    )
+    if not result["ready"]:
+        return result
+    try:
+        anchor_fingerprint = _sqlite_semantic_fingerprint(
+            recovery_anchor_path(db_path) / RECOVERY_DATABASE_NAME
+        )
+        source_fingerprint = _sqlite_semantic_fingerprint(db_path)
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return {
+            **result,
+            "state": "invalid",
+            "ready": False,
+            "source_current": None,
+            "recovery_readback": "unverified",
+            "errors": sorted([*result["errors"], "source_fingerprint_unavailable"]),
+        }
+    source_current = source_fingerprint == anchor_fingerprint
+    if source_current:
+        return {**result, "source_current": True}
+    return {
+        **result,
+        "state": "stale",
+        "ready": False,
+        "source_current": False,
+        "recovery_readback": "stale",
+        "errors": sorted([*result["errors"], "source_changed_since_anchor"]),
+    }
+
+
+def create_recovery_anchor(
+    db_path: Path,
+    *,
+    expected_schema_version: int,
+) -> dict[str, Any]:
+    """Create one atomically published RecoveryAnchorV1 bundle.
+
+    Existing anchors are never overwritten. Callers may verify an existing
+    bundle, but replacing or deleting recovery evidence requires separate
+    operator authority.
+    """
+    if not db_path.is_file():
+        raise FileNotFoundError(f"database does not exist: {db_path}")
+    anchor_path = recovery_anchor_path(db_path)
+    if anchor_path.exists() or anchor_path.is_symlink():
+        raise FileExistsError(f"recovery anchor already exists: {anchor_path}")
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(
+        tempfile.mkdtemp(
+            prefix=f".{anchor_path.name}.tmp-",
+            dir=db_path.parent,
+        )
+    )
+    os.chmod(temporary, 0o700)
+    published = False
+    source_guard: sqlite3.Connection | None = None
+    try:
+        database_path = temporary / RECOVERY_DATABASE_NAME
+        source = sqlite3.connect(_sqlite_ro_uri(db_path), uri=True)
+        target = sqlite3.connect(database_path)
+        try:
+            source.backup(target)
+            mode_row = target.execute("PRAGMA journal_mode=DELETE").fetchone()
+            if mode_row is None or str(mode_row[0]).lower() != "delete":
+                raise RuntimeError(
+                    "online backup could not enter sidecar-free journal mode"
+                )
+        finally:
+            target.close()
+            source.close()
+        for sidecar_name in RECOVERY_DATABASE_SIDECAR_NAMES:
+            sidecar = temporary / sidecar_name
+            if sidecar.exists() or sidecar.is_symlink():
+                sidecar.unlink()
+        if {path.name for path in temporary.iterdir()} != {RECOVERY_DATABASE_NAME}:
+            raise RuntimeError("online backup produced unexpected recovery artifacts")
+        os.chmod(database_path, 0o600)
+        _fsync_file(database_path)
+
+        schema_version, row_counts, integrity_ok = _sqlite_readback(database_path)
+        if not integrity_ok:
+            raise RuntimeError("online backup failed SQLite integrity verification")
+        if schema_version != expected_schema_version:
+            raise RuntimeError(
+                "online backup schema is incompatible "
+                f"(found v{schema_version}, expected v{expected_schema_version})"
+            )
+
+        digest = _sha256_file(database_path)
+        manifest = {
+            "schema": RECOVERY_ANCHOR_SCHEMA,
+            "created_at": clock.now().isoformat().replace("+00:00", "Z"),
+            "source_schema_version": schema_version,
+            "backup_bytes": database_path.stat().st_size,
+            "sha256": digest,
+            "sqlite_integrity": "ok",
+            "recovery_readback": "verified",
+            "semantic_readback": {
+                "tables": list(SEMANTIC_READBACK_TABLES),
+                "row_counts": row_counts,
+            },
+            "publication": "atomic_directory_replace",
+            "source_consistency": "sqlite_write_guard_and_semantic_fingerprint",
+            "retention_policy": "preserve_pending_operator_approval",
+            "cleanup": "approval_required",
+        }
+        _write_private_file(
+            temporary / RECOVERY_MANIFEST_NAME,
+            (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode(
+                "utf-8"
+            ),
+        )
+        _fsync_directory(temporary)
+
+        staged = verify_recovery_anchor(
+            temporary,
+            expected_schema_version=expected_schema_version,
+        )
+        if not staged["ready"]:
+            raise RuntimeError(
+                "staged recovery anchor failed verification: "
+                + ",".join(staged["errors"])
+            )
+
+        # The online backup is a valid point-in-time snapshot, but a writer may
+        # commit while its manifest is being built. Acquire SQLite's writer slot
+        # before the final source comparison and hold it through publication and
+        # post-publish inventory. A prior concurrent commit changes the
+        # fingerprint and refuses publication; a later writer waits until this
+        # verified-current anchor is durably published.
+        source_guard = sqlite3.connect(
+            db_path,
+            timeout=SQLITE_WRITER_BUSY_TIMEOUT_SECONDS,
+        )
+        source_guard.execute("BEGIN IMMEDIATE")
+        if _sqlite_semantic_fingerprint(db_path) != _sqlite_semantic_fingerprint(
+            database_path
+        ):
+            raise RuntimeError(
+                "source database changed during recovery anchor creation"
+            )
+
+        _rename_directory_no_replace(temporary, anchor_path)
+        published = True
+        _fsync_directory(db_path.parent)
+
+        verified = recovery_anchor_inventory(
+            db_path,
+            expected_schema_version=expected_schema_version,
+        )
+        if not verified["ready"]:
+            raise RuntimeError(
+                "published recovery anchor failed current-source verification: "
+                + ",".join(verified["errors"])
+            )
+        return verified
+    finally:
+        if source_guard is not None:
+            try:
+                source_guard.rollback()
+            finally:
+                source_guard.close()
+        if not published:
+            shutil.rmtree(temporary, ignore_errors=True)

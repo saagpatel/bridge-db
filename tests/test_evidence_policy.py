@@ -12,6 +12,7 @@ import pytest
 
 from bridge_db import config
 from bridge_db import evidence_policy as policy
+from bridge_db import recovery
 from bridge_db.evidence import append_jsonl_durable
 
 
@@ -128,6 +129,127 @@ def test_archive_is_verified_and_preserves_every_source(
     for archived in archive.rglob("*"):
         if archived.is_file() or archived.is_dir():
             assert archived.stat().st_mode & 0o077 == 0
+
+
+def test_plan_and_archive_include_recovery_anchor_bundle(
+    evidence_paths: Path,
+) -> None:
+    anchor = recovery.recovery_anchor_path(config.DB_PATH)
+    anchor.mkdir(mode=0o700)
+    database = anchor / recovery.RECOVERY_DATABASE_NAME
+    manifest = anchor / recovery.RECOVERY_MANIFEST_NAME
+    database.write_bytes(b"recovery database")
+    manifest.write_text('{"schema":"RecoveryAnchorV1"}\n', encoding="utf-8")
+    database.chmod(0o600)
+    manifest.chmod(0o600)
+
+    plan = policy.collect_evidence_plan()
+    anchor_artifacts = {
+        item["kind"]: item
+        for item in plan["artifacts"]
+        if item["kind"].startswith("recovery_anchor_")
+    }
+
+    assert set(anchor_artifacts) == {
+        "recovery_anchor_database",
+        "recovery_anchor_manifest",
+    }
+    assert anchor_artifacts["recovery_anchor_database"]["source_path"] == str(database)
+    assert anchor_artifacts["recovery_anchor_manifest"]["source_path"] == str(manifest)
+    assert all(
+        item["retention"] == "preserve"
+        and item["destructive_action"] == "blocked"
+        for item in anchor_artifacts.values()
+    )
+
+    archive = evidence_paths / "archive-with-anchor"
+    result = policy.create_evidence_archive(
+        archive,
+        expected_snapshot_sha256=plan["snapshot_sha256"],
+    )
+    archived_manifest = json.loads((archive / "manifest.json").read_text())
+    archived_anchor_sources = {
+        item["source_path"]
+        for item in archived_manifest["artifacts"]
+        if item["kind"].startswith("recovery_anchor_")
+    }
+
+    assert result["ok"] is True
+    assert archived_anchor_sources == {str(database), str(manifest)}
+    assert database.read_bytes() == b"recovery database"
+    assert manifest.read_text(encoding="utf-8") == '{"schema":"RecoveryAnchorV1"}\n'
+
+
+def test_plan_preserves_existing_recovery_anchor_sidecars(
+    evidence_paths: Path,
+) -> None:
+    anchor = recovery.recovery_anchor_path(config.DB_PATH)
+    anchor.mkdir(mode=0o700)
+    (anchor / recovery.RECOVERY_DATABASE_NAME).write_bytes(b"recovery database")
+    (anchor / recovery.RECOVERY_MANIFEST_NAME).write_text(
+        '{"schema":"RecoveryAnchorV1"}\n',
+        encoding="utf-8",
+    )
+    sidecars = {
+        anchor / name for name in recovery.RECOVERY_DATABASE_SIDECAR_NAMES
+    }
+    for sidecar in sidecars:
+        sidecar.write_bytes(b"existing sidecar evidence")
+    unexpected = anchor / "operator-note.bin"
+    unexpected.write_bytes(b"unexpected recovery evidence")
+
+    plan = policy.collect_evidence_plan()
+    planned_sidecars = {
+        Path(item["source_path"])
+        for item in plan["artifacts"]
+        if item["kind"] == "recovery_anchor_sidecar"
+    }
+
+    assert planned_sidecars == sidecars
+    assert any(
+        item["kind"] == "recovery_anchor_unexpected_artifact"
+        and Path(item["source_path"]) == unexpected
+        for item in plan["artifacts"]
+    )
+
+
+def test_plan_refuses_nonregular_unexpected_recovery_anchor_artifact(
+    evidence_paths: Path,
+) -> None:
+    anchor = recovery.recovery_anchor_path(config.DB_PATH)
+    anchor.mkdir(mode=0o700)
+    (anchor / recovery.RECOVERY_DATABASE_NAME).write_bytes(b"recovery database")
+    (anchor / recovery.RECOVERY_MANIFEST_NAME).write_text(
+        '{"schema":"RecoveryAnchorV1"}\n',
+        encoding="utf-8",
+    )
+    (anchor / "unexpected-directory").mkdir()
+
+    with pytest.raises(policy.EvidencePolicyError, match="not a regular file"):
+        policy.collect_evidence_plan()
+
+
+def test_plan_refuses_partial_recovery_anchor_bundle(
+    evidence_paths: Path,
+) -> None:
+    anchor = recovery.recovery_anchor_path(config.DB_PATH)
+    anchor.mkdir(mode=0o700)
+    (anchor / recovery.RECOVERY_DATABASE_NAME).write_bytes(b"incomplete")
+
+    with pytest.raises(policy.EvidencePolicyError, match="evidence file unavailable"):
+        policy.collect_evidence_plan()
+
+
+def test_plan_refuses_dangling_recovery_anchor_symlink(
+    evidence_paths: Path,
+) -> None:
+    anchor = recovery.recovery_anchor_path(config.DB_PATH)
+    anchor.symlink_to(evidence_paths / "missing-anchor", target_is_directory=True)
+
+    assert anchor.is_symlink()
+    assert not anchor.exists()
+    with pytest.raises(policy.EvidencePolicyError, match="not a regular directory"):
+        policy.collect_evidence_plan()
 
 
 def test_archive_refuses_stale_plan_without_creating_destination(

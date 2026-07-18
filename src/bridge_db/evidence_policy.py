@@ -22,6 +22,12 @@ from bridge_db.evidence import (
     legacy_raw_query_inventory,
     migration_backup_inventory,
 )
+from bridge_db.recovery import (
+    RECOVERY_DATABASE_NAME,
+    RECOVERY_DATABASE_SIDECAR_NAMES,
+    RECOVERY_MANIFEST_NAME,
+    recovery_anchor_path,
+)
 from bridge_db.tools.recall import RECALL_LOG_PATH
 
 PLAN_SCHEMA = "EvidenceLifecyclePlanV1"
@@ -149,6 +155,40 @@ def collect_evidence_plan() -> dict[str, Any]:
             sidecar = Path(f"{backup}{suffix}")
             if sidecar.exists():
                 artifacts.append(_artifact_record(sidecar, kind=kind))
+    anchor = recovery_anchor_path(config.DB_PATH)
+    if anchor.is_symlink():
+        raise EvidencePolicyError(
+            f"recovery anchor path is not a regular directory: {anchor}"
+        )
+    if anchor.exists():
+        if not anchor.is_dir():
+            raise EvidencePolicyError(
+                f"recovery anchor path is not a regular directory: {anchor}"
+            )
+        for name, kind in (
+            (RECOVERY_DATABASE_NAME, "recovery_anchor_database"),
+            (RECOVERY_MANIFEST_NAME, "recovery_anchor_manifest"),
+        ):
+            artifacts.append(_artifact_record(anchor / name, kind=kind))
+        for name in RECOVERY_DATABASE_SIDECAR_NAMES:
+            sidecar = anchor / name
+            if sidecar.exists() or sidecar.is_symlink():
+                artifacts.append(
+                    _artifact_record(sidecar, kind="recovery_anchor_sidecar")
+                )
+        known_names = {
+            RECOVERY_DATABASE_NAME,
+            RECOVERY_MANIFEST_NAME,
+            *RECOVERY_DATABASE_SIDECAR_NAMES,
+        }
+        for unexpected in sorted(anchor.iterdir(), key=lambda path: path.name):
+            if unexpected.name not in known_names:
+                artifacts.append(
+                    _artifact_record(
+                        unexpected,
+                        kind="recovery_anchor_unexpected_artifact",
+                    )
+                )
 
     artifacts.sort(key=lambda item: (item["kind"], item["source_path"]))
     snapshot = {

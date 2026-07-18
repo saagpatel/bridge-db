@@ -13,9 +13,10 @@ import pytest
 
 import bridge_db.config as cfg
 import bridge_db.tools.recall as recall_tool
-from bridge_db import auth, config
+from bridge_db import auth, config, recovery
 from bridge_db.__main__ import (
     run_cancel_handoff,
+    run_create_recovery_anchor,
     run_dogfood,
     run_enroll,
     run_list_principals,
@@ -29,8 +30,10 @@ from bridge_db.__main__ import (
     run_revoke_principal,
     run_status,
     run_upgrade_principals_v2,
+    run_verify_recovery_anchor,
 )
 from bridge_db.db import (
+    SCHEMA_VERSION,
     collect_fts_index_metrics,
     fts_text_for_activity,
     fts_text_for_section,
@@ -47,6 +50,13 @@ async def _seed_bridge_export_state(db: aiosqlite.Connection) -> None:
     await db.execute(
         "INSERT INTO bridge_file_export_state (singleton, exported_content_sha256) "
         "VALUES (1, 'tracked-test-projection')"
+    )
+
+
+def _create_cli_recovery_anchor(db_path: Path) -> None:
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
     )
 
 
@@ -151,6 +161,7 @@ async def test_run_status_reports_healthy_summary(
         await db.commit()
     finally:
         await db.close()
+    _create_cli_recovery_anchor(db_path)
 
     ok = await run_status()
     captured = capsys.readouterr().out
@@ -169,6 +180,130 @@ async def test_run_status_reports_healthy_summary(
     assert "dogfood will fail until cleared" in captured
     assert "cc=2026-04-17" in captured
     assert '"cc": "2026-04-17 (bridge-db)"' in captured
+
+
+@pytest.mark.asyncio
+async def test_recovery_anchor_cli_creates_once_and_verifies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    db = await open_db(db_path)
+    await db.close()
+
+    assert run_create_recovery_anchor() is True
+    created = capsys.readouterr().out
+    assert "Result: created" in created
+    assert "State: verified" in created
+    assert "Digest verified: True" in created
+    assert "Semantic readback: True" in created
+    events = [
+        json.loads(line)
+        for line in cfg.AUDIT_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    ]
+    assert events[-1]["tool"] == "recovery_anchor.create"
+    assert events[-1]["caller"] == "operator-cli"
+    assert events[-1]["project"] == "bridge-db"
+    assert events[-1]["ok"] is True
+    assert "disposition=created" in events[-1]["detail"]
+    assert "state=verified" in events[-1]["detail"]
+    assert "sha256=" in events[-1]["detail"]
+
+    assert run_create_recovery_anchor() is True
+    preserved = capsys.readouterr().out
+    assert "Result: preserved_existing" in preserved
+    events = [
+        json.loads(line)
+        for line in cfg.AUDIT_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    ]
+    assert "disposition=preserved_existing" in events[-1]["detail"]
+
+    assert run_verify_recovery_anchor() is True
+    verified = capsys.readouterr().out
+    assert "RecoveryAnchorV1 verification" in verified
+    assert "State: verified" in verified
+
+
+@pytest.mark.asyncio
+async def test_recovery_anchor_cli_verifies_when_live_database_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    db = await open_db(db_path)
+    await db.close()
+    assert run_create_recovery_anchor() is True
+    capsys.readouterr()
+    db_path.unlink()
+
+    assert run_verify_recovery_anchor() is True
+    output = capsys.readouterr().out
+    assert "State: verified" in output
+    assert "Digest verified: True" in output
+
+
+@pytest.mark.asyncio
+async def test_recovery_anchor_cli_refuses_success_when_audit_degrades(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    db = await open_db(db_path)
+    await db.close()
+
+    def degraded_audit(
+        _tool: str,
+        _caller: str | None,
+        _project: str | None,
+        ok: bool,
+        detail: str | None = None,
+    ) -> dict[str, object]:
+        del ok, detail
+        return {"audit_degraded": True}
+
+    monkeypatch.setattr(
+        "bridge_db.audit.log_audit",
+        degraded_audit,
+    )
+
+    assert run_create_recovery_anchor() is False
+    output = capsys.readouterr().out
+    assert "audit evidence degraded" in output
+    assert "RecoveryAnchorV1" not in output
+
+
+def test_recovery_anchor_cli_fails_closed_when_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cfg, "DB_PATH", tmp_path / "missing.db")
+
+    assert run_verify_recovery_anchor() is False
+    output = capsys.readouterr().out
+    assert "State: missing" in output
+    assert "anchor_missing" in output
+
+
+def test_recovery_anchor_cli_fails_closed_for_corrupt_sqlite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    db_path.write_bytes(b"not a sqlite database")
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+
+    assert run_create_recovery_anchor() is False
+    output = capsys.readouterr().out
+    assert "recovery anchor creation refused" in output
+    assert "Traceback" not in output
 
 
 @pytest.mark.asyncio
@@ -209,6 +344,7 @@ async def test_run_status_clarifies_dispositioned_unprocessed_shipped(
         await db.commit()
     finally:
         await db.close()
+    _create_cli_recovery_anchor(db_path)
 
     ok = await run_status()
     captured = capsys.readouterr().out
@@ -261,6 +397,7 @@ async def test_run_status_reports_freshness_attention_without_degrading_health(
         await db.commit()
     finally:
         await db.close()
+    _create_cli_recovery_anchor(db_path)
 
     ok = await run_status(now=FIXED_NOW)
     captured = capsys.readouterr().out
@@ -289,6 +426,7 @@ async def test_run_status_degraded_exit_code_stays_tied_to_bridge_health(
         await db.commit()
     finally:
         await db.close()
+    _create_cli_recovery_anchor(db_path)
 
     ok = await run_status(now=FIXED_NOW)
     captured = capsys.readouterr().out
@@ -319,6 +457,7 @@ async def test_run_status_freshness_actions_use_safe_operator_names(
         await db.commit()
     finally:
         await db.close()
+    _create_cli_recovery_anchor(db_path)
 
     ok = await run_status(now=FIXED_NOW)
     captured = capsys.readouterr().out
@@ -378,6 +517,7 @@ async def test_run_dogfood_reports_read_only_observability(
         await db.commit()
     finally:
         await db.close()
+    _create_cli_recovery_anchor(db_path)
 
     ok = await run_dogfood()
     captured = capsys.readouterr().out
@@ -601,7 +741,8 @@ def test_cli_entrypoints_smoke(flag: str, expected_text: str, tmp_path: Path) ->
 import asyncio
 import os
 from pathlib import Path
-from bridge_db.db import open_db
+from bridge_db import recovery
+from bridge_db.db import SCHEMA_VERSION, open_db
 
 
 async def main() -> None:
@@ -612,6 +753,10 @@ async def main() -> None:
     )
     await db.commit()
     await db.close()
+    recovery.create_recovery_anchor(
+        Path(os.environ["BRIDGE_DB_PATH"]),
+        expected_schema_version=SCHEMA_VERSION,
+    )
 
 
 asyncio.run(main())
@@ -716,6 +861,7 @@ def test_upgrade_principals_v2_preserves_hashes_and_adds_grants(
     )
     monkeypatch.setattr(config, "PRINCIPALS_PATH", path)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
     def confirm_upgrade(_prompt: str) -> str:
         return "upgrade"
 
@@ -745,6 +891,7 @@ async def test_cancel_handoff_requires_exact_operator_ceremony(
     await db.commit()
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
     def confirm_cancel(_prompt: str) -> str:
         return "cancel"
 
@@ -810,6 +957,7 @@ async def test_quarantine_and_exact_restore_preserve_recovery_evidence(
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     confirmations = iter(["quarantine", "restore"])
+
     def confirm_recovery(_prompt: str) -> str:
         return next(confirmations)
 

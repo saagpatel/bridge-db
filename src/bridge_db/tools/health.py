@@ -23,6 +23,7 @@ from bridge_db.evidence import (
     legacy_raw_query_inventory,
     migration_backup_inventory,
 )
+from bridge_db.recovery import recovery_anchor_inventory
 from bridge_db.tools.context import parse_owned_sections
 
 logger = logging.getLogger("bridge_db.tools.health")
@@ -330,9 +331,21 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         str(config.DB_PATH),
     )
     backup_inventory = migration_backup_inventory(Path(open_main_path))
+    legacy_backup_provenance_ok = (
+        backup_inventory["count"] > 0
+        and backup_inventory["count"] == backup_inventory["verified_count"]
+    )
     backup_integrity_ok = (
         backup_inventory["count"] == backup_inventory["verified_count"]
     )
+    recovery_anchor = recovery_anchor_inventory(
+        Path(open_main_path),
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    # Migration backups prove that a historical migration had a readable
+    # rollback point. They are not compared with the live database after later
+    # writes, so they cannot establish present-day recovery readiness.
+    recovery_integrity_ok = recovery_anchor["ready"]
     evidence_lifecycle = {
         "audit": audit_inventory,
         "recall": {
@@ -352,8 +365,15 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
             **disposition_state,
         },
         "migration_backups": backup_inventory,
+        "legacy_migration_backups": backup_inventory,
+        "current_recovery_anchor": recovery_anchor,
         "audit_degraded": audit_degraded,
         "disposition_degraded": disposition_degraded,
+        "legacy_backup_provenance_ok": legacy_backup_provenance_ok,
+        "current_recovery_ready": recovery_anchor["ready"],
+        "recovery_integrity_ok": recovery_integrity_ok,
+        # Preserve the established key's historical meaning for consumers that
+        # use it specifically to inspect migration-backup verification.
         "backup_integrity_ok": backup_integrity_ok,
         "destructive_actions": "approval_required",
     }
@@ -367,7 +387,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         and fts_index["ok"]
         and not audit_degraded
         and not disposition_degraded
-        and backup_integrity_ok
+        and recovery_integrity_ok
     )
     projection_health = claude_ai_section_drift["state"]
     if projection_health == "current" and not bridge_file_export_tracked:
@@ -643,8 +663,7 @@ def _freshness_overall(
     shipped_events: dict[str, Any],
 ) -> str:
     if any(
-        snapshot["state"] in {"stale", "superseded"}
-        for snapshot in snapshots.values()
+        snapshot["state"] in {"stale", "superseded"} for snapshot in snapshots.values()
     ):
         return "stale"
     if handoffs["stale_pending_count"] or handoffs["stale_active_count"]:
@@ -796,6 +815,15 @@ async def collect_status_summary(
             "migration_backup_integrity_ok": health["evidence_lifecycle"][
                 "backup_integrity_ok"
             ],
+            "current_recovery_anchor_ready": health["evidence_lifecycle"][
+                "current_recovery_ready"
+            ],
+            "current_recovery_anchor_state": health["evidence_lifecycle"][
+                "current_recovery_anchor"
+            ]["state"],
+            "legacy_backup_provenance_state": health["evidence_lifecycle"][
+                "migration_backups"
+            ]["provenance_state"],
         },
         "evidence_lifecycle": health["evidence_lifecycle"],
         "fts_index": health["fts_index"],

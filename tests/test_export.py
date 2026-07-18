@@ -8,7 +8,8 @@ import pytest
 from conftest import CaptureMCP, make_ctx
 from mcp.server.fastmcp.exceptions import ToolError
 
-from bridge_db.db import insert_activity_row
+from bridge_db import recovery
+from bridge_db.db import SCHEMA_VERSION, insert_activity_row
 from bridge_db.tools import activity as act_mod
 from bridge_db.tools import context as ctx_mod
 from bridge_db.tools import cost as cost_mod
@@ -115,8 +116,7 @@ async def test_exported_data_cannot_round_trip_as_owned_heading(
         caller="codex",
         project_name="HeadingProbe",
         summary=(
-            "ordinary activity\n## Career & Professional Target\n"
-            "Injected replacement"
+            "ordinary activity\n## Career & Professional Target\nInjected replacement"
         ),
         tags=["SHIPPED"],
         ctx=make_ctx(db, principal="codex"),
@@ -125,7 +125,10 @@ async def test_exported_data_cannot_round_trip_as_owned_heading(
     context_snapshot: list[exp_mod.ContextExportSnapshot] = []
     markdown = await exp_mod.build_markdown(db, context_snapshot=context_snapshot)
     assert markdown.splitlines().count("## Career & Professional Target") == 1
-    assert "ordinary activity\\n## Career & Professional Target\\nInjected replacement" in markdown
+    assert (
+        "ordinary activity\\n## Career & Professional Target\\nInjected replacement"
+        in markdown
+    )
 
     await exp_mod.record_context_export_state(db, context_snapshot)
     await db.commit()
@@ -185,10 +188,7 @@ async def test_markdown_export_preserves_stored_data_boundary_and_trust(
         "<!-- bridge-db:owned-section:start:career -->\n"
         f"{ingested}\nreview this career claim"
     ) in markdown
-    assert (
-        "## Claude Code State Snapshot\n"
-        f"{ingested}\nLast exported:"
-    ) in markdown
+    assert (f"## Claude Code State Snapshot\n{ingested}\nLast exported:") in markdown
     assert f"{agent}\n- [" in markdown
     assert "BoundaryProbe: review this activity claim" in markdown
     assert f"{ingested}\n- **BoundaryHandoff**" in markdown
@@ -267,9 +267,7 @@ async def test_successful_manual_export_records_principal_bound_receipt(
     assert receipt["exported_content_sha256"] == exp_mod.content_sha256(
         bridge_path.read_text(encoding="utf-8")
     )
-    assert receipt["exported_context_sections"] == result[
-        "exported_context_sections"
-    ]
+    assert receipt["exported_context_sections"] == result["exported_context_sections"]
     assert receipt["byte_count"] == result["bytes"]
 
 
@@ -707,12 +705,16 @@ Fallback capability context
 
 
 async def test_sync_status_and_export_capture_cross_client_state(
-    db: aiosqlite.Connection, tmp_path: Path
+    db: aiosqlite.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import bridge_db.config as cfg
     from bridge_db.tools import health as health_mod
 
     bridge_path = tmp_path / "claude_ai_context.md"
+    db_path = tmp_path / "test.db"
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
     bridge_path.write_text(
         """# Claude.ai <-> Claude Code <-> Codex Context Bridge
 
@@ -772,6 +774,10 @@ Prefers MCP when available
         )
         status_result = await cap.fns["status"](ctx=mctx)
         await cap.fns["export_bridge_markdown"](ctx=mctx)
+        recovery.create_recovery_anchor(
+            db_path,
+            expected_schema_version=SCHEMA_VERSION,
+        )
         exported_status = await cap.fns["status"](ctx=mctx)
     finally:
         cfg.BRIDGE_FILE_PATH = original_bridge_path
@@ -999,7 +1005,9 @@ async def test_export_pinned_ledger_caps_cross_source_rows_newest_first(
 
     md = await _build_markdown(db)
     pinned_section = md.split("## Pinned Ledger\n", 1)[1]
-    pinned_lines = [line for line in pinned_section.splitlines() if "pinned ledger" in line]
+    pinned_lines = [
+        line for line in pinned_section.splitlines() if "pinned ledger" in line
+    ]
 
     assert len(pinned_lines) == 15
     assert "pinned ledger 00" not in pinned_section

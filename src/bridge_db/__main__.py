@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import secrets
+import sqlite3
 import sys
 import tempfile
 from datetime import UTC, datetime, timedelta
@@ -62,7 +63,31 @@ async def _run_doctor() -> bool:
         bridge_detail += f" ({age_h:.1f}h old)"
     checks.append(("Bridge file exists", bridge_exists, bridge_detail))
 
-    # 5. Audit log writable
+    # 5. Recovery readiness and historical provenance are distinct. A verified
+    # current anchor can establish present readiness without blessing legacy
+    # backups that lack creation-time metadata.
+    try:
+        from bridge_db.evidence import migration_backup_inventory
+        from bridge_db.recovery import recovery_anchor_inventory
+
+        legacy = migration_backup_inventory(config.DB_PATH)
+        current = recovery_anchor_inventory(
+            config.DB_PATH,
+            expected_schema_version=SCHEMA_VERSION,
+        )
+        recovery_ok = current["ready"]
+        checks.append(
+            (
+                "Recovery integrity",
+                recovery_ok,
+                f"current={current['state']}, "
+                f"legacy_provenance={legacy['provenance_state']}",
+            )
+        )
+    except Exception as exc:
+        checks.append(("Recovery integrity", False, str(exc)))
+
+    # 6. Audit log writable
     try:
         config.AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(config.AUDIT_LOG_PATH, "a", encoding="utf-8"):
@@ -142,7 +167,18 @@ async def run_status(*, now: datetime | None = None) -> bool:
         " evidence_disposition_degraded="
         f"{summary['signals']['evidence_disposition_degraded']},"
         " migration_backup_integrity_ok="
-        f"{summary['signals']['migration_backup_integrity_ok']}"
+        f"{summary['signals']['migration_backup_integrity_ok']},"
+        " current_recovery_anchor_ready="
+        f"{summary['signals']['current_recovery_anchor_ready']},"
+        " legacy_backup_provenance="
+        f"{summary['signals']['legacy_backup_provenance_state']}"
+    )
+    print(
+        "  Recovery:"
+        f" current_anchor={summary['signals']['current_recovery_anchor_state']},"
+        f" legacy_backups={summary['evidence_lifecycle']['migration_backups']['count']},"
+        " legacy_provenance="
+        f"{summary['signals']['legacy_backup_provenance_state']}"
     )
     print(f"  FTS: {_fts_detail(summary['fts_index'])}")
     trust = summary["pending_handoffs_by_trust"]
@@ -222,8 +258,6 @@ def _status_attention(summary: dict[str, Any]) -> str | None:
         notes.append("audit_degraded=true")
     if signals["evidence_disposition_degraded"]:
         notes.append("evidence_disposition_degraded=true")
-    if not signals["migration_backup_integrity_ok"]:
-        notes.append("migration_backup_integrity_ok=false")
     if not notes:
         return None
     return "; ".join(notes) + " — dogfood will fail until cleared"
@@ -304,8 +338,11 @@ async def run_dogfood() -> bool:
         f" recall_segments={evidence['recall']['segment_count']},"
         f" audit_degraded={evidence['audit_degraded']},"
         f" disposition_degraded={evidence['disposition_degraded']},"
+        f" current_recovery_anchor={evidence['current_recovery_anchor']['state']},"
         f" migration_backups={evidence['migration_backups']['count']},"
-        f" verified_backups={evidence['migration_backups']['verified_count']}"
+        f" verified_backups={evidence['migration_backups']['verified_count']},"
+        " legacy_provenance="
+        f"{evidence['migration_backups']['provenance_state']}"
     )
     print(f"  Recent audit rows checked: {len(recent_audit)}")
     print(f"  Latest record_disposition: {_latest_detail(recent_disposition)}")
@@ -321,8 +358,95 @@ async def run_dogfood() -> bool:
         and health["disposition_orphan_count"] == 0
         and not health["evidence_lifecycle"]["audit_degraded"]
         and not health["evidence_lifecycle"]["disposition_degraded"]
-        and health["evidence_lifecycle"]["backup_integrity_ok"]
+        and health["evidence_lifecycle"]["recovery_integrity_ok"]
     )
+
+
+def run_create_recovery_anchor() -> bool:
+    """Create exactly one current anchor, or verify the one already present."""
+    from bridge_db import config
+    from bridge_db.audit import AuditUnavailableError, log_audit
+    from bridge_db.db import SCHEMA_VERSION
+    from bridge_db.recovery import (
+        create_recovery_anchor,
+        recovery_anchor_inventory,
+    )
+
+    try:
+        result = create_recovery_anchor(
+            config.DB_PATH,
+            expected_schema_version=SCHEMA_VERSION,
+        )
+        disposition = "created"
+    except FileExistsError:
+        result = recovery_anchor_inventory(
+            config.DB_PATH,
+            expected_schema_version=SCHEMA_VERSION,
+        )
+        disposition = "preserved_existing"
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
+        print(f"recovery anchor creation refused: {exc}")
+        return False
+
+    detail = (
+        f"disposition={disposition} state={result['state']} "
+        f"path={result['path']} sha256={result.get('sha256')}"
+    )
+    try:
+        audit_result = log_audit(
+            "recovery_anchor.create",
+            "operator-cli",
+            "bridge-db",
+            ok=bool(result["ready"]),
+            detail=detail,
+        )
+    except AuditUnavailableError as exc:
+        print(f"recovery anchor audit evidence unavailable: {exc}")
+        return False
+    if audit_result["audit_degraded"]:
+        print(
+            "recovery anchor audit evidence degraded; "
+            "refusing to report auditable success"
+        )
+        return False
+
+    print("bridge-db RecoveryAnchorV1")
+    print(f"  Result: {disposition}")
+    print(f"  State: {result['state']}")
+    print(f"  Path: {result['path']}")
+    print(f"  Schema: v{result.get('schema_version')}")
+    print(f"  Bytes: {result.get('backup_bytes')}")
+    print(f"  Digest verified: {result.get('digest_ok')}")
+    print(f"  SQLite integrity: {result.get('integrity_ok')}")
+    print(f"  Semantic readback: {result.get('semantic_readback_ok')}")
+    if result["errors"]:
+        print(f"  Errors: {','.join(result['errors'])}")
+    return bool(result["ready"])
+
+
+def run_verify_recovery_anchor() -> bool:
+    """Read-verify the current recovery anchor without changing it."""
+    from bridge_db import config
+    from bridge_db.db import SCHEMA_VERSION
+    from bridge_db.recovery import (
+        recovery_anchor_path,
+        verify_recovery_anchor,
+    )
+
+    result = verify_recovery_anchor(
+        recovery_anchor_path(config.DB_PATH),
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    print("bridge-db RecoveryAnchorV1 verification")
+    print(f"  State: {result['state']}")
+    print(f"  Path: {result['path']}")
+    print(f"  Schema: v{result.get('schema_version')}")
+    print(f"  Digest verified: {result.get('digest_ok')}")
+    print(f"  SQLite integrity: {result.get('integrity_ok')}")
+    print(f"  Semantic readback: {result.get('semantic_readback_ok')}")
+    if result["errors"]:
+        print(f"  Errors: {','.join(result['errors'])}")
+    return bool(result["ready"])
 
 
 async def run_rebuild_content_index() -> bool:
@@ -553,7 +677,9 @@ def run_upgrade_principals_v2() -> bool:
         print("principals registry is already version 2")
         return True
     if data.get("version") != 1:
-        print(f"refused: unsupported principals registry version {data.get('version')!r}")
+        print(
+            f"refused: unsupported principals registry version {data.get('version')!r}"
+        )
         return False
 
     principals = cast(dict[str, Any], data["principals"])
@@ -699,7 +825,9 @@ async def run_promote_section(section_name: str) -> bool:
         print(cast(str, row["content"]))
         print("--- end reviewed content ---")
         try:
-            confirmed = input("Promote this exact section version to operator trust? [y/N] ")
+            confirmed = input(
+                "Promote this exact section version to operator trust? [y/N] "
+            )
         except EOFError:
             confirmed = ""
         if confirmed.strip().lower() not in {"y", "yes"}:
@@ -807,9 +935,7 @@ async def run_promote_handoff(handoff_id: int) -> bool:
             print(f"no stored handoff {handoff_id}")
             return False
         if row["status"] != "pending":
-            print(
-                f"refused: handoff {handoff_id} is {row['status']}, not pending"
-            )
+            print(f"refused: handoff {handoff_id} is {row['status']}, not pending")
             return False
         if row["source_trust"] == "operator":
             print(f"handoff {handoff_id} is already operator-trusted")
@@ -824,7 +950,9 @@ async def run_promote_handoff(handoff_id: int) -> bool:
             f"sha256={reviewed_digest}"
         )
         try:
-            confirmed = input("Promote this exact pending handoff to operator trust? [y/N] ")
+            confirmed = input(
+                "Promote this exact pending handoff to operator trust? [y/N] "
+            )
         except EOFError:
             confirmed = ""
         if confirmed.strip().lower() not in {"y", "yes"}:
@@ -1224,6 +1352,16 @@ def main() -> None:
         help="Run the read-only bridge observability dogfood checklist",
     )
     parser.add_argument(
+        "--create-recovery-anchor",
+        action="store_true",
+        help="Create one atomic RecoveryAnchorV1 bundle, without overwriting evidence",
+    )
+    parser.add_argument(
+        "--verify-recovery-anchor",
+        action="store_true",
+        help="Verify the current RecoveryAnchorV1 bundle using a disposable copy",
+    )
+    parser.add_argument(
         "--rebuild-content-index",
         action="store_true",
         help="Rebuild the FTS content_index from source tables and verify it",
@@ -1308,6 +1446,10 @@ def main() -> None:
     if args.dogfood:
         ok = asyncio.run(run_dogfood())
         sys.exit(0 if ok else 1)
+    if args.create_recovery_anchor:
+        sys.exit(0 if run_create_recovery_anchor() else 1)
+    if args.verify_recovery_anchor:
+        sys.exit(0 if run_verify_recovery_anchor() else 1)
     if args.rebuild_content_index:
         ok = asyncio.run(run_rebuild_content_index())
         sys.exit(0 if ok else 1)
@@ -1343,12 +1485,12 @@ def main() -> None:
             else 1
         )
     if args.quarantine_cleared_operator_handoffs:
-        sys.exit(
-            0 if asyncio.run(run_quarantine_cleared_operator_handoffs()) else 1
-        )
+        sys.exit(0 if asyncio.run(run_quarantine_cleared_operator_handoffs()) else 1)
     if args.restore_handoff_trust is not None:
         sys.exit(
-            0 if asyncio.run(run_restore_handoff_trust(args.restore_handoff_trust)) else 1
+            0
+            if asyncio.run(run_restore_handoff_trust(args.restore_handoff_trust))
+            else 1
         )
 
     from bridge_db.server import mcp
