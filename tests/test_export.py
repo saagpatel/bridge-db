@@ -705,12 +705,16 @@ Fallback capability context
 
 
 async def test_sync_status_and_export_capture_cross_client_state(
-    db: aiosqlite.Connection, tmp_path: Path
+    db: aiosqlite.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import bridge_db.config as cfg
     from bridge_db.tools import health as health_mod
 
     bridge_path = tmp_path / "claude_ai_context.md"
+    db_path = tmp_path / "test.db"
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
     bridge_path.write_text(
         """# Claude.ai <-> Claude Code <-> Codex Context Bridge
 
@@ -771,7 +775,7 @@ Prefers MCP when available
         status_result = await cap.fns["status"](ctx=mctx)
         await cap.fns["export_bridge_markdown"](ctx=mctx)
         recovery.create_recovery_anchor(
-            tmp_path / "test.db",
+            db_path,
             expected_schema_version=SCHEMA_VERSION,
         )
         exported_status = await cap.fns["status"](ctx=mctx)
