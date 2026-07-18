@@ -230,6 +230,8 @@ def verify_recovery_anchor(
         errors.append("anchor_unreadable")
 
     manifest_regular = False
+    manifest_stat: os.stat_result | None = None
+    manifest_signature: tuple[int, int, int, int, int] | None = None
     if manifest_path.is_symlink():
         errors.append("metadata_symlink")
     else:
@@ -248,9 +250,33 @@ def verify_recovery_anchor(
             errors.append("metadata_unreadable")
     if manifest_regular:
         try:
+            manifest_flags = os.O_RDONLY
+            if hasattr(os, "O_CLOEXEC"):
+                manifest_flags |= os.O_CLOEXEC
+            if hasattr(os, "O_NOFOLLOW"):
+                manifest_flags |= os.O_NOFOLLOW
+            manifest_fd = os.open(manifest_path, manifest_flags)
+            with os.fdopen(manifest_fd, "rb") as source:
+                manifest_before = os.fstat(source.fileno())
+                if not stat.S_ISREG(manifest_before.st_mode):
+                    raise OSError("recovery manifest changed to a non-regular file")
+                manifest_permissions_private = not bool(manifest_before.st_mode & 0o077)
+                if not manifest_permissions_private:
+                    errors.append("metadata_permissions_not_private")
+                manifest_content = source.read()
+                manifest_after = os.fstat(source.fileno())
+            manifest_path_after = manifest_path.lstat()
+            manifest_signature = _stable_stat_signature(manifest_before)
+            if (
+                manifest_stat is None
+                or _stable_stat_signature(manifest_stat) != manifest_signature
+                or _stable_stat_signature(manifest_after) != manifest_signature
+                or _stable_stat_signature(manifest_path_after) != manifest_signature
+            ):
+                errors.append("metadata_changed_during_verification")
             loaded = cast(
                 object,
-                json.loads(manifest_path.read_text(encoding="utf-8")),
+                json.loads(manifest_content.decode("utf-8")),
             )
             if isinstance(loaded, dict):
                 loaded_map = cast(dict[object, object], loaded)
@@ -402,6 +428,12 @@ def verify_recovery_anchor(
         and manifest["sha256"] != actual_digest
     ):
         errors.append("digest_mismatch")
+    if manifest_signature is not None:
+        try:
+            if _stable_stat_signature(manifest_path.lstat()) != manifest_signature:
+                errors.append("metadata_changed_during_verification")
+        except OSError:
+            errors.append("metadata_changed_during_verification")
 
     errors = sorted(set(errors))
     permission_checks = (

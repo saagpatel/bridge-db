@@ -421,6 +421,44 @@ async def test_anchor_rejects_replacement_during_verification(
     assert "backup_changed_during_verification" in result["errors"]
 
 
+async def test_anchor_rejects_manifest_replacement_during_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    anchor = recovery.recovery_anchor_path(db_path)
+    manifest_path = anchor / recovery.RECOVERY_MANIFEST_NAME
+    original_loads = recovery.json.loads
+    replaced = False
+
+    def parse_then_replace(content: str) -> object:
+        nonlocal replaced
+        loaded = original_loads(content)
+        if not replaced:
+            replacement = anchor / "replacement.json"
+            replacement.write_text("{}", encoding="utf-8")
+            replacement.chmod(0o600)
+            os.replace(replacement, manifest_path)
+            replaced = True
+        return loaded
+
+    monkeypatch.setattr(recovery.json, "loads", parse_then_replace)
+
+    result = recovery.verify_recovery_anchor(
+        anchor,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    assert replaced is True
+    assert result["state"] == "invalid"
+    assert result["ready"] is False
+    assert "metadata_changed_during_verification" in result["errors"]
+
+
 async def test_anchor_detects_missing_metadata(tmp_path: Path) -> None:
     db_path = await _source_database(tmp_path)
     recovery.create_recovery_anchor(
