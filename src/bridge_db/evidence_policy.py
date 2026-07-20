@@ -155,6 +155,13 @@ def collect_evidence_plan() -> dict[str, Any]:
             sidecar = Path(f"{backup}{suffix}")
             if sidecar.exists():
                 artifacts.append(_artifact_record(sidecar, kind=kind))
+    for companion in sorted(
+        {
+            *config.DB_PATH.parent.glob(f"{config.DB_PATH.name}.*.bak-wal"),
+            *config.DB_PATH.parent.glob(f"{config.DB_PATH.name}.*.bak-shm"),
+        }
+    ):
+        artifacts.append(_artifact_record(companion, kind="migration_backup_companion"))
     anchor = recovery_anchor_path(config.DB_PATH)
     if anchor.is_symlink():
         raise EvidencePolicyError(

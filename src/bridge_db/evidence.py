@@ -291,6 +291,40 @@ def migration_backup_inventory(db_path: Path) -> dict[str, Any]:
     provenance_unverified_count = sum(
         item["provenance"] == "historical_unverified" for item in backups
     )
+    companion_paths = sorted(
+        {
+            *db_path.parent.glob(f"{db_path.name}.*.bak-wal"),
+            *db_path.parent.glob(f"{db_path.name}.*.bak-shm"),
+        }
+    )
+    companions: list[dict[str, Any]] = []
+    for companion in companion_paths:
+        primary = Path(str(companion).removesuffix("-wal").removesuffix("-shm"))
+        primary_exists = primary.is_file() and not primary.is_symlink()
+        companions.append(
+            {
+                "path": str(companion),
+                "bytes": companion.stat().st_size,
+                "kind": "wal" if companion.name.endswith("-wal") else "shm",
+                "primary_path": str(primary),
+                "primary_exists": primary_exists,
+                "state": (
+                    "attached_to_live_primary"
+                    if primary_exists
+                    else "retained_without_live_primary"
+                ),
+                "retention_policy": "operator_acknowledgement_required",
+                "cleanup": "approval_required",
+            }
+        )
+    orphaned_companion_count = sum(not item["primary_exists"] for item in companions)
+    missing_primary_paths = sorted(
+        {
+            item["primary_path"]
+            for item in companions
+            if not item["primary_exists"]
+        }
+    )
     return {
         "count": len(backups),
         "verified_count": sum(
@@ -307,8 +341,22 @@ def migration_backup_inventory(db_path: Path) -> dict[str, Any]:
             if readable_count == len(backups)
             else "mixed_or_unreadable"
         ),
+        "companion_count": len(companions),
+        "orphaned_companion_count": orphaned_companion_count,
+        "missing_primary_count": len(missing_primary_paths),
+        "missing_primary_paths": missing_primary_paths,
+        "companion_state": (
+            "none"
+            if not companions
+            else "attached"
+            if not orphaned_companion_count
+            else "retained_without_live_primary"
+            if orphaned_companion_count == len(companions)
+            else "mixed"
+        ),
         "cleanup": "approval_required",
         "backups": backups,
+        "companions": companions,
     }
 
 
