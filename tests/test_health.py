@@ -91,12 +91,58 @@ async def test_health_degrades_when_recovery_evidence_is_missing(
     assert result["ok"] is False
     assert result["storage_ok"] is False
     assert result["evidence_lifecycle"]["migration_backups"]["count"] == 0
+    assert result["evidence_lifecycle"]["migration_backups"]["companion_count"] == 0
+    assert (
+        result["evidence_lifecycle"]["migration_backups"]["missing_primary_count"] == 0
+    )
+    assert (
+        result["evidence_lifecycle"]["migration_backups"]["companion_state"] == "none"
+    )
     assert result["evidence_lifecycle"]["legacy_backup_provenance_ok"] is False
     assert result["evidence_lifecycle"]["backup_integrity_ok"] is True
     status = await fns["status"](ctx=make_ctx(db))
     assert status["signals"]["migration_backup_integrity_ok"] is True
     assert result["evidence_lifecycle"]["current_recovery_anchor"]["state"] == "missing"
     assert result["evidence_lifecycle"]["recovery_integrity_ok"] is False
+
+
+async def test_health_surfaces_retained_backup_companions_without_degrading_anchor(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    companion = Path(f"{config.DB_PATH}.retired.bak-wal")
+    companion.write_bytes(b"retained historical WAL")
+
+    result = await fns["health"](ctx=make_ctx(db))
+    inventory = result["evidence_lifecycle"]["migration_backups"]
+
+    assert result["storage_ok"] is True
+    assert result["evidence_lifecycle"]["current_recovery_ready"] is True
+    assert inventory["orphaned_companion_count"] == 1
+    assert inventory["missing_primary_count"] == 1
+    assert inventory["missing_primary_paths"] == [
+        str(tmp_path / "test.db.retired.bak")
+    ]
+    assert inventory["companion_state"] == "mixed"
+    assert {
+        "path": str(companion),
+        "bytes": len(b"retained historical WAL"),
+        "kind": "wal",
+        "primary_path": str(tmp_path / "test.db.retired.bak"),
+        "primary_exists": False,
+        "state": "retained_without_live_primary",
+        "retention_policy": "operator_acknowledgement_required",
+        "cleanup": "approval_required",
+    } in inventory["companions"]
+    status = await fns["status"](ctx=make_ctx(db))
+    assert (
+        status["signals"]["legacy_backup_companion_count"]
+        == inventory["companion_count"]
+    )
+    assert status["signals"]["orphaned_legacy_backup_companion_count"] == 1
+    assert status["signals"]["missing_legacy_backup_primary_count"] == 1
+    assert status["signals"]["legacy_backup_companion_state"] == "mixed"
 
 
 async def test_health_degrades_without_current_anchor_even_with_verified_legacy_backup(

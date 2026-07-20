@@ -75,6 +75,30 @@ def test_plan_is_content_bound_and_does_not_redisclose_queries(
     assert policy.collect_evidence_plan()["snapshot_sha256"] != original
 
 
+def test_plan_binds_retained_migration_backup_companions(
+    evidence_paths: Path,
+) -> None:
+    companion = Path(f"{config.DB_PATH}.retired.bak-shm")
+    companion.write_bytes(b"retained historical shared memory")
+
+    plan = policy.collect_evidence_plan()
+
+    assert plan["migration_backups"]["companion_count"] == 1
+    assert plan["migration_backups"]["orphaned_companion_count"] == 1
+    assert plan["migration_backups"]["missing_primary_count"] == 1
+    assert plan["migration_backups"]["missing_primary_paths"] == [
+        str(config.DB_PATH) + ".retired.bak"
+    ]
+    assert (
+        plan["migration_backups"]["companion_state"] == "retained_without_live_primary"
+    )
+    assert any(
+        item["kind"] == "migration_backup_companion"
+        and item["source_path"] == str(companion)
+        for item in plan["artifacts"]
+    )
+
+
 def test_acknowledgement_is_exact_and_never_authorizes_cleanup(
     evidence_paths: Path,
 ) -> None:

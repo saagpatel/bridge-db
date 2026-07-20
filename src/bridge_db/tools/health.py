@@ -824,6 +824,18 @@ async def collect_status_summary(
             "legacy_backup_provenance_state": health["evidence_lifecycle"][
                 "migration_backups"
             ]["provenance_state"],
+            "legacy_backup_companion_count": health["evidence_lifecycle"][
+                "migration_backups"
+            ]["companion_count"],
+            "orphaned_legacy_backup_companion_count": health["evidence_lifecycle"][
+                "migration_backups"
+            ]["orphaned_companion_count"],
+            "missing_legacy_backup_primary_count": health["evidence_lifecycle"][
+                "migration_backups"
+            ]["missing_primary_count"],
+            "legacy_backup_companion_state": health["evidence_lifecycle"][
+                "migration_backups"
+            ]["companion_state"],
         },
         "evidence_lifecycle": health["evidence_lifecycle"],
         "fts_index": health["fts_index"],
