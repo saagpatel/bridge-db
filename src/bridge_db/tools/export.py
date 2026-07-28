@@ -56,6 +56,11 @@ def _markdown_data(value: Any) -> str:
     return str(value).translate(_MARKDOWN_DATA_ESCAPES)
 
 
+def _utf8_byte_count(content: str) -> int:
+    """Return the on-disk byte count for UTF-8 encoded export content."""
+    return len(content.encode("utf-8"))
+
+
 class BridgeExportSafetyError(RuntimeError):
     """Raised when an export would overwrite the real fallback with empty context."""
 
@@ -129,7 +134,7 @@ def write_bridge_file(content: str) -> None:
     )
     tmp = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(content)
         os.replace(tmp, path)
     except BaseException:
@@ -527,7 +532,7 @@ async def export_bridge_file(
             expected_hash,
             content_sha256(content),
             exported_context_sections,
-            len(content),
+            _utf8_byte_count(content),
         ),
     )
     return exported_context_sections
@@ -553,13 +558,12 @@ def register(mcp: FastMCP) -> None:
         )
         await db.commit()
         bridge_path = config.BRIDGE_FILE_PATH
+        byte_count = _utf8_byte_count(content)
 
-        logger.info(
-            "bridge markdown exported: %s (%d bytes)", bridge_path, len(content)
-        )
+        logger.info("bridge markdown exported: %s (%d bytes)", bridge_path, byte_count)
         return {
             "ok": True,
             "path": str(bridge_path),
-            "bytes": len(content),
+            "bytes": byte_count,
             "exported_context_sections": exported_context_sections,
         }

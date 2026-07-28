@@ -113,6 +113,10 @@ with `--promote-section <section>`: the TTY ceremony displays and confirms the
 exact version and digest, then rechecks it under a write lock before granting
 operator trust.
 
+The export result's `bytes` field and the durable
+`bridge_export_receipts.byte_count` value both report the exact UTF-8 byte count
+written to the fallback file.
+
 Generated fallback files wrap each editable section in explicit
 `bridge-db:owned-section` HTML markers. This keeps nested Markdown headings
 inside long-form section content round-trippable. Pre-marker files remain

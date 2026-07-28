@@ -248,10 +248,15 @@ async def test_successful_manual_export_records_principal_bound_receipt(
 ) -> None:
     bridge_path = tmp_path / "bridge.md"
     monkeypatch.setattr(exp_mod.config, "BRIDGE_FILE_PATH", bridge_path)
-
-    result = await all_fns["export_bridge_markdown"](
-        ctx=make_ctx(db, principal="claude_ai")
+    ctx = make_ctx(db, principal="claude_ai")
+    await all_fns["update_section"](
+        caller="claude_ai",
+        section_name="career",
+        content="Résumé — café 🚀",
+        ctx=ctx,
     )
+
+    result = await all_fns["export_bridge_markdown"](ctx=ctx)
 
     receipt = await (
         await db.execute(
@@ -268,7 +273,10 @@ async def test_successful_manual_export_records_principal_bound_receipt(
         bridge_path.read_text(encoding="utf-8")
     )
     assert receipt["exported_context_sections"] == result["exported_context_sections"]
-    assert receipt["byte_count"] == result["bytes"]
+    exported_bytes = bridge_path.read_bytes()
+    assert len(exported_bytes) > len(exported_bytes.decode("utf-8"))
+    assert receipt["byte_count"] == len(exported_bytes)
+    assert result["bytes"] == len(exported_bytes)
 
 
 async def test_export_records_context_section_export_state(
