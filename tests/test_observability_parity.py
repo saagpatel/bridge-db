@@ -43,7 +43,10 @@ async def test_snapshot_prune_emits_audit_line_and_count(
     last: dict[str, Any] = {}
     for i in range(config.SNAPSHOT_RETENTION_PER_SYSTEM + 1):
         last = await snapshot_fns["save_snapshot"](
-            caller="cc", data={"active_projects": f"round {i}"}, ctx=ctx
+            caller="cc",
+            data={"active_projects": f"round {i}"},
+            retention_policy="prune_oldest",
+            ctx=ctx,
         )
     assert last["pruned_count"] == 1
 
@@ -90,7 +93,10 @@ async def test_snapshot_prune_respects_codex_families(
     last: dict[str, Any] = {}
     for _ in range(config.SNAPSHOT_RETENTION_PER_SYSTEM + 1):
         last = await snapshot_fns["save_snapshot"](
-            caller="codex", data=operating, ctx=ctx
+            caller="codex",
+            data=operating,
+            retention_policy="prune_oldest",
+            ctx=ctx,
         )
     consulted = await snapshot_fns["save_snapshot"](
         caller="codex", data={"consulted_node": {"k": 1}}, ctx=ctx

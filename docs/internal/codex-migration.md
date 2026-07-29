@@ -62,10 +62,18 @@ bridge-db__save_snapshot(
         "automation_digest": "...",
         "active_projects": "..."
     },
-    snapshot_date="YYYY-MM-DD"
+    snapshot_date="YYYY-MM-DD",
+    retention_policy="preserve_existing"
 )
 bridge-db__export_bridge_markdown()
 ```
+
+`retention_policy="preserve_existing"` is the default and makes snapshot
+admission non-destructive. When the Codex operating family is already at its
+retention limit, the tool returns
+`ok=false`, `reason_code="snapshot.retention_would_prune"`, and
+`mutation_performed=false`. Stop there unless a separate operator decision
+explicitly authorizes `retention_policy="prune_oldest"`.
 
 *Read CC state (import):*
 ```
