@@ -214,6 +214,12 @@ that motivated it):
   day.
 - `system_snapshots` keeps the latest 10 rows per system family; Codex
   operating snapshots and consulted-node snapshots are retained independently.
+  The default `save_snapshot(..., retention_policy="preserve_existing")` path
+  serializes the family-capacity check and insert, accepts only when no prune
+  is required, and otherwise returns
+  `snapshot.retention_would_prune` with `mutation_performed=false`. Do not retry
+  with `retention_policy="prune_oldest"` unless snapshot deletion has been
+  separately authorized.
 - A shipped event's downstream proof and policy dispositions now live on the
   `activity_log` row itself, in the `sync_*` columns (schema v14): `record_disposition`
   writes `sync_disposition='synced'` with `sync_downstream_system`/`sync_downstream_ref`

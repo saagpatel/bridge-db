@@ -187,7 +187,12 @@ args = ["run", "--directory", "/path/to/bridge-db", "python", "-m", "bridge_db"]
 - Retention: unprotected activity entries keep the newest 50 per source; rows
   tagged `SHIPPED` or `LEDGER` (case-insensitive) are permanently retained
   (BD-INV-1); 10 snapshots per system family (Codex operating and
-  consulted-node snapshots are retained independently)
+  consulted-node snapshots are retained independently). Snapshot writes default
+  to `retention_policy="preserve_existing"`: bridge-db takes the SQLite writer
+  slot and either inserts without any retention deletion or returns
+  `ok=false`, `reason_code="snapshot.retention_would_prune"` before mutation.
+  The legacy deletion path requires an explicit
+  `retention_policy="prune_oldest"` call.
 - Health check: `health` MCP tool or `uv run python -m bridge_db --doctor`
 - Operator summary: `uv run python -m bridge_db --status`
 - Dogfood pass: `uv run python -m bridge_db --dogfood` bundles the status, FTS index, WAL, recall, and shipped-sync audit checks used after bridge-sync runs
@@ -310,7 +315,11 @@ rewritten, or silently clipped; they remain readable and exportable.
   records. `get_pending_handoffs(limit=..., before_id=...)` pages newest IDs
   with a default page of 100 and maximum of 200.
 - Snapshots: compact JSON is limited to 256 KiB, depth 32, and 10,000 JSON
-  nodes before insert or retention pruning.
+  nodes before insert or retention pruning. The default
+  `retention_policy="preserve_existing"` atomically admits an under-limit
+  family without pruning or refuses a full family before insert with
+  `snapshot.retention_would_prune`. The legacy deletion path is available only
+  through an explicit `retention_policy="prune_oldest"` call.
 - Context: each section is limited to 256 KiB and the five-section registry to
   1 MiB total. An over-budget legacy database may accept a bounded replacement
   only when it reduces total bytes.

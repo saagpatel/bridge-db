@@ -161,6 +161,15 @@ mcp__bridge_db__record_disposition(...) # terminal sync state: 'synced' receipt 
 mcp__bridge_db__get_cost_history()          # cost trend
 ```
 
+`save_snapshot` defaults to `retention_policy="preserve_existing"`. The tool
+serializes the family-capacity check and insert under SQLite's writer slot. An
+under-limit write returns `retention_policy="preserve_existing"` and
+`pruned_count=0`; a full family returns
+`ok=false`, `reason_code="snapshot.retention_would_prune"`, and
+`mutation_performed=false` without inserting, pruning, or garbage-collecting
+snapshot FTS rows. The caller must not retry without a separate decision that
+explicitly permits `retention_policy="prune_oldest"`.
+
 `get_pending_handoffs` is a bounded paged read. It returns at most 100 rows by
 default (maximum 200); pass the last returned `id` as `before_id` to fetch the
 next page. Creation is rejected atomically when 100 rows are already `pending`

@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
@@ -28,6 +28,8 @@ from bridge_db.models import (
 
 logger = logging.getLogger("bridge_db.tools.snapshots")
 
+SnapshotRetentionPolicy = Literal["preserve_existing", "prune_oldest"]
+
 
 def _utc_snapshot_date() -> str:
     return clock.now().date().isoformat()
@@ -41,6 +43,31 @@ def _snapshot_family(system: str, data: dict[str, Any]) -> str:
     if "consulted_node" in data:
         return "consulted_node"
     return "other"
+
+
+def _decode_snapshot_data(raw_data: str) -> dict[str, Any]:
+    try:
+        parsed_data = cast(object, json.loads(raw_data))
+    except json.JSONDecodeError:
+        parsed_data = {}
+    if not isinstance(parsed_data, dict):
+        return {}
+    return {
+        str(key): value for key, value in cast(dict[object, Any], parsed_data).items()
+    }
+
+
+async def _snapshot_family_count(db: Any, *, system: str, family: str) -> int:
+    cursor = await db.execute(
+        "SELECT data FROM system_snapshots WHERE system = ?",
+        (system,),
+    )
+    rows = await cursor.fetchall()
+    return sum(
+        1
+        for row in rows
+        if _snapshot_family(system, _decode_snapshot_data(row["data"])) == family
+    )
 
 
 async def _prune_snapshots(db: Any, *, system: str) -> list[tuple[int, str]]:
@@ -64,16 +91,7 @@ async def _prune_snapshots(db: Any, *, system: str) -> list[tuple[int, str]]:
     seen_by_family: dict[str, int] = {}
     pruned: list[tuple[int, str]] = []
     for row in rows:
-        try:
-            parsed_data = cast(object, json.loads(row["data"]))
-        except json.JSONDecodeError:
-            parsed_data = {}
-        data: dict[str, Any] = {}
-        if isinstance(parsed_data, dict):
-            data = {
-                str(key): value
-                for key, value in cast(dict[object, Any], parsed_data).items()
-            }
+        data = _decode_snapshot_data(row["data"])
         family = _snapshot_family(system, data)
         seen_by_family[family] = seen_by_family.get(family, 0) + 1
         if seen_by_family[family] > config.SNAPSHOT_RETENTION_PER_SYSTEM:
@@ -111,9 +129,27 @@ def register(mcp: FastMCP) -> None:
                 "(Claude-authored, default), or 'ingested' (external)"
             ),
         ] = "agent",
+        retention_policy: Annotated[
+            SnapshotRetentionPolicy,
+            Field(
+                description=(
+                    "'preserve_existing' (default) atomically refuses with "
+                    "reason_code='snapshot.retention_would_prune' when the target "
+                    "family is full and never performs retention deletion. "
+                    "'prune_oldest' explicitly enables the legacy auto-prune path."
+                )
+            ),
+        ] = "preserve_existing",
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
-        """Save a system state snapshot. Auto-prunes to the 10 most recent per system."""
+        """Save a system state snapshot.
+
+        The default preserve_existing policy runs the family capacity check and
+        insert under one SQLite writer transaction. A full family returns a
+        stable no-write result; an accepted write never prunes snapshots or FTS
+        rows. Callers must explicitly select prune_oldest to enable the legacy
+        10-per-family auto-prune behavior.
+        """
         require_caller(ctx, caller, tool="save_snapshot")
         require_bound_caller(ctx, caller, tool="save_snapshot")
         source_trust, source_trust_clamped = clamp_source_trust(
@@ -123,6 +159,11 @@ def register(mcp: FastMCP) -> None:
         if system is None:
             logger.warning("snapshot ownership violation: caller=%s", caller)
             raise ToolError(snapshot_ownership_error(caller))
+        if retention_policy not in ("preserve_existing", "prune_oldest"):
+            raise ToolError(
+                "snapshot.invalid_retention_policy: expected "
+                "'preserve_existing' or 'prune_oldest'"
+            )
 
         snapshot_json = encode_bounded_json(
             data,
@@ -133,23 +174,61 @@ def register(mcp: FastMCP) -> None:
         )
         db = get_db(ctx)
         snap_date = snapshot_date or _utc_snapshot_date()
-        cursor = await db.execute(
-            """
-            INSERT INTO system_snapshots (system, snapshot_date, data, source_trust)
-            VALUES (?, ?, ?, ?)
-            """,
-            (system, snap_date, snapshot_json, source_trust),
-        )
-        snapshot_id = cursor.lastrowid
+        family = _snapshot_family(system, data)
+        retention_limit = config.SNAPSHOT_RETENTION_PER_SYSTEM
+        preserve_existing = retention_policy == "preserve_existing"
 
-        if snapshot_id is not None:
-            await upsert_fts_entry(
-                db, "snapshot", str(snapshot_id), fts_text_for_snapshot(snapshot_json)
+        try:
+            if preserve_existing:
+                await db.execute("BEGIN IMMEDIATE")
+                family_count = await _snapshot_family_count(
+                    db, system=system, family=family
+                )
+                if family_count >= retention_limit:
+                    await db.rollback()
+                    return {
+                        "ok": False,
+                        "reason_code": "snapshot.retention_would_prune",
+                        "mutation_performed": False,
+                        "snapshot_id": None,
+                        "system": system,
+                        "snapshot_family": family,
+                        "snapshot_date": snap_date,
+                        "source_trust": source_trust,
+                        "source_trust_clamped": source_trust_clamped,
+                        "retention_policy": retention_policy,
+                        "retention_limit": retention_limit,
+                        "retained_count": family_count,
+                        "would_prune_count": family_count + 1 - retention_limit,
+                        "pruned_count": 0,
+                    }
+
+            cursor = await db.execute(
+                """
+                INSERT INTO system_snapshots (system, snapshot_date, data, source_trust)
+                VALUES (?, ?, ?, ?)
+                """,
+                (system, snap_date, snapshot_json, source_trust),
             )
+            snapshot_id = cursor.lastrowid
 
-        pruned = await _prune_snapshots(db, system=system)
-        await gc_fts_orphans(db, "snapshot")
-        await db.commit()
+            if snapshot_id is not None:
+                await upsert_fts_entry(
+                    db,
+                    "snapshot",
+                    str(snapshot_id),
+                    fts_text_for_snapshot(snapshot_json),
+                )
+
+            if preserve_existing:
+                pruned: list[tuple[int, str]] = []
+            else:
+                pruned = await _prune_snapshots(db, system=system)
+                await gc_fts_orphans(db, "snapshot")
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
         if pruned:
             pruned_ids = [row_id for row_id, _ in pruned]
@@ -174,6 +253,10 @@ def register(mcp: FastMCP) -> None:
             "snapshot_date": snap_date,
             "source_trust": source_trust,
             "source_trust_clamped": source_trust_clamped,
+            "snapshot_family": family,
+            "mutation_performed": True,
+            "retention_policy": retention_policy,
+            "retention_limit": retention_limit,
             "pruned_count": len(pruned),
         }
 
