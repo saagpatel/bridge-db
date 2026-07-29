@@ -66,14 +66,10 @@ def cost_fns(db: aiosqlite.Connection) -> dict[str, Any]:
 # ── Snapshots ────────────────────────────────────────────────────────────────
 
 
-async def test_save_snapshot_cc(
-    db: aiosqlite.Connection, snap_fns: dict[str, Any]
-) -> None:
+async def test_save_snapshot_cc(db: aiosqlite.Connection, snap_fns: dict[str, Any]) -> None:
     ctx = make_ctx(db)
     result = await snap_fns["save_snapshot"](
-        caller="cc",
-        data={"active_projects": "ink, bridge-db", "lessons": "- use WAL"},
-        ctx=ctx,
+        caller="cc", data={"active_projects": "ink, bridge-db", "lessons": "- use WAL"}, ctx=ctx
     )
     assert result["ok"] is True
     assert result["system"] == "cc"
@@ -101,17 +97,13 @@ async def test_save_snapshot_persists_and_echoes_source_trust(
     asserted = await snap_fns["save_snapshot"](
         caller="cc", data={"v": "1"}, source_trust="operator", ctx=ctx
     )
-    defaulted = await snap_fns["save_snapshot"](
-        caller="codex", data={"v": "2"}, ctx=ctx
-    )
+    defaulted = await snap_fns["save_snapshot"](caller="codex", data={"v": "2"}, ctx=ctx)
 
     assert asserted["source_trust"] == "agent"
     assert asserted["source_trust_clamped"] is True
     assert defaulted["source_trust"] == "agent"
 
-    cursor = await db.execute(
-        "SELECT system, source_trust FROM system_snapshots ORDER BY id"
-    )
+    cursor = await db.execute("SELECT system, source_trust FROM system_snapshots ORDER BY id")
     rows: list[aiosqlite.Row] = await cursor.fetchall()  # type: ignore[assignment]
     trust = {r["system"]: r["source_trust"] for r in rows}
     assert trust["cc"] == "agent"
@@ -157,7 +149,6 @@ async def test_save_snapshot_auth_off_rejects_unbound_operator_forgery(
     count_row = await cursor.fetchone()
     assert count_row is not None
     assert count_row[0] == 0
-
 
 async def test_save_snapshot_claude_ai_raises(
     db: aiosqlite.Connection, snap_fns: dict[str, Any]
@@ -475,14 +466,10 @@ async def test_save_snapshot_preserve_existing_serializes_capacity_admission(
 # ── Cost ─────────────────────────────────────────────────────────────────────
 
 
-async def test_record_cost_upsert(
-    db: aiosqlite.Connection, cost_fns: dict[str, Any]
-) -> None:
+async def test_record_cost_upsert(db: aiosqlite.Connection, cost_fns: dict[str, Any]) -> None:
     ctx = make_ctx(db)
     await cost_fns["record_cost"](caller="cc", month="2026-04", amount=55.0, ctx=ctx)
-    await cost_fns["record_cost"](
-        caller="cc", month="2026-04", amount=75.0, ctx=ctx
-    )  # update
+    await cost_fns["record_cost"](caller="cc", month="2026-04", amount=75.0, ctx=ctx)  # update
 
     cursor = await db.execute(
         "SELECT COUNT(*) FROM cost_records WHERE system='cc' AND month='2026-04'"
@@ -534,9 +521,7 @@ async def test_record_cost_bad_month_raises(
 ) -> None:
     ctx = make_ctx(db)
     with pytest.raises(ToolError, match="Invalid month"):
-        await cost_fns["record_cost"](
-            caller="cc", month="April 2026", amount=10.0, ctx=ctx
-        )
+        await cost_fns["record_cost"](caller="cc", month="April 2026", amount=10.0, ctx=ctx)
 
 
 async def test_record_cost_claude_ai_raises(
@@ -544,9 +529,7 @@ async def test_record_cost_claude_ai_raises(
 ) -> None:
     ctx = make_ctx(db)
     with pytest.raises(ToolError, match="cannot record costs"):
-        await cost_fns["record_cost"](
-            caller="claude_ai", month="2026-04", amount=10.0, ctx=ctx
-        )
+        await cost_fns["record_cost"](caller="claude_ai", month="2026-04", amount=10.0, ctx=ctx)
 
 
 async def test_get_cost_history_filter_by_system(
