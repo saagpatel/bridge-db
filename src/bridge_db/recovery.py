@@ -12,6 +12,7 @@ import sqlite3
 import stat
 import sys
 import tempfile
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO, cast
@@ -134,6 +135,11 @@ def _sqlite_semantic_fingerprint(path: Path) -> str:
                 digest.update(row_hash.encode("ascii"))
                 digest.update(b"\n")
     return digest.hexdigest()
+
+
+def recovery_source_fingerprint(db_path: Path) -> str:
+    """Return a content-only digest for binding recovery lifecycle receipts."""
+    return _sqlite_semantic_fingerprint(db_path)
 
 
 def _write_private_file(path: Path, content: bytes) -> None:
@@ -805,8 +811,15 @@ def rotate_recovery_anchor(
     db_path: Path,
     *,
     expected_schema_version: int,
+    on_verified: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Atomically replace a stale anchor while preserving the prior bundle."""
+    """Atomically replace a stale anchor while preserving the prior bundle.
+
+    ``on_verified`` is invoked only while SQLite's writer slot is still held
+    and after the current anchor has passed digest, integrity, semantic, and
+    live-source checks. A callback failure is part of the atomic operation: a
+    completed exchange is rolled back before the exception escapes.
+    """
     anchor_path = recovery_anchor_path(db_path)
     current = recovery_anchor_inventory(
         db_path,
@@ -824,13 +837,16 @@ def rotate_recovery_anchor(
                 expected_schema_version=expected_schema_version,
             )
             if current["ready"]:
-                return {
+                result = {
                     **current,
                     "disposition": "preserved_current",
                     "rotated": False,
                     "superseded_path": None,
                     "superseded_sha256": None,
                 }
+                if on_verified is not None:
+                    on_verified(result)
+                return result
         finally:
             try:
                 preservation_guard.rollback()
@@ -933,14 +949,17 @@ def rotate_recovery_anchor(
         ):
             raise RuntimeError("superseded recovery anchor changed during rotation")
 
-        committed = True
-        return {
+        result = {
             **verified,
             "disposition": "rotated",
             "rotated": True,
             "superseded_path": str(superseded_path),
             "superseded_sha256": previous_digest,
         }
+        if on_verified is not None:
+            on_verified(result)
+        committed = True
+        return result
     except BaseException:
         if swapped and not committed:
             try:

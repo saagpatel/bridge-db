@@ -16,6 +16,7 @@ uv run python -m bridge_db.evidence_policy plan  # content-bound evidence invent
 uv run python -m bridge_db --rebuild-content-index  # repair FTS recall index drift
 uv run python -m bridge_db --reconcile-canonical-keys  # backfill GHRA repo_full_name keys
 uv run python -m bridge_db --log-session-boundary bridge-db  # FTS-safe CC hook logging
+uv run python -m bridge_db --seal-recovery-batch <batch-id>  # scoped CC/Codex terminal recovery receipt
 uv run python -m bridge_db          # start MCP server (stdio)
 uv run python -m bridge_db.migration  # migrate from bridge markdown
 uv run python -m bridge_db --enroll cc            # enroll/rotate a principal (TTY only)
@@ -45,6 +46,13 @@ uv run python -m bridge_db --restore-handoff-trust 42  # exact recovery image
 - `source`/`system` DB columns map 1:1 from `caller`
 - Activity retention: unprotected rows keep the newest 50 per source; rows tagged `SHIPPED` or `LEDGER` (case-insensitive) are permanently retained — **BD-INV-1: retention never deletes a protected row, its receipt, or its disposition.** Enforced by the prune predicate, the `log_activity.prune` audit line, and health's `ledger_protected_count`/`receipt_orphan_count`/`disposition_orphan_count` metrics. At the v14 boundary the two `*_orphan_count` metrics kept their names but changed meaning: shipped-sync state moved onto `activity_log` `sync_*` columns, so instead of FK-orphans they now measure disposition malformation (a `synced` row missing downstream proof; a disposition on a non-SHIPPED row or a policy disposition missing its reason) — the compensating detection control for the field requirements the old NOT NULL child-table columns enforced, and must always read 0. Snapshot retention: 10 per system family (Codex operating and consulted-node snapshots are retained independently); snapshot prunes emit a `save_snapshot.prune` audit line and `save_snapshot` returns `pruned_count`
 - Export trigger: consumers call `export_bridge_markdown` explicitly after writes
+- Recovery batch seal: a current, scoped `cc` or `codex` channel credential may
+  run `--seal-recovery-batch <batch-id>` after the final authorized write.
+  Identity comes from the bound token, not a caller argument. Success publishes
+  one `RecoverySealReceiptV1` while SQLite's writer slot is still held;
+  stale success replay fails closed, distinct retained batch IDs are capped at
+  1024, and interruption/failure stay explicitly unsealed. See
+  `docs/internal/RECOVERY-SEAL-PROTOCOL.md`.
 - Startup sync trigger: Claude Code `/start` calls `sync_from_file` before bridge reads so Claude.ai-owned file edits are imported into SQLite first
 - Context CAS: consumers must pass `if_match_version` from `get_section` to
   `update_section`; stale writes return conflict receipts. Existing-row
@@ -121,6 +129,13 @@ uv run python -m bridge_db --restore-handoff-trust 42  # exact recovery image
   receipts expose partial work as degraded health. It never grants authority
   to delete records, segments, backups, archives, or recovery evidence. See
   `docs/internal/EVIDENCE-LIFECYCLE.md`.
+- **Recovery lifecycle ownership**: `RecoveryAnchorV1` remains strictly
+  source-current. The batch-seal command is available only to current `cc` and
+  `codex` grants carrying `seal_recovery_batch`; existing grants fail closed
+  until separately re-enrolled. The receipt identifies the sealer without
+  claiming ownership of another principal's rows or snapshots. The checkpoint
+  LaunchAgent remains WAL-only, and reads never auto-seal or create recovery
+  seal evidence.
 - **FTS drift repair**: `--rebuild-content-index` is the CLI-only repair path; FTS index drift is treated as a hard health failure because `recall` depends on `content_index` mirroring source tables.
 - **Post-sync review**: after scheduled Bridge Syncs or shipped-event reconciliation, use `docs/internal/POST-SYNC-REVIEW.md` to verify DB state, markdown export freshness, and scorecard updates.
 - **Dependency drift**: check with `uv tree --outdated`; refresh `uv.lock` and re-run the full verifier to confirm green.

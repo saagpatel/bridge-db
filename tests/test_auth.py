@@ -316,6 +316,11 @@ def test_scope_matrix_is_least_privilege() -> None:
     assert "sync_from_file" in auth.scopes_for_caller("cc")
     assert "sync_from_file" not in auth.scopes_for_caller("personal_ops")
     assert "export_bridge_markdown" in auth.scopes_for_caller("personal_ops")
+    assert "seal_recovery_batch" in auth.scopes_for_caller("cc")
+    assert "seal_recovery_batch" in auth.scopes_for_caller("codex")
+    assert "seal_recovery_batch" not in auth.scopes_for_caller("claude_ai")
+    assert "seal_recovery_batch" not in auth.scopes_for_caller("notion_os")
+    assert "seal_recovery_batch" not in auth.scopes_for_caller("personal_ops")
 
 
 @pytest.mark.parametrize("mode", ["warn", "enforce"])

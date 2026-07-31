@@ -170,12 +170,15 @@ async def run_status(*, now: datetime | None = None) -> bool:
         f"{summary['signals']['migration_backup_integrity_ok']},"
         " current_recovery_anchor_ready="
         f"{summary['signals']['current_recovery_anchor_ready']},"
+        " recovery_lifecycle_ready="
+        f"{summary['signals']['recovery_lifecycle_ready']},"
         " legacy_backup_provenance="
         f"{summary['signals']['legacy_backup_provenance_state']}"
     )
     print(
         "  Recovery:"
         f" current_anchor={summary['signals']['current_recovery_anchor_state']},"
+        f" seal_state={summary['signals']['recovery_seal_state']},"
         f" legacy_backups={summary['evidence_lifecycle']['migration_backups']['count']},"
         " legacy_companions="
         f"{summary['signals']['legacy_backup_companion_count']},"
@@ -347,6 +350,8 @@ async def run_dogfood() -> bool:
         f" audit_degraded={evidence['audit_degraded']},"
         f" disposition_degraded={evidence['disposition_degraded']},"
         f" current_recovery_anchor={evidence['current_recovery_anchor']['state']},"
+        f" recovery_seal={evidence['recovery_seals']['state']},"
+        f" recovery_lifecycle_ready={evidence['recovery_lifecycle_ready']},"
         f" migration_backups={evidence['migration_backups']['count']},"
         f" verified_backups={evidence['migration_backups']['verified_count']},"
         f" legacy_companions={evidence['migration_backups']['companion_count']},"
@@ -516,6 +521,52 @@ def run_rotate_recovery_anchor() -> bool:
     if result["errors"]:
         print(f"  Errors: {','.join(result['errors'])}")
     return bool(result["ready"])
+
+
+def run_seal_recovery_batch(batch_id: str) -> bool:
+    """Seal one completed write batch under a channel-bound local owner."""
+    from bridge_db import config
+    from bridge_db.auth import require_cli_principal
+    from bridge_db.db import SCHEMA_VERSION
+    from bridge_db.recovery_seal import (
+        RecoverySealProtocolError,
+        seal_recovery_batch,
+    )
+
+    try:
+        owner = require_cli_principal("seal_recovery_batch")
+    except PermissionError as exc:
+        print(f"recovery batch seal refused: {exc}")
+        return False
+
+    try:
+        result = seal_recovery_batch(
+            config.DB_PATH,
+            expected_schema_version=SCHEMA_VERSION,
+            batch_id=batch_id,
+            owner=owner,
+        )
+    except RecoverySealProtocolError as exc:
+        print(f"recovery batch seal refused: {exc.reason_code}")
+        return False
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
+        print(f"recovery batch seal refused: {type(exc).__name__}")
+        return False
+
+    print("bridge-db RecoverySealReceiptV1")
+    print(f"  Batch: {result['batch_id']}")
+    print(f"  Seal owner: {result['seal_owner']}")
+    print(f"  Outcome: {result['outcome']}")
+    print(f"  Reason: {result['reason_code']}")
+    print(f"  Replayed: {result['replayed']}")
+    print(f"  Anchor state: {result.get('anchor_state')}")
+    print(f"  Anchor digest: {result.get('anchor_sha256')}")
+    print(f"  Digest verified: {result.get('digest_ok')}")
+    print(f"  SQLite integrity: {result.get('integrity_ok')}")
+    print(f"  Semantic readback: {result.get('semantic_readback_ok')}")
+    print(f"  Source current: {result.get('source_current')}")
+    print(f"  Receipt digest: {result.get('receipt_sha256')}")
+    return bool(result["outcome"] == "recovery_sealed" and result["ready"])
 
 
 async def run_rebuild_content_index() -> bool:
@@ -1439,6 +1490,14 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--seal-recovery-batch",
+        metavar="BATCH_ID",
+        help=(
+            "Seal one completed write batch under the current channel-bound "
+            "CC or Codex principal"
+        ),
+    )
+    parser.add_argument(
         "--rebuild-content-index",
         action="store_true",
         help="Rebuild the FTS content_index from source tables and verify it",
@@ -1529,6 +1588,8 @@ def main() -> None:
         sys.exit(0 if run_verify_recovery_anchor() else 1)
     if args.rotate_recovery_anchor:
         sys.exit(0 if run_rotate_recovery_anchor() else 1)
+    if args.seal_recovery_batch:
+        sys.exit(0 if run_seal_recovery_batch(args.seal_recovery_batch) else 1)
     if args.rebuild_content_index:
         ok = asyncio.run(run_rebuild_content_index())
         sys.exit(0 if ok else 1)
