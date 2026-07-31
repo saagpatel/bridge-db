@@ -10,7 +10,7 @@ import aiosqlite
 import pytest
 from conftest import CaptureMCP, make_ctx
 
-from bridge_db import config, recovery
+from bridge_db import config, recovery, recovery_seal
 from bridge_db.db import (
     SCHEMA_VERSION,
     _backup_db_file,  # pyright: ignore[reportPrivateUsage]
@@ -74,6 +74,57 @@ async def test_health_returns_ok_on_healthy_db(
     assert (
         result["evidence_lifecycle"]["acknowledgements"]["authority"]
         == "review_only_no_cleanup_authority"
+    )
+    assert result["evidence_lifecycle"]["recovery_lifecycle_ready"] is False
+    assert result["evidence_lifecycle"]["recovery_seals"]["state"] == "missing"
+
+
+async def test_health_exposes_verified_recovery_batch_lifecycle(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+) -> None:
+    sealed = recovery_seal.seal_recovery_batch(
+        config.DB_PATH,
+        expected_schema_version=SCHEMA_VERSION,
+        batch_id="health-fixture-001",
+        owner="codex",
+    )
+    assert sealed["outcome"] == "recovery_sealed"
+
+    result = await fns["health"](ctx=make_ctx(db))
+    status = await fns["status"](ctx=make_ctx(db))
+
+    assert result["evidence_lifecycle"]["current_recovery_ready"] is True
+    assert result["evidence_lifecycle"]["recovery_lifecycle_ready"] is True
+    assert result["evidence_lifecycle"]["recovery_seals"]["state"] == "verified"
+    assert status["signals"]["recovery_lifecycle_ready"] is True
+    assert status["signals"]["recovery_seal_state"] == "verified"
+
+
+async def test_health_invalidates_recovery_lifecycle_after_later_source_write(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+) -> None:
+    recovery_seal.seal_recovery_batch(
+        config.DB_PATH,
+        expected_schema_version=SCHEMA_VERSION,
+        batch_id="health-fixture-002",
+        owner="codex",
+    )
+    await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary) "
+        "VALUES ('codex', '2026-07-30', 'bridge-db', 'after recovery seal')"
+    )
+    await db.commit()
+
+    result = await fns["health"](ctx=make_ctx(db))
+
+    assert result["evidence_lifecycle"]["current_recovery_ready"] is False
+    assert result["evidence_lifecycle"]["recovery_lifecycle_ready"] is False
+    assert result["evidence_lifecycle"]["recovery_seals"]["state"] == "stale"
+    assert (
+        "source_changed_since_recovery_seal"
+        in result["evidence_lifecycle"]["recovery_seals"]["errors"]
     )
 
 

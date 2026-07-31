@@ -29,6 +29,7 @@ from bridge_db.__main__ import (
     run_rotate_recovery_anchor,
     run_restore_handoff_trust,
     run_revoke_principal,
+    run_seal_recovery_batch,
     run_status,
     run_upgrade_principals_v2,
     run_verify_recovery_anchor,
@@ -58,6 +59,32 @@ def _create_cli_recovery_anchor(db_path: Path) -> None:
     recovery.create_recovery_anchor(
         db_path,
         expected_schema_version=SCHEMA_VERSION,
+    )
+
+
+def _write_cli_principal(
+    path: Path,
+    *,
+    caller: str,
+    token: str,
+    scopes: list[str] | None = None,
+) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "principals": {
+                    caller: {
+                        "token_sha256": auth.hash_token(token),
+                        "issued_at": "2026-07-30T00:00:00Z",
+                        "expires_at": "2099-07-30T00:00:00Z",
+                        "generation": 1,
+                        "scopes": scopes or auth.scopes_for_caller(caller),
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
     )
 
 
@@ -290,6 +317,106 @@ async def test_recovery_anchor_cli_rotates_stale_bundle_and_preserves_evidence(
     assert run_rotate_recovery_anchor() is True
     preserved = capsys.readouterr().out
     assert "Result: preserved_current" in preserved
+
+
+@pytest.mark.asyncio
+async def test_recovery_batch_seal_cli_requires_bound_scope_and_replays(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    principals_path = tmp_path / "principals.json"
+    token = "codex-recovery-seal-token"
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    monkeypatch.setattr(cfg, "PRINCIPALS_PATH", principals_path)
+    monkeypatch.setenv("BRIDGE_DB_PRINCIPAL_TOKEN", token)
+    _write_cli_principal(
+        principals_path,
+        caller="codex",
+        token=token,
+    )
+    db = await open_db(db_path)
+    await db.close()
+    _create_cli_recovery_anchor(db_path)
+    with sqlite3.connect(db_path) as changed:
+        changed.execute(
+            "INSERT INTO activity_log "
+            "(source, timestamp, project_name, summary) VALUES (?, ?, ?, ?)",
+            ("codex", "2026-07-30", "bridge-db", "completed CLI batch"),
+        )
+
+    assert run_seal_recovery_batch("cli-batch-001") is True
+    first = capsys.readouterr().out
+    assert "RecoverySealReceiptV1" in first
+    assert "Batch: cli-batch-001" in first
+    assert "Seal owner: codex" in first
+    assert "Outcome: recovery_sealed" in first
+    assert "Replayed: False" in first
+    assert "Digest verified: True" in first
+    assert "Semantic readback: True" in first
+    assert "Source current: True" in first
+
+    assert run_seal_recovery_batch("cli-batch-001") is True
+    second = capsys.readouterr().out
+    assert "Outcome: recovery_sealed" in second
+    assert "Replayed: True" in second
+
+
+@pytest.mark.asyncio
+async def test_recovery_batch_seal_cli_refuses_unauthorized_principal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    principals_path = tmp_path / "principals.json"
+    token = "claude-ai-token"
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    monkeypatch.setattr(cfg, "PRINCIPALS_PATH", principals_path)
+    monkeypatch.setenv("BRIDGE_DB_PRINCIPAL_TOKEN", token)
+    _write_cli_principal(
+        principals_path,
+        caller="claude_ai",
+        token=token,
+    )
+    db = await open_db(db_path)
+    await db.close()
+    _create_cli_recovery_anchor(db_path)
+
+    assert run_seal_recovery_batch("unauthorized-cli-001") is False
+    output = capsys.readouterr().out
+    assert "recovery batch seal refused" in output
+    assert "not scoped" in output
+    assert not db_path.with_name("bridge.db.recovery-seals-v1").exists()
+
+
+@pytest.mark.asyncio
+async def test_recovery_batch_seal_cli_refuses_legacy_grant_without_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    principals_path = tmp_path / "principals.json"
+    token = "old-codex-token"
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    monkeypatch.setattr(cfg, "PRINCIPALS_PATH", principals_path)
+    monkeypatch.setenv("BRIDGE_DB_PRINCIPAL_TOKEN", token)
+    _write_cli_principal(
+        principals_path,
+        caller="codex",
+        token=token,
+        scopes=["log_activity"],
+    )
+    db = await open_db(db_path)
+    await db.close()
+    _create_cli_recovery_anchor(db_path)
+
+    assert run_seal_recovery_batch("legacy-grant-001") is False
+    output = capsys.readouterr().out
+    assert "not scoped" in output
+    assert not db_path.with_name("bridge.db.recovery-seals-v1").exists()
 
 
 @pytest.mark.asyncio

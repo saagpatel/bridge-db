@@ -318,6 +318,46 @@ async def test_rotate_rolls_back_when_post_exchange_verification_fails(
     assert list(tmp_path.glob("bridge.db.recovery-anchor-v1.superseded-*")) == []
 
 
+async def test_rotate_rolls_back_when_verified_receipt_callback_fails(
+    tmp_path: Path,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    original = recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    anchor = recovery.recovery_anchor_path(db_path)
+    with sqlite3.connect(db_path) as changed:
+        changed.execute(
+            "INSERT INTO activity_log "
+            "(source, timestamp, project_name, summary) VALUES (?, ?, ?, ?)",
+            ("codex", "2026-07-18T09:00:00Z", "bridge-db", "after anchor"),
+        )
+
+    def fail_receipt(_result: dict[str, Any]) -> None:
+        raise RuntimeError("simulated receipt publication failure")
+
+    with pytest.raises(
+        RuntimeError,
+        match="simulated receipt publication failure",
+    ):
+        recovery.rotate_recovery_anchor(
+            db_path,
+            expected_schema_version=SCHEMA_VERSION,
+            on_verified=fail_receipt,
+        )
+
+    assert recovery.verify_recovery_anchor(
+        anchor,
+        expected_schema_version=SCHEMA_VERSION,
+    )["sha256"] == original["sha256"]
+    assert recovery.recovery_anchor_inventory(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )["state"] == "stale"
+    assert list(tmp_path.glob("bridge.db.recovery-anchor-v1.superseded-*")) == []
+
+
 async def test_rotate_refuses_if_source_changes_after_staging(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

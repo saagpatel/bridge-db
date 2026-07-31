@@ -359,8 +359,8 @@ cleanup, clears degradation, or rewrites historical records.
 
 | Principal | Write capabilities | Boundaries |
 |---|---|---|
-| `codex` | `log_activity(caller="codex")`, `save_snapshot(caller="codex")`, `record_cost(caller="codex")`, source-owned `record_disposition(caller="codex")`, and `pick_up_handoff`/`clear_handoff` where their gates allow it | Owns Codex truth and verification; must not write or refresh `cc` snapshots or Claude.ai sections |
-| `cc` | `log_activity(caller="cc")`, `save_snapshot(caller="cc")`, `record_cost(caller="cc")`, source-owned `record_disposition(caller="cc")`, and `pick_up_handoff`/`clear_handoff` where their gates allow it | Owns Claude Code state and session telemetry; must not write Codex snapshots or Claude.ai sections |
+| `codex` | `log_activity(caller="codex")`, `save_snapshot(caller="codex")`, `record_cost(caller="codex")`, source-owned `record_disposition(caller="codex")`, `pick_up_handoff`/`clear_handoff` where their gates allow it, and scoped CLI `--seal-recovery-batch` | Owns Codex truth and verification; a recovery seal proves the complete current image but does not authorize writing or refreshing `cc` snapshots or Claude.ai sections |
+| `cc` | `log_activity(caller="cc")`, `save_snapshot(caller="cc")`, `record_cost(caller="cc")`, source-owned `record_disposition(caller="cc")`, `pick_up_handoff`/`clear_handoff` where their gates allow it, and scoped CLI `--seal-recovery-batch` | Owns Claude Code state and session telemetry; a recovery seal proves the complete current image but does not authorize writing Codex snapshots or Claude.ai sections |
 | `claude_ai` | `update_section` for `career`, `speaking`, `research`, and `capabilities`; channel-bound `create_handoff(caller="claude_ai")`; compatibility file edits to those four sections followed by `sync_from_file` | Advisory and dispatch surface; MCP handoffs cannot mint operator trust and must not act as local execution proof |
 | `notion_os` | `log_activity(caller="notion_os")`, `record_cost(caller="notion_os")`, `record_disposition(caller="notion_os")` | Owns Notion-side receipts/activity it actually verified; must not infer project mappings beyond `notion_sync` |
 | `personal_ops` | `log_activity(caller="personal_ops")`, `record_cost(caller="personal_ops")`, `record_disposition(caller="personal_ops")` | Owns operator-facing coordination receipts; must not replace repo-local or bridge-db verification |
@@ -368,6 +368,43 @@ cleanup, clears degradation, or rewrites historical records.
 `record_disposition` is the sole shipped-event write verb above. It is
 SHIPPED-only and writes the row's terminal `sync_disposition`; the former
 `mark_shipped_processed` non-shipped `PROCESSED`-marking path is retired.
+
+## Recovery batch lifecycle
+
+After an authorized multi-write workflow commits its final BridgeDB mutation,
+its local CC or Codex executor may terminate the batch with:
+
+```console
+python -m bridge_db --seal-recovery-batch <batch-id>
+```
+
+This is a CLI lifecycle operation, not an MCP content-write tool. The runtime
+derives the seal owner from a current `BRIDGE_DB_PRINCIPAL_TOKEN` grant carrying
+the `seal_recovery_batch` scope. No caller argument can impersonate the owner,
+and auth `off` does not bypass the scope. Existing v2 grants must be separately
+re-enrolled before activation; the repository does not rewrite live principal
+state.
+
+The sealer records one immutable attempt, serializes concurrent calls, and
+publishes at most one terminal `RecoverySealReceiptV1` per batch. Distinct
+retained batch IDs are capped at 1024; exact-ID replay remains available at
+capacity, while a new distinct ID fails closed before creating more evidence.
+Success is published while SQLite's writer slot is still held and requires
+anchor digest, integrity, semantic readback, and live-source fingerprint
+agreement. Failures return or preserve `recovery_unsealed`; stale sealed
+receipts are preserved as history but not replayed as current success, and an
+interrupted attempt is visible but is never repaired by a read.
+
+`health.evidence_lifecycle.recovery_lifecycle_ready` is the strict batch proof.
+It requires the latest success receipt to match the exact current anchor and
+live source. The narrower `current_recovery_ready` remains the physical
+anchor/source-current result for compatibility. See
+`docs/internal/RECOVERY-SEAL-PROTOCOL.md` for the complete state machine.
+
+The existing checkpoint LaunchAgent only truncates WAL. It does not own a write
+batch, rotate an anchor, or emit a recovery seal receipt. Health and status
+validate existing recovery-seal evidence but never create, prune, or repair the
+seal directory.
 
 ---
 

@@ -24,6 +24,7 @@ from bridge_db.evidence import (
     migration_backup_inventory,
 )
 from bridge_db.recovery import recovery_anchor_inventory
+from bridge_db.recovery_seal import recovery_seal_inventory
 from bridge_db.tools.context import parse_owned_sections
 
 logger = logging.getLogger("bridge_db.tools.health")
@@ -342,6 +343,11 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         Path(open_main_path),
         expected_schema_version=SCHEMA_VERSION,
     )
+    recovery_seals = recovery_seal_inventory(
+        Path(open_main_path),
+        expected_schema_version=SCHEMA_VERSION,
+        current_anchor=recovery_anchor,
+    )
     # Migration backups prove that a historical migration had a readable
     # rollback point. They are not compared with the live database after later
     # writes, so they cannot establish present-day recovery readiness.
@@ -367,10 +373,12 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "migration_backups": backup_inventory,
         "legacy_migration_backups": backup_inventory,
         "current_recovery_anchor": recovery_anchor,
+        "recovery_seals": recovery_seals,
         "audit_degraded": audit_degraded,
         "disposition_degraded": disposition_degraded,
         "legacy_backup_provenance_ok": legacy_backup_provenance_ok,
         "current_recovery_ready": recovery_anchor["ready"],
+        "recovery_lifecycle_ready": recovery_seals["ready"],
         "recovery_integrity_ok": recovery_integrity_ok,
         # Preserve the established key's historical meaning for consumers that
         # use it specifically to inspect migration-backup verification.
@@ -821,6 +829,12 @@ async def collect_status_summary(
             "current_recovery_anchor_state": health["evidence_lifecycle"][
                 "current_recovery_anchor"
             ]["state"],
+            "recovery_lifecycle_ready": health["evidence_lifecycle"][
+                "recovery_lifecycle_ready"
+            ],
+            "recovery_seal_state": health["evidence_lifecycle"]["recovery_seals"][
+                "state"
+            ],
             "legacy_backup_provenance_state": health["evidence_lifecycle"][
                 "migration_backups"
             ]["provenance_state"],

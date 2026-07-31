@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +41,7 @@ _SCOPES_BY_CALLER: dict[str, frozenset[str]] = {
             "clear_handoff",
             "sync_from_file",
             "export_bridge_markdown",
+            "seal_recovery_batch",
         }
     ),
     "codex": frozenset(
@@ -51,6 +53,7 @@ _SCOPES_BY_CALLER: dict[str, frozenset[str]] = {
             "pick_up_handoff",
             "clear_handoff",
             "export_bridge_markdown",
+            "seal_recovery_batch",
         }
     ),
     "claude_ai": frozenset(
@@ -299,6 +302,45 @@ def require_bound_principal(ctx: Any, tool: str) -> str:
         "Unauthenticated connection: no BRIDGE_DB_PRINCIPAL_TOKEN bound. "
         "Enroll a principal and set the token in this client's MCP spawn env."
     )
+
+
+def require_cli_principal(tool: str) -> str:
+    """Require a live scoped principal for a non-MCP lifecycle command.
+
+    The identity comes only from ``BRIDGE_DB_PRINCIPAL_TOKEN`` and the current
+    v2 registry. The global auth rollout mode never weakens this boundary.
+    """
+    raw_token = os.environ.get("BRIDGE_DB_PRINCIPAL_TOKEN")
+    token = raw_token.strip() if raw_token is not None else None
+    grant = resolve_grant(token, load_principal_grants(config.PRINCIPALS_PATH))
+    reason: str | None = None
+    if not token:
+        reason = "unbound"
+    elif grant is None:
+        reason = "not_enrolled"
+    elif clock.now() >= grant.expires_at:
+        reason = "expired"
+    elif tool not in grant.scopes:
+        reason = "out_of_scope"
+    if reason is None and grant is not None:
+        return grant.caller
+    if reason is None:
+        reason = "invalid"
+
+    principal = grant.caller if grant is not None else None
+    detail = f"tool={tool} principal={principal or 'unbound'} reason={reason}"
+    log_audit("auth.denied", principal, None, ok=False, detail=detail)
+    messages = {
+        "unbound": (
+            "No channel credential is bound; set BRIDGE_DB_PRINCIPAL_TOKEN "
+            "to a current scoped grant"
+        ),
+        "not_enrolled": "The bound credential is not enrolled",
+        "expired": "The bound credential has expired",
+        "out_of_scope": f"The bound credential is not scoped for '{tool}'",
+        "invalid": "The bound credential is invalid",
+    }
+    raise PermissionError(messages[reason])
 
 
 def require_caller(ctx: Any, caller: str, tool: str) -> None:

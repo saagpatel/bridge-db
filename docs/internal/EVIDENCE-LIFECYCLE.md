@@ -21,6 +21,7 @@ or recovery artifact is deleted automatically.
 | Audit events | `log_audit` callers | `audit.jsonl` plus immutable segments | Preserve all pending policy | Locked, fsync'd, atomic rename at configured byte boundary | Primary failure writes independent minimized failure receipt and continues degraded; dual failure raises | `audit_tail` scans a bounded horizon across active + segments | `health/status/dogfood` expose bytes, segments, and degradation | Segment deletion or rewrite requires approval |
 | Audit failure receipts | `log_audit` fallback | `audit_failures.jsonl` plus immutable segments | Preserve until an operator-defined acknowledgement/reconciliation policy exists | Same lossless rotation | Failure to persist this receipt raises; no silent success | Receipt contains event digest and non-sensitive attribution, not original detail | Any receipt makes storage health non-green | Acknowledge/archive/delete policy requires approval |
 | Current recovery anchor | Explicit `--create-recovery-anchor` or separately approved `--rotate-recovery-anchor` command | Private `bridge.db.recovery-anchor-v1/` bundle with `anchor.sqlite` and `manifest.json`; rotations retain the prior bundle under a timestamped `.superseded-*` sibling | Preserve pending operator approval; creation never overwrites and rotation never deletes the prior bundle | One atomic directory publication for creation; one atomic exchange places the new bundle at the current path and the prior bundle at its final superseded path | Staging failure leaves the current bundle untouched; post-exchange verification failure swaps the directories back; invalid or incomplete evidence fails closed | SQLite online backup, SHA-256 and byte binding, schema/integrity checks, bounded table-count readback against a disposable copy, and live-source fingerprint comparison under SQLite's writer slot | `health/status/dogfood` expose `current_recovery_anchor` independently from legacy provenance; rotation CLI returns both current and superseded digests | Rotation requires separate approval; deletion of current or superseded evidence requires another separate approval |
+| Recovery batch seals | Scoped `cc` or `codex` `--seal-recovery-batch <batch-id>` after an authorized completed write batch | Private `bridge.db.recovery-seals-v1/<sha256(batch-id)>/` attempt plus at most one terminal `RecoverySealReceiptV1`; distinct retained batches are capped at 1024 | Preserve all pending policy; attempts and receipts are never rewritten or deleted; exact replay remains allowed at capacity | Inter-process seal lock serializes batches; immutable files publish by no-replace link and directory fsync; inventory validates existing directories only | An ordinary failure writes `recovery_unsealed`; a hard interruption leaves an open attempt that health classifies as unsealed; a success-receipt publication failure removes the unpublished terminal when possible and rolls the anchor exchange back | Terminal success binds owner, batch ID, source fingerprint, anchor digest, integrity, semantic readback, and source-current proof while SQLite's writer slot remains held; stale sealed replays fail closed | `health/status` expose receipt counts, latest state, strict `recovery_lifecycle_ready`, stale replay, missing/invalid directory, and capacity-exceeded states without creating or repairing evidence | Scope activation and workflow wiring require separate owner action; receipt or attempt deletion requires separate approval |
 | Migration backups | Destructive schema migration hook | Verified `.bak`, `.sha256`, and `.meta.json` siblings; pre-verification backups remain `legacy-unverified`; retained `.bak-wal` and `.bak-shm` companions remain separate evidence | Review-only; preserve all | One immutable backup per migration label | Missing/bad manifest, digest, SQLite integrity, or schema evidence blocks destructive migration/reuse. Retained companions without a live primary are surfaced as warnings without weakening a verified current anchor | Online SQLite backup includes committed WAL state; digest + integrity + schema readback verified. Missing historical provenance is never reconstructed retroactively | `health.evidence_lifecycle.migration_backups` inventories every live primary, retained companion, and distinct missing primary; `status` and `dogfood` summarize companion state | Backup/manifest/metadata/companion deletion requires separate approval |
 | Evidence disposition receipts | Approved lifecycle operation | `evidence_dispositions.jsonl` plus immutable segments | Preserve all pending policy | Same lossless rotation | `prepared` is durable before source publication; `completed` follows readback; pre-publish failure appends `aborted`; post-publish interruption leaves an open `prepared` receipt | Latest state is reconstructed across active + rotated files | Any open or malformed transaction makes storage health non-green | Receipt deletion, reconciliation rewrite, or automatic expiry requires separate approval |
 
@@ -76,6 +77,27 @@ source state changes, the current evidence changes, the atomic exchange fails,
 or post-exchange verification cannot complete, the command fails closed. A
 post-exchange verification failure swaps the directories back before removing
 only the unpublished candidate. Invalid current evidence is never rotated.
+
+For an owned write workflow, prefer the terminal batch protocol after its last
+authorized write:
+
+```console
+python -m bridge_db --seal-recovery-batch <batch-id>
+```
+
+This command requires a current `cc` or `codex` channel token whose v2 grant
+contains `seal_recovery_batch`. It derives the owner from that credential and
+does not accept an owner claim. A successful terminal receipt is published
+while the SQLite writer guard still blocks later commits. The stricter
+`health.evidence_lifecycle.recovery_lifecycle_ready` becomes true only when the
+latest success receipt matches the exact current anchor and live source. Stale
+success receipts are preserved as evidence but are not replayed as current
+success, and read-side inventory never creates the receipt root.
+Standalone create/rotate commands still prove physical anchor readiness but do
+not retroactively claim that a write batch followed the owned lifecycle.
+
+See [`RECOVERY-SEAL-PROTOCOL.md`](RECOVERY-SEAL-PROTOCOL.md) for interruption,
+repeat, concurrency, authorization, and activation semantics.
 
 It reports historical migration-backup provenance separately as `verified`,
 `readable_but_unknown`, or `mixed_or_unreadable`. A verified current anchor can
