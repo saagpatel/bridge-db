@@ -33,3 +33,11 @@ Legacy v1 responses include `sunset_at`. At and after
 `2026-08-18T00:00:00Z`, validation rejects v1 before the database opens.
 Unknown versions always fail closed. Regenerate existing private manifests as
 `manifest-v2` before the cutoff.
+
+## Snapshot admission
+
+Apply uses the repository's shared snapshot admission service. It never issues
+its own snapshot deletion. If the target Codex family is full, apply returns
+`ok=false`, `snapshot_write="refused_capacity"`, the durable `refusal_id`, and
+the required `next_state`; the paired baseline activity stays unwritten. The
+Codex owner must handle and acknowledge that exact refusal before retrying.

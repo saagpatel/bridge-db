@@ -44,6 +44,7 @@ async def test_schema_creates_all_tables(db: aiosqlite.Connection) -> None:
         "pending_handoffs",
         "session_classification",
         "session_costs",
+        "snapshot_refusals",
         "system_snapshots",
         "write_conflicts",
     }
@@ -57,6 +58,7 @@ async def test_schema_creates_indexes(db: aiosqlite.Connection) -> None:
     assert "idx_activity_source" in indexes
     assert "idx_activity_timestamp" in indexes
     assert "idx_snapshot_system" in indexes
+    assert "idx_snapshot_refusals_owner_state" in indexes
     assert "idx_handoff_status" in indexes
     assert "idx_handoff_capability_expiry" in indexes
     assert "idx_sc_project" in indexes

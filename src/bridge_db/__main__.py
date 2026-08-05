@@ -148,6 +148,7 @@ async def run_status(*, now: datetime | None = None) -> bool:
         f" activity={summary['row_counts']['activity_log']},"
         f" handoffs={summary['row_counts']['pending_handoffs']},"
         f" snapshots={summary['row_counts']['system_snapshots']},"
+        f" snapshot_refusals={summary['row_counts']['snapshot_refusals']},"
         f" costs={summary['row_counts']['cost_records']},"
         f" synced_shipped={summary['signals']['synced_shipped']}"
     )
@@ -163,6 +164,8 @@ async def run_status(*, now: datetime | None = None) -> bool:
         f" fts_missing={summary['signals']['fts_missing']},"
         f" fts_orphaned={summary['signals']['fts_orphaned']},"
         f" open_write_conflicts={summary['signals']['open_write_conflicts']},"
+        " unacknowledged_snapshot_refusals="
+        f"{summary['signals']['unacknowledged_snapshot_refusals']},"
         f" audit_degraded={summary['signals']['audit_degraded']},"
         " evidence_disposition_degraded="
         f"{summary['signals']['evidence_disposition_degraded']},"
@@ -260,6 +263,11 @@ def _status_attention(summary: dict[str, Any]) -> str | None:
     if signals["processed_shipped_without_receipt"]:
         notes.append(
             f"processed_shipped_without_receipt={signals['processed_shipped_without_receipt']}"
+        )
+    if signals["unacknowledged_snapshot_refusals"]:
+        notes.append(
+            "unacknowledged_snapshot_refusals="
+            f"{signals['unacknowledged_snapshot_refusals']}"
         )
     if signals["fts_missing"]:
         notes.append(f"fts_missing={signals['fts_missing']}")

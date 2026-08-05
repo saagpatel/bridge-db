@@ -179,6 +179,16 @@ under-limit write returns `retention_policy="preserve_existing"` and
 snapshot FTS rows. The caller must not retry without a separate decision that
 explicitly permits `retention_policy="prune_oldest"`.
 
+Snapshot owners should call `get_snapshot_capacity(caller=..., data=...)`
+before assembling a write. A preserve-mode capacity refusal returns a durable
+`refusal_id`, `acknowledgement_required=true`, and an explicit `next_state`.
+The same bound owner must call `acknowledge_snapshot_refusal` with its decision;
+foreign principals cannot acknowledge it, and no acknowledgement authorizes
+history deletion. Unacknowledged refusals remain visible in `health` and
+`status`. The private Codex seed and one-time empty-system markdown migration
+use this same admission service, so there is no repository-owned direct writer
+that can silently prune snapshot history.
+
 `get_pending_handoffs` is a bounded paged read. It returns at most 100 rows by
 default (maximum 200); pass the last returned `id` as `before_id` to fetch the
 next page. Creation is rejected atomically when 100 rows are already `pending`
@@ -368,8 +378,8 @@ cleanup, clears degradation, or rewrites historical records.
 
 | Principal | Write capabilities | Boundaries |
 |---|---|---|
-| `codex` | `log_activity(caller="codex")`, `save_snapshot(caller="codex")`, `record_cost(caller="codex")`, source-owned `record_disposition(caller="codex")`, `pick_up_handoff`/`clear_handoff` where their gates allow it, and scoped CLI `--seal-recovery-batch` | Owns Codex truth and verification; a recovery seal proves the complete current image but does not authorize writing or refreshing `cc` snapshots or Claude.ai sections |
-| `cc` | `log_activity(caller="cc")`, `save_snapshot(caller="cc")`, `record_cost(caller="cc")`, source-owned `record_disposition(caller="cc")`, `pick_up_handoff`/`clear_handoff` where their gates allow it, and scoped CLI `--seal-recovery-batch` | Owns Claude Code state and session telemetry; a recovery seal proves the complete current image but does not authorize writing Codex snapshots or Claude.ai sections |
+| `codex` | `log_activity(caller="codex")`, `get_snapshot_capacity` / `save_snapshot` / owner-bound `acknowledge_snapshot_refusal`, `record_cost(caller="codex")`, source-owned `record_disposition(caller="codex")`, `pick_up_handoff`/`clear_handoff` where their gates allow it, and scoped CLI `--seal-recovery-batch` | Owns Codex truth and verification; a recovery seal proves the complete current image but does not authorize writing or refreshing `cc` snapshots or Claude.ai sections |
+| `cc` | `log_activity(caller="cc")`, `get_snapshot_capacity` / `save_snapshot` / owner-bound `acknowledge_snapshot_refusal`, `record_cost(caller="cc")`, source-owned `record_disposition(caller="cc")`, `pick_up_handoff`/`clear_handoff` where their gates allow it, and scoped CLI `--seal-recovery-batch` | Owns Claude Code state and session telemetry; a recovery seal proves the complete current image but does not authorize writing Codex snapshots or Claude.ai sections |
 | `claude_ai` | `update_section` for `career`, `speaking`, `research`, and `capabilities`; channel-bound `create_handoff(caller="claude_ai")`; compatibility file edits to those four sections followed by `sync_from_file` | Advisory and dispatch surface; MCP handoffs cannot mint operator trust and must not act as local execution proof |
 | `notion_os` | `log_activity(caller="notion_os")`, `record_cost(caller="notion_os")`, `record_disposition(caller="notion_os")` | Owns Notion-side receipts/activity it actually verified; must not infer project mappings beyond `notion_sync` |
 | `personal_ops` | `log_activity(caller="personal_ops")`, `record_cost(caller="personal_ops")`, `record_disposition(caller="personal_ops")` | Owns operator-facing coordination receipts; must not replace repo-local or bridge-db verification |
