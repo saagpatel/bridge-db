@@ -41,6 +41,11 @@ content-bound terminal receipt under
 2. It records one immutable `RecoverySealAttemptV1` containing the bound owner,
    batch ID, and complete live-source semantic fingerprint.
 3. It rotates or preservation-reuses the current anchor.
+   After an upward schema migration, the pre-migration anchor is accepted as
+   rotation evidence only when a disposable SQLite readback and its manifest
+   agree on the older schema and every other integrity, digest, semantic, and
+   permission check passes. Future-schema, corrupt, or ambiguous evidence is
+   refused and remains untouched.
 4. While SQLite's writer slot is still held, it rechecks the source fingerprint,
    digest, SQLite integrity, bounded semantic readback, and source-current
    status, then publishes one immutable `RecoverySealReceiptV1`.

@@ -256,7 +256,11 @@ that a live client has reloaded them.
   preservation-idempotent when the anchor is already current; otherwise it
   stages and verifies a new bundle, atomically exchanges it into the stable
   current path under SQLite's writer slot, and retains the prior bundle under a
-  timestamped `.superseded-*` sibling. Invalid evidence, source races,
+  timestamped `.superseded-*` sibling. After an upward schema migration,
+  rotation independently verifies the older anchor against its disposable
+  SQLite readback before preserving it and publishing the current-schema
+  bundle; future-schema, corrupt, or ambiguously versioned evidence still fails
+  closed. Invalid evidence, source races,
   unsupported atomic exchange, and post-exchange verification failures fail
   closed; a failed post-exchange verification rolls back to the previous
   current anchor.

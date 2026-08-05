@@ -174,6 +174,119 @@ async def test_rotate_current_anchor_is_preservation_idempotent(
     assert list(tmp_path.glob("bridge.db.recovery-anchor-v1.superseded-*")) == []
 
 
+async def test_rotate_older_schema_anchor_preserves_it_and_publishes_current(
+    tmp_path: Path,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    original = recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    anchor = recovery.recovery_anchor_path(db_path)
+    database = anchor / recovery.RECOVERY_DATABASE_NAME
+    prior_schema_version = SCHEMA_VERSION - 1
+    with sqlite3.connect(database) as changed:
+        changed.execute(f"PRAGMA user_version = {prior_schema_version}")
+    manifest_path = anchor / recovery.RECOVERY_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_schema_version"] = prior_schema_version
+    manifest["backup_bytes"] = database.stat().st_size
+    manifest["sha256"] = hashlib.sha256(database.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    original_database = database.read_bytes()
+    original_manifest = manifest_path.read_bytes()
+
+    result = recovery.rotate_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    superseded = Path(result["superseded_path"])
+    assert result["disposition"] == "rotated"
+    assert result["rotated"] is True
+    assert result["ready"] is True
+    assert result["schema_version"] == SCHEMA_VERSION
+    assert result["source_current"] is True
+    assert result["superseded_sha256"] == manifest["sha256"]
+    assert result["superseded_sha256"] != original["sha256"]
+    assert superseded.joinpath(recovery.RECOVERY_DATABASE_NAME).read_bytes() == (
+        original_database
+    )
+    assert superseded.joinpath(recovery.RECOVERY_MANIFEST_NAME).read_bytes() == (
+        original_manifest
+    )
+    previous = recovery.verify_recovery_anchor(
+        superseded,
+        expected_schema_version=prior_schema_version,
+    )
+    assert previous["ready"] is True
+    assert previous["sha256"] == manifest["sha256"]
+
+
+async def test_rotate_older_schema_anchor_with_digest_drift_fails_closed(
+    tmp_path: Path,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    anchor = recovery.recovery_anchor_path(db_path)
+    database = anchor / recovery.RECOVERY_DATABASE_NAME
+    prior_schema_version = SCHEMA_VERSION - 1
+    with sqlite3.connect(database) as changed:
+        changed.execute(f"PRAGMA user_version = {prior_schema_version}")
+    manifest_path = anchor / recovery.RECOVERY_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_schema_version"] = prior_schema_version
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    prior_bytes = database.read_bytes()
+
+    with pytest.raises(
+        RuntimeError,
+        match="current recovery anchor is not valid rotation evidence",
+    ):
+        recovery.rotate_recovery_anchor(
+            db_path,
+            expected_schema_version=SCHEMA_VERSION,
+        )
+
+    assert database.read_bytes() == prior_bytes
+    assert list(tmp_path.glob("bridge.db.recovery-anchor-v1.superseded-*")) == []
+
+
+async def test_rotate_future_schema_anchor_fails_closed(tmp_path: Path) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    anchor = recovery.recovery_anchor_path(db_path)
+    database = anchor / recovery.RECOVERY_DATABASE_NAME
+    future_schema_version = SCHEMA_VERSION + 1
+    with sqlite3.connect(database) as changed:
+        changed.execute(f"PRAGMA user_version = {future_schema_version}")
+    manifest_path = anchor / recovery.RECOVERY_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_schema_version"] = future_schema_version
+    manifest["backup_bytes"] = database.stat().st_size
+    manifest["sha256"] = hashlib.sha256(database.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    prior_bytes = database.read_bytes()
+
+    with pytest.raises(
+        RuntimeError,
+        match="current recovery anchor is not valid rotation evidence",
+    ):
+        recovery.rotate_recovery_anchor(
+            db_path,
+            expected_schema_version=SCHEMA_VERSION,
+        )
+
+    assert database.read_bytes() == prior_bytes
+    assert list(tmp_path.glob("bridge.db.recovery-anchor-v1.superseded-*")) == []
+
+
 async def test_rotate_invalid_anchor_fails_closed_and_preserves_it(
     tmp_path: Path,
 ) -> None:
