@@ -115,6 +115,34 @@ verified installed generation. Staging, rollback, drain, and no-secret-output
 Codex binding are specified in
 `docs/internal/EXECUTION-GENERATIONS.md`.
 
+Generation verification is exact-tree and fail-closed: unexpected bytes,
+owner/mode drift, interpreter drift, source-copy races, and generation-ID
+mismatch are non-green. The external interpreter executable is digest-bound,
+but its installed package, standard-library, shared-library, and OS environment
+is explicitly unmanaged; lockfile binding is not an environment-convergence
+claim.
+
+Each MCP process publishes a private owner/principal/generation lease with
+request timing, lifecycle reason, PID ancestry, and RSS. Obsolete generations
+refuse new requests, finish active requests, and cooperatively cancel their own
+server task. Lifecycle apply is exact-target and cannot terminate another
+process. Snapshot refusal storage stays an additive extension over core SQLite
+`user_version=23`, preserving open/read compatibility with exact previous
+merged generation `d7272d489873faa5ed84c81734636ffc8cecb095`; rollback loses
+the refusal API until roll-forward but does not discard its rows. Activation or
+rollback still requires current recovery-anchor/seal evidence.
+
+Claude Code `/Users/d/.claude.json` and Claude Desktop
+`/Users/d/Library/Application Support/Claude/claude_desktop_config.json` converge
+through `bridge_db.client_rebinding`: only the exact legacy `bridge-db`
+command/args are changed, environment values are preserved without output, and
+each target gets a private exact-byte backup plus digest-bound restore. Codex
+uses the source-owned `config/bridge-db-mcp-immutable` install input, which
+parses only the two reviewed credential keys before execing the stable launcher.
+The checkpoint LaunchAgent input invokes that same launcher with `--checkpoint`
+through the existing receipt wrapper. Live installation and reconnect/reload
+remain separate governed effects.
+
 ### vibe-code-handoff (updated workflow)
 
 **Fallback (file-based):**

@@ -15,6 +15,8 @@ import json
 import os
 import stat
 import tempfile
+from collections.abc import Generator, Iterable
+from contextlib import contextmanager
 from datetime import UTC, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -47,7 +49,7 @@ def _guard_target(path: Path, *, allow_missing: bool) -> Path:
     if parent.resolve(strict=True) != parent:
         raise SecureBindingError("binding.parent_symlink_refused")
     parent_stat = parent.stat()
-    if parent_stat.st_uid != os.getuid() or stat.S_IMODE(parent_stat.st_mode) & 0o022:
+    if parent_stat.st_uid != os.getuid() or stat.S_IMODE(parent_stat.st_mode) & 0o077:
         raise SecureBindingError("binding.parent_not_private")
     if path.exists() or path.is_symlink():
         if path.is_symlink() or not path.is_file():
@@ -118,7 +120,9 @@ def _read_registry(path: Path) -> dict[str, Any]:
 
 
 def _stage_private(path: Path, content: bytes) -> Path:
-    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.pending-")
+    descriptor, name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.pending-"
+    )
     temporary = Path(name)
     try:
         os.fchmod(descriptor, 0o600)
@@ -150,6 +154,83 @@ def _restore_exact(path: Path, previous: bytes | None) -> None:
     _fsync_directory(path.parent)
 
 
+@contextmanager
+def _target_parent_locks(paths: Iterable[Path]) -> Generator[None, None, None]:
+    """Lock every target parent in canonical order to avoid races and deadlocks."""
+    lock_paths = sorted(
+        {path.parent / ".bridge-db-secure-binding.lock" for path in paths},
+        key=lambda path: str(path),
+    )
+    descriptors: list[int] = []
+    try:
+        for lock_path in lock_paths:
+            flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(lock_path, flags, 0o600)
+            except OSError as exc:
+                raise SecureBindingError("binding.lock_invalid") from exc
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) & 0o077
+            ):
+                os.close(descriptor)
+                raise SecureBindingError("binding.lock_invalid")
+            os.fchmod(descriptor, 0o600)
+            descriptors.append(descriptor)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        for descriptor in reversed(descriptors):
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
+
+def verify_principal_binding(
+    *, principals_path: Path, binding_path: Path
+) -> dict[str, Any]:
+    """Verify that the private binding resolves to one current registry grant."""
+    result: dict[str, Any] = {
+        "schema": "BridgeSecurePrincipalBindingReadbackV1",
+        "ok": False,
+        "principals_path": str(principals_path),
+        "binding_path": str(binding_path),
+        "secret_output": "none",
+    }
+    try:
+        principals_path = _guard_target(principals_path, allow_missing=False)
+        binding_path = _guard_target(binding_path, allow_missing=False)
+        lines = binding_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError, SecureBindingError):
+        return {**result, "reason_code": "binding.readback_target_invalid"}
+    token_prefix = "BRIDGE_DB_PRINCIPAL_TOKEN="
+    auth_prefix = "BRIDGE_DB_AUTH_MODE="
+    if (
+        len(lines) != 2
+        or not lines[0].startswith(token_prefix)
+        or not lines[1].startswith(auth_prefix)
+    ):
+        return {**result, "reason_code": "binding.readback_shape_invalid"}
+    secret = lines[0][len(token_prefix) :]
+    auth_mode = lines[1][len(auth_prefix) :]
+    if len(secret.encode("utf-8")) < 32 or auth_mode not in ("warn", "enforce"):
+        return {**result, "reason_code": "binding.readback_shape_invalid"}
+    grant = load_principal_grants(principals_path).get(hash_token(secret))
+    if grant is None:
+        return {**result, "reason_code": "binding.readback_identity_mismatch"}
+    return {
+        **result,
+        "ok": True,
+        "caller": grant.caller,
+        "generation": grant.generation,
+        "auth_mode": auth_mode,
+        "registry_readback": "verified",
+        "binding_readback": "verified",
+        "mode_readback": "0600",
+    }
+
+
 def bind_principal_from_fd(
     *,
     caller: str,
@@ -171,94 +252,81 @@ def bind_principal_from_fd(
         raise SecureBindingError("binding.targets_collide")
     secret = _read_secret_fd(secret_fd)
 
-    lock_path = principals_path.parent / ".bridge-db-secure-binding.lock"
-    lock_descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     registry_temporary: Path | None = None
     binding_temporary: Path | None = None
-    try:
-        os.fchmod(lock_descriptor, 0o600)
-        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
-        # Revalidate after acquiring the lock so a target swap cannot race the
-        # preflight checks.
-        _guard_target(principals_path, allow_missing=True)
-        _guard_target(binding_path, allow_missing=True)
-        registry = _read_registry(principals_path)
-        principals = cast(dict[str, Any], registry["principals"])
-        valid_existing = load_principal_grants(principals_path)
-        if principals and len(valid_existing) != len(principals):
-            raise SecureBindingError("binding.registry_grant_invalid")
-        old_entry = principals.get(caller)
-        old_generation = (
-            cast(dict[str, Any], old_entry).get("generation", 0)
-            if isinstance(old_entry, dict)
-            else 0
-        )
-        generation = old_generation + 1 if isinstance(old_generation, int) else 1
-        if isinstance(old_generation, bool) or generation < 1:
-            raise SecureBindingError("binding.registry_generation_invalid")
-        issued_at = clock.now().astimezone(UTC)
-        expires_at = issued_at + timedelta(days=GRANT_TTL_DAYS)
-        principals[caller] = {
-            "token_sha256": hash_token(secret),
-            "issued_at": issued_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "expires_at": expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "generation": generation,
-            "scopes": scopes_for_caller(caller),
-        }
-        registry_bytes = (
-            json.dumps(registry, sort_keys=True, indent=2) + "\n"
-        ).encode("utf-8")
-        binding_bytes = (
-            f"BRIDGE_DB_PRINCIPAL_TOKEN={secret}\n"
-            f"BRIDGE_DB_AUTH_MODE={auth_mode}\n"
-        ).encode("utf-8")
-        previous_registry = (
-            principals_path.read_bytes() if principals_path.exists() else None
-        )
-        previous_binding = binding_path.read_bytes() if binding_path.exists() else None
-        registry_temporary = _stage_private(principals_path, registry_bytes)
-        binding_temporary = _stage_private(binding_path, binding_bytes)
+    with _target_parent_locks((principals_path, binding_path)):
         try:
-            os.replace(registry_temporary, principals_path)
-            registry_temporary = None
-            _fsync_directory(principals_path.parent)
-            os.replace(binding_temporary, binding_path)
-            binding_temporary = None
-            _fsync_directory(binding_path.parent)
-        except Exception as exc:
-            _restore_exact(principals_path, previous_registry)
-            _restore_exact(binding_path, previous_binding)
-            raise SecureBindingError("binding.atomic_replace_failed") from exc
+            # Revalidate after acquiring the lock so a target swap cannot race the
+            # preflight checks.
+            _guard_target(principals_path, allow_missing=True)
+            _guard_target(binding_path, allow_missing=True)
+            registry = _read_registry(principals_path)
+            principals = cast(dict[str, Any], registry["principals"])
+            valid_existing = load_principal_grants(principals_path)
+            if principals and len(valid_existing) != len(principals):
+                raise SecureBindingError("binding.registry_grant_invalid")
+            old_entry = principals.get(caller)
+            old_generation = (
+                cast(dict[str, Any], old_entry).get("generation", 0)
+                if isinstance(old_entry, dict)
+                else 0
+            )
+            generation = old_generation + 1 if isinstance(old_generation, int) else 1
+            if isinstance(old_generation, bool) or generation < 1:
+                raise SecureBindingError("binding.registry_generation_invalid")
+            issued_at = clock.now().astimezone(UTC)
+            expires_at = issued_at + timedelta(days=GRANT_TTL_DAYS)
+            principals[caller] = {
+                "token_sha256": hash_token(secret),
+                "issued_at": issued_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "expires_at": expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "generation": generation,
+                "scopes": scopes_for_caller(caller),
+            }
+            registry_bytes = (
+                json.dumps(registry, sort_keys=True, indent=2) + "\n"
+            ).encode("utf-8")
+            binding_bytes = (
+                f"BRIDGE_DB_PRINCIPAL_TOKEN={secret}\nBRIDGE_DB_AUTH_MODE={auth_mode}\n"
+            ).encode("utf-8")
+            previous_registry = (
+                principals_path.read_bytes() if principals_path.exists() else None
+            )
+            previous_binding = (
+                binding_path.read_bytes() if binding_path.exists() else None
+            )
+            registry_temporary = _stage_private(principals_path, registry_bytes)
+            binding_temporary = _stage_private(binding_path, binding_bytes)
+            try:
+                os.replace(registry_temporary, principals_path)
+                registry_temporary = None
+                _fsync_directory(principals_path.parent)
+                os.replace(binding_temporary, binding_path)
+                binding_temporary = None
+                _fsync_directory(binding_path.parent)
+            except Exception as exc:
+                _restore_exact(principals_path, previous_registry)
+                _restore_exact(binding_path, previous_binding)
+                raise SecureBindingError("binding.atomic_replace_failed") from exc
 
-        if stat.S_IMODE(principals_path.stat().st_mode) != 0o600 or stat.S_IMODE(
-            binding_path.stat().st_mode
-        ) != 0o600:
-            _restore_exact(principals_path, previous_registry)
-            _restore_exact(binding_path, previous_binding)
-            raise SecureBindingError("binding.readback_mode_mismatch")
-        grants = load_principal_grants(principals_path)
-        grant = grants.get(hash_token(secret))
-        binding_lines = binding_path.read_text(encoding="utf-8").splitlines()
-        if (
-            grant is None
-            or grant.caller != caller
-            or grant.generation != generation
-            or binding_lines
-            != [
-                "BRIDGE_DB_PRINCIPAL_TOKEN=" + secret,
-                "BRIDGE_DB_AUTH_MODE=" + auth_mode,
-            ]
-        ):
-            _restore_exact(principals_path, previous_registry)
-            _restore_exact(binding_path, previous_binding)
-            raise SecureBindingError("binding.readback_identity_mismatch")
-    finally:
-        if registry_temporary is not None:
-            registry_temporary.unlink(missing_ok=True)
-        if binding_temporary is not None:
-            binding_temporary.unlink(missing_ok=True)
-        fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
-        os.close(lock_descriptor)
+            readback = verify_principal_binding(
+                principals_path=principals_path,
+                binding_path=binding_path,
+            )
+            if (
+                not readback["ok"]
+                or readback.get("caller") != caller
+                or readback.get("generation") != generation
+                or readback.get("auth_mode") != auth_mode
+            ):
+                _restore_exact(principals_path, previous_registry)
+                _restore_exact(binding_path, previous_binding)
+                raise SecureBindingError("binding.readback_identity_mismatch")
+        finally:
+            if registry_temporary is not None:
+                registry_temporary.unlink(missing_ok=True)
+            if binding_temporary is not None:
+                binding_temporary.unlink(missing_ok=True)
 
     return {
         "schema": "BridgeSecurePrincipalBindingReceiptV1",
@@ -272,7 +340,12 @@ def bind_principal_from_fd(
         "binding_readback": "verified",
         "mode_readback": "0600",
         "secret_output": "none",
-        "rollback": "in_memory_exact_restore_on_partial_replace",
+        "rollback": (
+            "ordered_locked_replace_with_verified_rollback_on_caught_failure; "
+            "crash_between_replaces_requires_retry_or_recovery"
+        ),
+        "crash_recovery": "retry_required_if_interrupted_between_target_replaces",
+        "lock_scope": "ordered_target_parent_locks",
     }
 
 

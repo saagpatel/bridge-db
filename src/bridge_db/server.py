@@ -1,18 +1,22 @@
 """FastMCP server: lifespan, AppContext, and tool registration."""
 
+import asyncio
 import logging
 import os
 import sys
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Callable, Sequence
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 
 import aiosqlite
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ContentBlock
 
 from bridge_db import clock, config
 from bridge_db.db import open_db
+from bridge_db.tenancy import TenancyTracker, owner_for_principal, tenancy_root
 
 # Logging — stderr only (stdout is the MCP JSON-RPC channel)
 logging.basicConfig(
@@ -32,12 +36,54 @@ class AppContext:
     generation_id: str | None = None
     generation_state: str = "mutable_direct_path"
     runtime_generation: dict[str, Any] | None = None
+    tenancy_tracker: Any | None = None
+
+
+class InstrumentedFastMCP(FastMCP):
+    """Account every MCP tool request in the process-owned tenancy lease."""
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any]
+    ) -> Sequence[ContentBlock] | dict[str, Any]:
+        context = self.get_context()
+        tracker = getattr(
+            context.request_context.lifespan_context, "tenancy_tracker", None
+        )
+        if tracker is None:
+            return await super().call_tool(name, arguments)
+        tracker.request_started(name)
+        outcome: Literal["succeeded", "failed"] = "failed"
+        try:
+            result = await super().call_tool(name, arguments)
+            outcome = "succeeded"
+            return result
+        finally:
+            tracker.request_finished(name, outcome=outcome)
+
+
+async def monitor_tenancy_retirement(
+    tracker: TenancyTracker,
+    request_shutdown: Callable[[], None],
+    *,
+    poll_seconds: float = 1.0,
+) -> None:
+    """Cooperatively stop an idle generation after its exact drain marker appears."""
+    while True:
+        await asyncio.sleep(poll_seconds)
+        if tracker.retirement_ready():
+            request_shutdown()
+            return
 
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # noqa: ARG001
     from bridge_db.audit import log_audit
-    from bridge_db.auth import auth_mode, hash_token, load_principal_grants, resolve_grant
+    from bridge_db.auth import (
+        auth_mode,
+        hash_token,
+        load_principal_grants,
+        resolve_grant,
+    )
     from bridge_db.execution_generation import runtime_generation_identity
 
     raw_token = os.environ.get("BRIDGE_DB_PRINCIPAL_TOKEN")
@@ -69,8 +115,37 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # 
         runtime_generation.get("generation_id") or "mutable",
         runtime_generation["state"],
     )
-    db = await open_db(config.DB_PATH)
+    manifest_path = runtime_generation.get("manifest_path")
+    execution_root = (
+        Path(str(manifest_path)).parents[2]
+        if runtime_generation["state"] == "verified" and manifest_path
+        else None
+    )
+    tracker = TenancyTracker(
+        root=tenancy_root(),
+        owner=owner_for_principal(principal),
+        principal=principal,
+        generation=runtime_generation.get("generation_id"),
+        execution_root=execution_root,
+    )
+    tracker.start()
+    server_task = asyncio.current_task()
+    if server_task is None:
+        tracker.close(reason="server_task_unavailable")
+        raise RuntimeError("tenancy.server_task_unavailable")
+    cooperative_shutdown = asyncio.Event()
+
+    def request_cooperative_shutdown() -> None:
+        cooperative_shutdown.set()
+        server_task.cancel()
+
+    monitor_task = asyncio.create_task(
+        monitor_tenancy_retirement(tracker, request_cooperative_shutdown)
+    )
+    db: aiosqlite.Connection | None = None
+    close_reason = "normal_close"
     try:
+        db = await open_db(config.DB_PATH)
         yield AppContext(
             db=db,
             principal=principal,
@@ -79,13 +154,31 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # 
             generation_id=runtime_generation.get("generation_id"),
             generation_state=str(runtime_generation["state"]),
             runtime_generation=runtime_generation,
+            tenancy_tracker=tracker,
         )
+    except asyncio.CancelledError:
+        close_reason = (
+            "obsolete_generation_close"
+            if cooperative_shutdown.is_set()
+            else "server_cancelled"
+        )
+        raise
+    except BaseException:
+        close_reason = "server_error"
+        raise
     finally:
-        await db.close()
+        monitor_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await monitor_task
+        try:
+            if db is not None:
+                await db.close()
+        finally:
+            tracker.close(reason=close_reason)
         logger.info("bridge-db shut down")
 
 
-mcp = FastMCP(
+mcp = InstrumentedFastMCP(
     "bridge-db",
     instructions=(
         "SQLite-backed bridge for shared state between Claude.ai, Claude Code, "

@@ -18,6 +18,7 @@ logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
 SCHEMA_VERSION = 23
+SNAPSHOT_REFUSAL_EXTENSION_SCHEMA = "BridgeSnapshotRefusalSchemaV1"
 
 # A migration post-hook runs after its DDL, before the version bump+commit
 # (e.g. FTS repopulation). Its return value is ignored.
@@ -888,7 +889,11 @@ async def _backup_db_file(db: aiosqlite.Connection, label: str) -> None:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as check:
             integrity = check.execute("PRAGMA integrity_check").fetchone()
             backup_version = int(check.execute("PRAGMA user_version").fetchone()[0])
-        if integrity is None or integrity[0] != "ok" or backup_version != expected_version:
+        if (
+            integrity is None
+            or integrity[0] != "ok"
+            or backup_version != expected_version
+        ):
             raise RuntimeError(
                 f"migration backup {path} failed SQLite/version verification; "
                 "refusing destructive migration"
@@ -1183,6 +1188,8 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         raise RuntimeError(
             f"Migration ladder ended at v{current_version}, expected v{SCHEMA_VERSION}"
         )
+    # Snapshot refusals are an additive v1 extension over the v23 core schema.
+    # Exact previous merged generation d7272d4 safely ignores and preserves it.
     if not await _table_exists(db, "snapshot_refusals"):
         await db.executescript(_SNAPSHOT_REFUSAL_EXTENSION_DDL)
         await db.commit()

@@ -138,6 +138,12 @@ async def run_status(*, now: datetime | None = None) -> bool:
         f" id={summary['signals']['execution_generation_id'] or 'none'}"
     )
     print(
+        "  MCP tenancy:"
+        f" state={summary['signals']['tenancy_state']},"
+        f" active={summary['signals']['tenancy_active_count']},"
+        f" active_requests={summary['signals']['tenancy_active_request_count']}"
+    )
+    print(
         "  DB:"
         f" exists={summary['db']['exists']},"
         f" schema=v{summary['db']['schema_version']}"
@@ -279,6 +285,8 @@ def _status_attention(summary: dict[str, Any]) -> str | None:
             "execution_generation_state="
             f"{signals['execution_generation_state']}"
         )
+    if signals["tenancy_state"] == "unverified":
+        notes.append("tenancy_state=unverified")
     if signals["fts_missing"]:
         notes.append(f"fts_missing={signals['fts_missing']}")
     if signals["fts_orphaned"]:

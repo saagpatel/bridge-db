@@ -8,8 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from bridge_db.auth import hash_token, load_principal_grants
-from bridge_db.secure_binding import SecureBindingError, bind_principal_from_fd
+from bridge_db.auth import hash_token, load_principal_grants, resolve_grant
+from bridge_db.secure_binding import (
+    SecureBindingError,
+    bind_principal_from_fd,
+    verify_principal_binding,
+)
 
 
 def _targets(tmp_path: Path) -> tuple[Path, Path]:
@@ -53,6 +57,11 @@ def test_secure_binding_rotates_and_emits_no_secret_material(tmp_path: Path) -> 
 
     assert first["generation"] == 1
     assert second["generation"] == 2
+    assert second["lock_scope"] == "ordered_target_parent_locks"
+    assert second["rollback"] == (
+        "ordered_locked_replace_with_verified_rollback_on_caught_failure; "
+        "crash_between_replaces_requires_retry_or_recovery"
+    )
     assert first["secret_output"] == "none"
     serialized = json.dumps([first, second], sort_keys=True)
     assert first_secret not in serialized
@@ -68,6 +77,10 @@ def test_secure_binding_rotates_and_emits_no_secret_material(tmp_path: Path) -> 
         f"BRIDGE_DB_PRINCIPAL_TOKEN={second_secret}",
         "BRIDGE_DB_AUTH_MODE=warn",
     ]
+    for parent in (registry.parent, binding.parent):
+        lock = parent / ".bridge-db-secure-binding.lock"
+        assert lock.is_file()
+        assert lock.stat().st_mode & 0o777 == 0o600
 
 
 def test_secure_binding_rejects_stdio_and_non_codex_callers(tmp_path: Path) -> None:
@@ -98,7 +111,9 @@ def test_secure_binding_rejects_stdio_and_non_codex_callers(tmp_path: Path) -> N
 def test_secure_binding_rejects_insecure_regular_secret_file(tmp_path: Path) -> None:
     registry, binding = _targets(tmp_path)
     secret_path = tmp_path / "secret.txt"
-    secret_path.write_text("fixture-secret-abcdefghijklmnopqrstuvwxyz", encoding="utf-8")
+    secret_path.write_text(
+        "fixture-secret-abcdefghijklmnopqrstuvwxyz", encoding="utf-8"
+    )
     secret_path.chmod(0o644)
     descriptor = os.open(secret_path, os.O_RDONLY)
     try:
@@ -132,6 +147,46 @@ def test_secure_binding_rejects_symlink_target(tmp_path: Path) -> None:
     finally:
         os.close(descriptor)
     assert refused.value.reason_code == "binding.target_symlink_or_special_refused"
+
+
+def test_secure_binding_rejects_non_private_target_parent(tmp_path: Path) -> None:
+    registry, binding = _targets(tmp_path)
+    binding.parent.chmod(0o755)
+    descriptor = _secret_fd("fixture-secret-abcdefghijklmnopqrstuvwxyz")
+    try:
+        with pytest.raises(SecureBindingError) as refused:
+            bind_principal_from_fd(
+                caller="codex",
+                secret_fd=descriptor,
+                principals_path=registry,
+                binding_path=binding,
+            )
+    finally:
+        os.close(descriptor)
+    assert refused.value.reason_code == "binding.parent_not_private"
+
+
+def test_secure_binding_rejects_symlinked_lock_in_either_parent(tmp_path: Path) -> None:
+    registry, binding = _targets(tmp_path)
+    lock_target = tmp_path / "lock-target"
+    lock_target.write_text("fixture\n", encoding="utf-8")
+    lock_target.chmod(0o600)
+    (binding.parent / ".bridge-db-secure-binding.lock").symlink_to(lock_target)
+    descriptor = _secret_fd("fixture-secret-abcdefghijklmnopqrstuvwxyz")
+    try:
+        with pytest.raises(SecureBindingError) as refused:
+            bind_principal_from_fd(
+                caller="codex",
+                secret_fd=descriptor,
+                principals_path=registry,
+                binding_path=binding,
+            )
+    finally:
+        os.close(descriptor)
+
+    assert refused.value.reason_code == "binding.lock_invalid"
+    assert not registry.exists()
+    assert not binding.exists()
 
 
 def test_secure_binding_restores_both_files_after_partial_replace(
@@ -168,3 +223,31 @@ def test_secure_binding_restores_both_files_after_partial_replace(
     assert failed.value.reason_code == "binding.atomic_replace_failed"
     assert registry.read_bytes() == old_registry
     assert binding.read_bytes() == old_binding
+
+
+def test_split_binding_pair_cannot_authenticate_or_read_back_green(
+    tmp_path: Path,
+) -> None:
+    registry, binding = _targets(tmp_path)
+    registered_secret = "fixture-registered-secret-abcdefghijklmnopqrstuvwxyz"
+    split_secret = "fixture-split-secret-abcdefghijklmnopqrstuvwxyz"
+    _bind(secret=registered_secret, registry=registry, binding=binding)
+    binding.write_text(
+        f"BRIDGE_DB_PRINCIPAL_TOKEN={split_secret}\nBRIDGE_DB_AUTH_MODE=warn\n",
+        encoding="utf-8",
+    )
+    binding.chmod(0o600)
+
+    readback = verify_principal_binding(
+        principals_path=registry,
+        binding_path=binding,
+    )
+
+    assert readback["ok"] is False
+    assert readback["reason_code"] == "binding.readback_identity_mismatch"
+    serialized = json.dumps(readback, sort_keys=True)
+    assert registered_secret not in serialized
+    assert split_secret not in serialized
+    assert hash_token(registered_secret) not in serialized
+    assert hash_token(split_secret) not in serialized
+    assert resolve_grant(split_secret, load_principal_grants(registry)) is None

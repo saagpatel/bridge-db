@@ -30,16 +30,24 @@ GENERATION_SCHEMA = "BridgeExecutionGenerationV1"
 ACTIVATION_SCHEMA = "BridgeExecutionActivationV1"
 ACTIVATION_RECEIPT_SCHEMA = "BridgeExecutionActivationReceiptV1"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GENERATION_RE = re.compile(r"^[0-9a-f]{12}-[0-9a-f]{12}$")
+_RESERVED_RELEASE_PATHS = frozenset({"generation-manifest.json", "bin/bridge-db-mcp"})
 
 DEFAULT_DEPENDENCY_PATHS = ("pyproject.toml", "uv.lock")
 DEFAULT_CONTRACT_PATHS = (
     ".codex/verify.commands",
+    "config/bridge-db-mcp-immutable",
+    "config/com.saagar.bridge-db-checkpoint.plist",
     "integration-spec.md",
     "src/bridge_db/auth.py",
+    "src/bridge_db/client_rebinding.py",
+    "src/bridge_db/db.py",
     "src/bridge_db/execution_generation.py",
     "src/bridge_db/secure_binding.py",
     "src/bridge_db/server.py",
+    "src/bridge_db/snapshot_service.py",
+    "src/bridge_db/tenancy.py",
     "src/bridge_db/tools/__init__.py",
 )
 
@@ -210,16 +218,33 @@ def _copy_tracked_source(
 
 
 def _make_launcher(
-    *, release_path: Path, python_executable: Path, generation_id: str
+    *,
+    release_path: Path,
+    python_executable: Path,
+    python_resolved: Path,
+    python_sha256: str,
+    generation_id: str,
 ) -> bytes:
     if any(character in str(python_executable) for character in ("\n", "\r", " ")):
         raise GenerationContractError("generation.python_path_not_shebang_safe")
     body = f"""#!{python_executable}
+import hashlib
 import os
+from pathlib import Path
 import runpy
 import sys
 
 release = {str(release_path)!r}
+expected_python = {str(python_resolved)!r}
+expected_python_sha256 = {python_sha256!r}
+observed_python = Path(sys.executable).resolve(strict=True)
+digest = hashlib.sha256()
+with observed_python.open("rb") as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(chunk)
+if str(observed_python) != expected_python or digest.hexdigest() != expected_python_sha256:
+    sys.stderr.write("generation.python_identity_mismatch\\n")
+    raise SystemExit(78)
 os.environ["BRIDGE_DB_GENERATION_MANIFEST"] = release + "/generation-manifest.json"
 os.environ["BRIDGE_DB_GENERATION_ID"] = {generation_id!r}
 sys.path.insert(0, release + "/src")
@@ -258,23 +283,233 @@ def _release_path(root: Path, generation_id: str) -> Path:
     return root / "releases" / generation_id
 
 
+def _validated_manifest_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    source_files = manifest.get("source_files")
+    if not isinstance(source_files, list):
+        raise GenerationContractError("generation.manifest_files_invalid")
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_entry in cast(list[object], source_files):
+        if not isinstance(raw_entry, dict):
+            raise GenerationContractError("generation.manifest_files_invalid")
+        entry = {
+            str(key): value for key, value in cast(dict[object, Any], raw_entry).items()
+        }
+        if set(entry) != {"path", "sha256", "executable"}:
+            raise GenerationContractError("generation.manifest_file_shape_invalid")
+        path_value = entry["path"]
+        digest = entry["sha256"]
+        executable = entry["executable"]
+        if not isinstance(path_value, str) or not path_value:
+            raise GenerationContractError("generation.manifest_path_invalid")
+        relative = Path(path_value)
+        if (
+            relative.is_absolute()
+            or relative == Path(".")
+            or ".." in relative.parts
+            or relative.as_posix() != path_value
+            or path_value in _RESERVED_RELEASE_PATHS
+        ):
+            raise GenerationContractError("generation.manifest_path_invalid")
+        if path_value in seen:
+            raise GenerationContractError("generation.manifest_path_duplicate")
+        if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
+            raise GenerationContractError("generation.manifest_digest_invalid")
+        if not isinstance(executable, bool):
+            raise GenerationContractError("generation.manifest_mode_invalid")
+        seen.add(path_value)
+        entries.append(entry)
+    if entries != sorted(entries, key=lambda item: str(item["path"])):
+        raise GenerationContractError("generation.manifest_order_invalid")
+    return entries
+
+
+def _verify_selected_digest(
+    manifest: dict[str, Any],
+    entries: list[dict[str, Any]],
+    *,
+    kind: Literal["dependency", "contract"],
+    expected_paths: tuple[str, ...],
+) -> None:
+    paths = manifest.get(f"{kind}_paths")
+    if paths != list(expected_paths):
+        raise GenerationContractError(f"generation.{kind}_paths_mismatch")
+    selected = _selected_entries(entries, expected_paths, kind=kind)
+    if _entries_digest(selected) != manifest.get(f"{kind}_sha256"):
+        raise GenerationContractError(f"generation.{kind}_digest_mismatch")
+
+
+def _verify_python_binding(manifest: dict[str, Any]) -> tuple[Path, str]:
+    executable_value = manifest.get("python_executable")
+    resolved_value = manifest.get("python_executable_resolved")
+    expected_digest = manifest.get("python_sha256")
+    if (
+        not isinstance(executable_value, str)
+        or not isinstance(resolved_value, str)
+        or not isinstance(expected_digest, str)
+        or not _SHA256_RE.fullmatch(expected_digest)
+    ):
+        raise GenerationContractError("generation.python_binding_invalid")
+    executable = Path(executable_value)
+    expected_resolved = Path(resolved_value)
+    if (
+        not executable.is_absolute()
+        or not expected_resolved.is_absolute()
+        or any(character in executable_value for character in ("\n", "\r", " "))
+    ):
+        raise GenerationContractError("generation.python_binding_invalid")
+    try:
+        observed_resolved = executable.resolve(strict=True)
+        metadata = observed_resolved.lstat()
+    except OSError as exc:
+        raise GenerationContractError("generation.python_executable_missing") from exc
+    if observed_resolved != expected_resolved or not stat.S_ISREG(metadata.st_mode):
+        raise GenerationContractError("generation.python_identity_mismatch")
+    if not metadata.st_mode & stat.S_IXUSR:
+        raise GenerationContractError("generation.python_not_executable")
+    if _sha256_file(observed_resolved) != expected_digest:
+        raise GenerationContractError("generation.python_digest_mismatch")
+    return executable, expected_digest
+
+
+def _verify_exact_release_tree(release: Path, entries: list[dict[str, Any]]) -> None:
+    expected_file_modes = {
+        str(entry["path"]): 0o555 if entry["executable"] else 0o444 for entry in entries
+    }
+    expected_file_modes["generation-manifest.json"] = 0o444
+    expected_file_modes["bin/bridge-db-mcp"] = 0o555
+    expected_directories: set[str] = set()
+    for name in expected_file_modes:
+        parent = Path(name).parent
+        while parent != Path("."):
+            expected_directories.add(parent.as_posix())
+            parent = parent.parent
+
+    release_metadata = release.lstat()
+    if (
+        release_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(release_metadata.st_mode) != 0o555
+    ):
+        raise GenerationContractError("generation.release_root_metadata_mismatch")
+    observed_files: set[str] = set()
+    observed_directories: set[str] = set()
+    for candidate in release.rglob("*"):
+        relative = candidate.relative_to(release).as_posix()
+        metadata = candidate.lstat()
+        if metadata.st_uid != os.getuid():
+            raise GenerationContractError("generation.release_owner_mismatch")
+        if stat.S_ISLNK(metadata.st_mode):
+            raise GenerationContractError("generation.release_symlink_refused")
+        if stat.S_ISDIR(metadata.st_mode):
+            observed_directories.add(relative)
+            if stat.S_IMODE(metadata.st_mode) != 0o555:
+                raise GenerationContractError(
+                    "generation.release_directory_mode_mismatch"
+                )
+        elif stat.S_ISREG(metadata.st_mode):
+            observed_files.add(relative)
+            expected_mode = expected_file_modes.get(relative)
+            if expected_mode is None:
+                raise GenerationContractError("generation.release_extra_file")
+            if stat.S_IMODE(metadata.st_mode) != expected_mode:
+                raise GenerationContractError("generation.release_file_mode_mismatch")
+        else:
+            raise GenerationContractError("generation.release_special_file_refused")
+    if observed_files != set(expected_file_modes):
+        raise GenerationContractError("generation.release_file_set_mismatch")
+    if observed_directories != expected_directories:
+        raise GenerationContractError("generation.release_directory_set_mismatch")
+
+
 def verify_generation(root: Path, generation_id: str) -> dict[str, Any]:
     root = _guard_absolute_directory(root)
+    _guard_absolute_directory(root / "releases")
     release = _release_path(root, generation_id)
     if not release.exists() or not release.is_dir() or release.is_symlink():
         raise GenerationContractError("generation.release_missing")
     if release.resolve(strict=True).parent != (root / "releases").resolve(strict=True):
         raise GenerationContractError("generation.release_escape_refused")
-    manifest = _read_manifest(release / "generation-manifest.json")
+    manifest_path = release / "generation-manifest.json"
+    try:
+        manifest_metadata = manifest_path.lstat()
+    except OSError as exc:
+        raise GenerationContractError("generation.manifest_unreadable") from exc
+    if (
+        not stat.S_ISREG(manifest_metadata.st_mode)
+        or manifest_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(manifest_metadata.st_mode) != 0o444
+    ):
+        raise GenerationContractError("generation.manifest_metadata_mismatch")
+    manifest = _read_manifest(manifest_path)
     if (
         manifest.get("schema") != GENERATION_SCHEMA
         or manifest.get("generation_id") != generation_id
     ):
         raise GenerationContractError("generation.manifest_identity_mismatch")
-    source_files = manifest.get("source_files")
-    if not isinstance(source_files, list):
-        raise GenerationContractError("generation.manifest_files_invalid")
-    entries = cast(list[dict[str, Any]], source_files)
+    expected_manifest_fields = {
+        "schema",
+        "generation_id",
+        "reviewed_source_sha",
+        "source_tree_sha256",
+        "dependency_sha256",
+        "dependency_paths",
+        "contract_sha256",
+        "contract_paths",
+        "python_executable",
+        "python_executable_resolved",
+        "python_sha256",
+        "python_binding",
+        "dependency_environment_state",
+        "database_rollback_contract",
+        "launcher_sha256",
+        "source_files",
+    }
+    if set(manifest) != expected_manifest_fields:
+        raise GenerationContractError("generation.manifest_shape_invalid")
+    reviewed_sha = manifest.get("reviewed_source_sha")
+    if not isinstance(reviewed_sha, str) or not _SHA_RE.fullmatch(reviewed_sha):
+        raise GenerationContractError("generation.reviewed_sha_invalid")
+    entries = _validated_manifest_entries(manifest)
+    source_tree_digest = _entries_digest(entries)
+    if source_tree_digest != manifest.get("source_tree_sha256"):
+        raise GenerationContractError("generation.source_tree_digest_mismatch")
+    expected_generation_id = f"{reviewed_sha[:12]}-{source_tree_digest[:12]}"
+    if generation_id != expected_generation_id:
+        raise GenerationContractError("generation.id_content_mismatch")
+    _verify_selected_digest(
+        manifest,
+        entries,
+        kind="dependency",
+        expected_paths=DEFAULT_DEPENDENCY_PATHS,
+    )
+    _verify_selected_digest(
+        manifest,
+        entries,
+        kind="contract",
+        expected_paths=DEFAULT_CONTRACT_PATHS,
+    )
+    if (
+        manifest.get("dependency_environment_state")
+        != "external_unmanaged_lockfiles_only"
+    ):
+        raise GenerationContractError("generation.dependency_claim_invalid")
+    if (
+        manifest.get("python_binding")
+        != "external_executable_digest_verified_not_environment_immutable"
+    ):
+        raise GenerationContractError("generation.python_claim_invalid")
+    if manifest.get("database_rollback_contract") != {
+        "core_user_version": 23,
+        "previous_merged_generation_user_version": 23,
+        "previous_merged_generation_sha": (
+            "d7272d489873faa5ed84c81734636ffc8cecb095"
+        ),
+        "snapshot_refusal_extension": "BridgeSnapshotRefusalSchemaV1",
+        "compatibility": "additive_extension_ignored_by_previous_runtime",
+    }:
+        raise GenerationContractError("generation.database_rollback_claim_invalid")
+    python_executable, python_sha256 = _verify_python_binding(manifest)
+    _verify_exact_release_tree(release, entries)
     for entry in entries:
         relative = Path(str(entry.get("path", "")))
         if relative.is_absolute() or ".." in relative.parts:
@@ -284,12 +519,21 @@ def verify_generation(root: Path, generation_id: str) -> dict[str, Any]:
             raise GenerationContractError("generation.release_file_missing")
         if _sha256_file(candidate) != entry.get("sha256"):
             raise GenerationContractError("generation.release_digest_mismatch")
-    if _entries_digest(entries) != manifest.get("source_tree_sha256"):
-        raise GenerationContractError("generation.source_tree_digest_mismatch")
     launcher = release / "bin" / "bridge-db-mcp"
     if not launcher.is_file() or launcher.is_symlink():
         raise GenerationContractError("generation.launcher_missing")
-    if _sha256_file(launcher) != manifest.get("launcher_sha256"):
+    expected_launcher = _make_launcher(
+        release_path=release,
+        python_executable=python_executable,
+        python_resolved=Path(str(manifest["python_executable_resolved"])),
+        python_sha256=python_sha256,
+        generation_id=generation_id,
+    )
+    expected_launcher_sha256 = _sha256_bytes(expected_launcher)
+    if (
+        manifest.get("launcher_sha256") != expected_launcher_sha256
+        or launcher.read_bytes() != expected_launcher
+    ):
         raise GenerationContractError("generation.launcher_digest_mismatch")
     return {
         "ok": True,
@@ -300,6 +544,11 @@ def verify_generation(root: Path, generation_id: str) -> dict[str, Any]:
         "dependency_sha256": manifest["dependency_sha256"],
         "contract_sha256": manifest["contract_sha256"],
         "launcher_sha256": manifest["launcher_sha256"],
+        "python_executable": str(python_executable),
+        "python_sha256": python_sha256,
+        "dependency_environment_state": manifest["dependency_environment_state"],
+        "database_rollback_contract": manifest["database_rollback_contract"],
+        "claim_ceiling": "source_and_interpreter_bound_external_environment_unmanaged",
         "release_path": str(release),
     }
 
@@ -314,9 +563,17 @@ def stage_generation(
     contract_paths: Iterable[str] = DEFAULT_CONTRACT_PATHS,
 ) -> dict[str, Any]:
     source = _validated_source(source, reviewed_sha)
+    dependency_path_tuple = tuple(dependency_paths)
+    contract_path_tuple = tuple(contract_paths)
+    if dependency_path_tuple != DEFAULT_DEPENDENCY_PATHS:
+        raise GenerationContractError("generation.custom_dependency_contract_refused")
+    if contract_path_tuple != DEFAULT_CONTRACT_PATHS:
+        raise GenerationContractError("generation.custom_contract_contract_refused")
     lexical_root = root.absolute()
-    if lexical_root == source or lexical_root.is_relative_to(source) or source.is_relative_to(
-        lexical_root
+    if (
+        lexical_root == source
+        or lexical_root.is_relative_to(source)
+        or source.is_relative_to(lexical_root)
     ):
         raise GenerationContractError("generation.source_root_overlap")
     root = _guard_absolute_directory(root, create=True)
@@ -324,16 +581,21 @@ def stage_generation(
     _guard_absolute_directory(root / "receipts", create=True)
     _guard_absolute_directory(root / "drain", create=True)
 
-    executable = (python_executable or Path(sys.executable)).resolve(strict=True)
-    if not executable.is_file():
+    executable = python_executable or Path(sys.executable)
+    if not executable.is_absolute():
+        raise GenerationContractError("generation.python_executable_not_absolute")
+    executable_resolved = executable.resolve(strict=True)
+    if not executable_resolved.is_file():
         raise GenerationContractError("generation.python_executable_invalid")
     tracked = _tracked_paths(source)
     entries = _file_entries(source, tracked)
+    if _RESERVED_RELEASE_PATHS.intersection(str(entry["path"]) for entry in entries):
+        raise GenerationContractError("generation.tracked_path_reserved")
     source_digest = _entries_digest(entries)
     dependency_entries = _selected_entries(
-        entries, dependency_paths, kind="dependency"
+        entries, dependency_path_tuple, kind="dependency"
     )
-    contract_entries = _selected_entries(entries, contract_paths, kind="contract")
+    contract_entries = _selected_entries(entries, contract_path_tuple, kind="contract")
     dependency_digest = _entries_digest(dependency_entries)
     contract_digest = _entries_digest(contract_entries)
     generation_id = f"{reviewed_sha[:12]}-{source_digest[:12]}"
@@ -343,12 +605,28 @@ def stage_generation(
         verified = verify_generation(root, generation_id)
         return {**verified, "disposition": "preserved_existing"}
 
-    temporary = Path(tempfile.mkdtemp(dir=releases, prefix=f".{generation_id}.staging-"))
+    temporary = Path(
+        tempfile.mkdtemp(dir=releases, prefix=f".{generation_id}.staging-")
+    )
     try:
         _copy_tracked_source(source, temporary, entries)
+        if any(
+            _sha256_file(temporary / str(entry["path"])) != entry["sha256"]
+            for entry in entries
+        ):
+            raise GenerationContractError("generation.source_changed_during_stage")
+        if (
+            _tracked_paths(source) != tracked
+            or _file_entries(source, tracked) != entries
+        ):
+            raise GenerationContractError("generation.source_changed_during_stage")
+        _validated_source(source, reviewed_sha)
+        python_sha256 = _sha256_file(executable_resolved)
         launcher_bytes = _make_launcher(
             release_path=release,
             python_executable=executable,
+            python_resolved=executable_resolved,
+            python_sha256=python_sha256,
             generation_id=generation_id,
         )
         launcher = temporary / "bin" / "bridge-db-mcp"
@@ -365,7 +643,19 @@ def stage_generation(
             "contract_sha256": contract_digest,
             "contract_paths": [entry["path"] for entry in contract_entries],
             "python_executable": str(executable),
-            "python_sha256": _sha256_file(executable),
+            "python_executable_resolved": str(executable_resolved),
+            "python_sha256": python_sha256,
+            "python_binding": "external_executable_digest_verified_not_environment_immutable",
+            "dependency_environment_state": "external_unmanaged_lockfiles_only",
+            "database_rollback_contract": {
+                "core_user_version": 23,
+                "previous_merged_generation_user_version": 23,
+                "previous_merged_generation_sha": (
+                    "d7272d489873faa5ed84c81734636ffc8cecb095"
+                ),
+                "snapshot_refusal_extension": "BridgeSnapshotRefusalSchemaV1",
+                "compatibility": "additive_extension_ignored_by_previous_runtime",
+            },
             "launcher_sha256": _sha256_bytes(launcher_bytes),
             "source_files": entries,
         }
@@ -393,8 +683,19 @@ def stage_generation(
 @contextmanager
 def _activation_lock(root: Path) -> Generator[None, None, None]:
     lock = root / ".activation.lock"
-    descriptor = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
     try:
+        descriptor = os.open(lock, flags, 0o600)
+    except OSError as exc:
+        raise GenerationContractError("generation.activation_lock_invalid") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise GenerationContractError("generation.activation_lock_invalid")
         os.fchmod(descriptor, 0o600)
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         yield
@@ -442,7 +743,7 @@ def _receipt_path(root: Path, operation: str, generation_id: str) -> Path:
 def _write_activation_receipt(
     root: Path, *, operation: str, previous: str | None, current: str
 ) -> dict[str, Any]:
-    readback = read_activation(root)
+    readback = _read_activation_without_pending(root)
     receipt = {
         "schema": ACTIVATION_RECEIPT_SCHEMA,
         "operation": operation,
@@ -475,11 +776,188 @@ def _mark_draining(
         "requested_at": _utc_text(),
         "policy": "cooperative_no_process_termination",
     }
+    marker_path = root / "drain" / f"{generation_id}.json"
+    if marker_path.exists():
+        existing = _read_manifest(marker_path)
+        if (
+            existing.get("schema") != marker["schema"]
+            or existing.get("generation_id") != generation_id
+            or existing.get("superseded_by") != superseded_by
+            or existing.get("policy") != marker["policy"]
+        ):
+            raise GenerationContractError("generation.drain_marker_mismatch")
+        return
     _atomic_write(
-        root / "drain" / f"{generation_id}.json",
+        marker_path,
         (json.dumps(marker, sort_keys=True, indent=2) + "\n").encode("utf-8"),
         mode=0o400,
     )
+
+
+def _pending_journal(root: Path) -> dict[str, Any] | None:
+    path = root / ".activation.pending.json"
+    if not path.exists() and not path.is_symlink():
+        return None
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise GenerationContractError("generation.activation_journal_invalid") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise GenerationContractError("generation.activation_journal_invalid")
+    journal = _read_manifest(path)
+    expected_fields = {
+        "schema",
+        "operation",
+        "old_current",
+        "old_previous",
+        "new_current",
+        "created_at",
+        "journal_sha256",
+    }
+    if set(journal) != expected_fields or journal.get("schema") != ACTIVATION_SCHEMA:
+        raise GenerationContractError("generation.activation_journal_invalid")
+    body = {key: value for key, value in journal.items() if key != "journal_sha256"}
+    if journal.get("journal_sha256") != _sha256_bytes(
+        _stable_json(body).encode("utf-8")
+    ):
+        raise GenerationContractError("generation.activation_journal_digest_mismatch")
+    if journal.get("operation") not in ("activate", "rollback"):
+        raise GenerationContractError("generation.activation_journal_invalid")
+    for field_name in ("old_current", "old_previous"):
+        value = journal.get(field_name)
+        if value is not None and (
+            not isinstance(value, str) or not _GENERATION_RE.fullmatch(value)
+        ):
+            raise GenerationContractError("generation.activation_journal_invalid")
+    new_current = journal.get("new_current")
+    if not isinstance(new_current, str) or not _GENERATION_RE.fullmatch(new_current):
+        raise GenerationContractError("generation.activation_journal_invalid")
+    return journal
+
+
+def _activation_state_matches(
+    root: Path, *, current: str, previous: str | None, operation: str
+) -> bool:
+    state_path = root / "activation-state.json"
+    if not state_path.is_file() or state_path.is_symlink():
+        return False
+    try:
+        state = _read_manifest(state_path)
+    except GenerationContractError:
+        return False
+    return bool(
+        state.get("schema") == ACTIVATION_SCHEMA
+        and state.get("current_generation") == current
+        and state.get("previous_generation") == previous
+        and state.get("operation") == operation
+    )
+
+
+def _remove_pending_journal(root: Path) -> bool:
+    """Remove the journal and report whether its directory fsync was verified."""
+    (root / ".activation.pending.json").unlink()
+    try:
+        _fsync_directory(root)
+    except OSError:
+        return False
+    return True
+
+
+def _restore_activation_state(
+    root: Path, *, current: str | None, previous: str | None
+) -> None:
+    state_path = root / "activation-state.json"
+    if current is None:
+        state_path.unlink(missing_ok=True)
+        _fsync_directory(root)
+        return
+    state = {
+        "schema": ACTIVATION_SCHEMA,
+        "current_generation": current,
+        "previous_generation": previous,
+        "activated_at": _utc_text(),
+        "operation": "journal_before_map_restore",
+    }
+    _atomic_write(
+        state_path,
+        (json.dumps(state, sort_keys=True, indent=2) + "\n").encode("utf-8"),
+        mode=0o400,
+    )
+
+
+def _recover_pending_activation(root: Path) -> dict[str, Any] | None:
+    """Recover only exact before/partial/committed maps under the activation lock."""
+    journal = _pending_journal(root)
+    if journal is None:
+        return None
+    old_current = cast(str | None, journal["old_current"])
+    old_previous = cast(str | None, journal["old_previous"])
+    new_current = cast(str, journal["new_current"])
+    operation = cast(Literal["activate", "rollback"], journal["operation"])
+    current = _pointer_generation(root, "current")
+    previous = _pointer_generation(root, "previous")
+
+    if current == new_current and previous == old_current and _activation_state_matches(
+        root,
+        current=new_current,
+        previous=old_current,
+        operation=operation,
+    ):
+        _mark_draining(root, old_current, superseded_by=new_current)
+        receipt = _write_activation_receipt(
+            root,
+            operation=operation,
+            previous=old_current,
+            current=new_current,
+        )
+        if receipt["outcome"] != "activated":
+            raise GenerationContractError("generation.activation_recovery_readback_failed")
+        journal_removal_verified = _remove_pending_journal(root)
+        return {
+            **receipt,
+            "outcome": (
+                "activated_recovered"
+                if journal_removal_verified
+                else "activated_recovered_journal_fsync_unverified"
+            ),
+            "recovery_disposition": "committed_finalized",
+            "journal_removal": (
+                "verified" if journal_removal_verified else "fsync_unverified"
+            ),
+        }
+
+    allowed_maps = {
+        (old_current, old_previous),
+        (new_current, old_previous),
+        (new_current, old_current),
+    }
+    if (current, previous) not in allowed_maps:
+        raise GenerationContractError("generation.activation_journal_map_mismatch")
+    _replace_pointer(root, "current", old_current)
+    _replace_pointer(root, "previous", old_previous)
+    _restore_activation_state(root, current=old_current, previous=old_previous)
+    if (
+        _pointer_generation(root, "current") != old_current
+        or _pointer_generation(root, "previous") != old_previous
+    ):
+        raise GenerationContractError("generation.activation_recovery_readback_failed")
+    journal_removal_verified = _remove_pending_journal(root)
+    return {
+        "schema": ACTIVATION_RECEIPT_SCHEMA,
+        "operation": operation,
+        "outcome": "before_map_restored",
+        "requested_generation": new_current,
+        "previous_generation": old_previous,
+        "readback": _read_activation_without_pending(root),
+        "recovery_disposition": "before_map_restored",
+        "journal_removal": (
+            "verified" if journal_removal_verified else "fsync_unverified"
+        ),
+    }
 
 
 def _activate_locked(
@@ -501,7 +979,7 @@ def _activate_locked(
             "readback": read_activation(root),
         }
 
-    pending = {
+    pending_body = {
         "schema": ACTIVATION_SCHEMA,
         "operation": operation,
         "old_current": old_current,
@@ -509,7 +987,15 @@ def _activate_locked(
         "new_current": generation_id,
         "created_at": _utc_text(),
     }
+    pending = {
+        **pending_body,
+        "journal_sha256": _sha256_bytes(
+            _stable_json(pending_body).encode("utf-8")
+        ),
+    }
     pending_path = root / ".activation.pending.json"
+    if pending_path.exists() or pending_path.is_symlink():
+        raise GenerationContractError("generation.activation_pending_unrecovered")
     _atomic_write(
         pending_path,
         (json.dumps(pending, sort_keys=True, indent=2) + "\n").encode("utf-8"),
@@ -530,41 +1016,66 @@ def _activate_locked(
             (json.dumps(state, sort_keys=True, indent=2) + "\n").encode("utf-8"),
             mode=0o400,
         )
-        pending_path.unlink()
-        _fsync_directory(root)
     except Exception:
         # Restore both exact pointers.  If restoration itself fails the pending
         # journal remains and readback stays explicitly interrupted.
         try:
             _replace_pointer(root, "current", old_current)
             _replace_pointer(root, "previous", old_previous)
+            _restore_activation_state(
+                root, current=old_current, previous=old_previous
+            )
             pending_path.unlink(missing_ok=True)
             _fsync_directory(root)
         except Exception:
             pass
         raise
 
-    _mark_draining(root, old_current, superseded_by=generation_id)
-    receipt = _write_activation_receipt(
-        root,
-        operation=operation,
-        previous=old_current,
-        current=generation_id,
-    )
-    if receipt["outcome"] != "activated":
-        raise GenerationContractError("generation.activation_readback_failed")
+    try:
+        _mark_draining(root, old_current, superseded_by=generation_id)
+        receipt = _write_activation_receipt(
+            root,
+            operation=operation,
+            previous=old_current,
+            current=generation_id,
+        )
+        if receipt["outcome"] != "activated":
+            raise GenerationContractError("generation.activation_readback_failed")
+        journal_removal_verified = _remove_pending_journal(root)
+        if not journal_removal_verified:
+            return {
+                **receipt,
+                "outcome": "activated_journal_fsync_unverified",
+                "journal_removal": "fsync_unverified",
+            }
+    except Exception as exc:
+        raise GenerationContractError(
+            "generation.activation_committed_post_actions_pending"
+        ) from exc
     return receipt
 
 
 def activate_generation(root: Path, generation_id: str) -> dict[str, Any]:
     root = _guard_absolute_directory(root)
     with _activation_lock(root):
+        recovery = _recover_pending_activation(root)
+        if recovery is not None and (
+            recovery.get("recovery_disposition") == "committed_finalized"
+            or recovery.get("journal_removal") != "verified"
+        ):
+            return recovery
         return _activate_locked(root, generation_id=generation_id, operation="activate")
 
 
 def rollback_generation(root: Path) -> dict[str, Any]:
     root = _guard_absolute_directory(root)
     with _activation_lock(root):
+        recovery = _recover_pending_activation(root)
+        if recovery is not None and (
+            recovery.get("recovery_disposition") == "committed_finalized"
+            or recovery.get("journal_removal") != "verified"
+        ):
+            return recovery
         previous = _pointer_generation(root, "previous")
         if previous is None:
             raise GenerationContractError("generation.rollback_unavailable")
@@ -574,7 +1085,7 @@ def rollback_generation(root: Path) -> dict[str, Any]:
 def read_activation(root: Path) -> dict[str, Any]:
     root = _guard_absolute_directory(root)
     pending_path = root / ".activation.pending.json"
-    if pending_path.exists():
+    if pending_path.exists() or pending_path.is_symlink():
         return {
             "schema": ACTIVATION_SCHEMA,
             "state": "interrupted",
@@ -582,6 +1093,11 @@ def read_activation(root: Path) -> dict[str, Any]:
             "previous_generation": None,
             "reason_code": "generation.activation_pending",
         }
+    return _read_activation_without_pending(root)
+
+
+def _read_activation_without_pending(root: Path) -> dict[str, Any]:
+    root = _guard_absolute_directory(root)
     current = _pointer_generation(root, "current")
     previous = _pointer_generation(root, "previous")
     if current is None:
@@ -614,6 +1130,10 @@ def read_activation(root: Path) -> dict[str, Any]:
         "reviewed_source_sha": verified["reviewed_source_sha"],
         "dependency_sha256": verified["dependency_sha256"],
         "contract_sha256": verified["contract_sha256"],
+        "python_sha256": verified["python_sha256"],
+        "dependency_environment_state": verified["dependency_environment_state"],
+        "database_rollback_contract": verified["database_rollback_contract"],
+        "claim_ceiling": verified["claim_ceiling"],
         "launcher_path": str(root / "current" / "bin" / "bridge-db-mcp"),
     }
 
@@ -668,7 +1188,7 @@ def runtime_generation_identity() -> dict[str, Any]:
             "reason_code": "generation.runtime_layout_invalid",
         }
     try:
-        verify_generation(release.parent.parent, generation_id)
+        verified = verify_generation(release.parent.parent, generation_id)
     except GenerationContractError as exc:
         return {
             "schema": GENERATION_SCHEMA,
@@ -685,6 +1205,10 @@ def runtime_generation_identity() -> dict[str, Any]:
         "reviewed_source_sha": manifest.get("reviewed_source_sha"),
         "dependency_sha256": manifest.get("dependency_sha256"),
         "contract_sha256": manifest.get("contract_sha256"),
+        "python_sha256": verified["python_sha256"],
+        "dependency_environment_state": verified["dependency_environment_state"],
+        "database_rollback_contract": verified["database_rollback_contract"],
+        "claim_ceiling": verified["claim_ceiling"],
         "manifest_path": str(manifest_path),
     }
 

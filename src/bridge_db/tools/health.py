@@ -26,6 +26,7 @@ from bridge_db.evidence import (
 from bridge_db.execution_generation import runtime_generation_identity
 from bridge_db.recovery import recovery_anchor_inventory
 from bridge_db.recovery_seal import recovery_seal_inventory
+from bridge_db.tenancy import tenancy_inventory
 from bridge_db.tools.context import parse_owned_sections
 
 logger = logging.getLogger("bridge_db.tools.health")
@@ -165,6 +166,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     for the field requirements the old NOT NULL columns enforced.
     """
     runtime_generation = runtime_generation_identity()
+    tenancy = tenancy_inventory()
     cursor = await db.execute("PRAGMA user_version")
     row = await cursor.fetchone()
     schema_version: int = row[0] if row else 0
@@ -452,6 +454,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
             "principals_enrolled": len(load_principals(config.PRINCIPALS_PATH)),
         },
         "runtime_generation": runtime_generation,
+        "tenancy": tenancy,
     }
 
 
@@ -833,6 +836,7 @@ async def collect_status_summary(
         "row_counts": health["row_counts"],
         "source_trust_breakdown": health["source_trust_breakdown"],
         "runtime_generation": health["runtime_generation"],
+        "tenancy": health["tenancy"],
         "pending_handoffs_by_trust": pending_handoffs_by_trust,
         "signals": {
             "pending_handoffs": pending_handoffs,
@@ -864,6 +868,11 @@ async def collect_status_summary(
             "execution_generation_state": health["runtime_generation"]["state"],
             "execution_generation_id": health["runtime_generation"].get(
                 "generation_id"
+            ),
+            "tenancy_state": health["tenancy"]["state"],
+            "tenancy_active_count": health["tenancy"].get("active_count"),
+            "tenancy_active_request_count": health["tenancy"].get(
+                "active_request_count"
             ),
             "audit_degraded": health["evidence_lifecycle"]["audit_degraded"],
             "evidence_disposition_degraded": health["evidence_lifecycle"][

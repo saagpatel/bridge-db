@@ -174,6 +174,8 @@ uv run python -m bridge_db --quarantine-cleared-operator-handoffs  # recoverable
 uv run python -m bridge_db --restore-handoff-trust 42  # exact-row recovery
 python -m bridge_db.execution_generation readback --root <private-runtime-root>
 python -m bridge_db.secure_binding --caller codex --secret-fd 3 --principals-path <path> --binding-path <path>
+python -m bridge_db.client_rebinding rebind --client claude-code --config-path /Users/d/.claude.json --backup-root <private-backup-root>
+python -m bridge_db.tenancy status --root <private-tenancy-root>
 uv run python -m bridge_db          # start MCP server (stdio)
 uv run python -m bridge_db.migration  # migrate from bridge markdown
 ```
@@ -213,9 +215,20 @@ drain, and the no-secret-output Codex binding path. `health`/`status` label a
 direct mutable checkout as operating attention; that is not proof of an
 installed generation.
 
+The source-owned `config/bridge-db-mcp-immutable` is the Codex install input; it
+parses only token/auth-mode keys from an owner-only env file and execs the stable
+launcher. `config/com.saagar.bridge-db-checkpoint.plist` preserves the existing
+30-minute receipt wrapper while running that launcher with `--checkpoint`.
+`bridge_db.client_rebinding` performs exact Claude Code/Desktop JSON command
+replacement with private digest-named backups, exact readback, digest-bound
+restore, and no environment-value output. None of these source assets establish
+that a live client has reloaded them.
+
 ## Data
 
 - **DB**: `~/.local/share/bridge-db/bridge.db`
+- **Schema compatibility**: core `user_version=23` plus the additive backward-readable refusal extension, verified against exact previous merged generation `d7272d489873faa5ed84c81734636ffc8cecb095`. Pointer rollback still requires a current verified recovery anchor/seal; source compatibility is not activation authority.
+- **MCP tenancy**: private per-process owner/principal/generation leases account for requests, PID ancestry, and RSS. Obsolete generations refuse new work and cooperatively close after active requests finish; lifecycle tooling cannot terminate another process.
 - **Bridge file**: `~/.claude/projects/<encoded-home>/memory/claude_ai_context.md`
   (Claude Code encodes your home dir path by replacing `/` with `-`; the default is derived
   automatically at runtime — override via `BRIDGE_FILE_PATH` if needed)

@@ -30,12 +30,21 @@ uv run python -m bridge_db --recover-orphaned-handoff 42 --recovery-reason "sess
 uv run python -m bridge_db --quarantine-cleared-operator-handoffs  # recoverable legacy relabel
 uv run python -m bridge_db --restore-handoff-trust 42  # exact recovery image
 python -m bridge_db.execution_generation readback --root <private-runtime-root>
+python -m bridge_db.client_rebinding rebind --client claude-code --config-path /Users/d/.claude.json --backup-root <private-backup-root>
+python -m bridge_db.tenancy status --root <private-tenancy-root>
 ```
+
+Immutable-generation verification binds the exact release file set, ownership,
+modes, reviewed source, launcher, and external interpreter bytes. Dependency
+lockfiles are bound, but the external installed environment remains explicitly
+unmanaged. Tenancy drain is cooperative: reject new work, finish active work,
+then close the obsolete server. Activation still requires a current verified
+recovery anchor/seal.
 
 ## Architecture
 
 - **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=15000`). Core schema is v23: v21 adds non-destructive exact conflict aggregation and explicit overflow counters; v22 adds non-destructive handoff cancellation/quarantine recovery tables; v23 adds hash-only session capabilities and orphan-recovery receipts. Durable owner-bound snapshot refusals use the additive `BridgeSnapshotRefusalSchemaV1` extension without advancing `user_version`, preserving core compatibility with the exact previous merged v23 runtime. Auth state lives in `principals.json` v2 (not the DB): grants expire after 90 days, carry a generation, and are limited to a caller-specific tool scope.
-- **MCP transport**: stdio (stdout = JSON-RPC, all logging → stderr)
+- **MCP transport**: stdio (stdout = JSON-RPC, all logging → stderr). Each server owns a private tenancy lease; obsolete generations refuse new work and cooperatively close only after active requests finish.
 - **MCP tools**: verify the current count with `rg '@mcp\.tool' src/bridge_db -c`. There are 26 tools across 10 modules: activity, handoffs, context, snapshots, cost, export, health, recall (FTS5 lexical search; Phase −1 of the semantic memory layer), audit (read-side observability over the JSONL audit + recall query logs), and conflicts (`get_write_conflicts`). Snapshot callers can inspect family capacity before writing and durably acknowledge an exact refusal. `get_recent_activity` is the raw row-level feed; `get_activity_signal` is the operator-facing feed that compresses lifecycle `session-boundary` telemetry. `health` / `status` include signals for pending handoffs, snapshot refusals, raw and actionable unprocessed shipped events, receiptless processed shipped events, FTS index drift, WAL size, and bridge-file freshness.
 - **Context access**: `get_db(ctx)` helper casts lifespan context to `aiosqlite.Connection`
 - **Tool registration**: `CaptureMCP` pattern in tests — decorators capture raw async fns
@@ -150,7 +159,11 @@ python -m bridge_db.execution_generation readback --root <private-runtime-root>
   kills a process or deletes a release. Runtime health is verified only when
   the complete immutable release reads back. Codex credential rotation/binding
   accepts the secret only through a protected descriptor and never emits the
-  secret or digest. See `docs/internal/EXECUTION-GENERATIONS.md`.
+  secret or digest. Exact Claude JSON rebinding writes a private backup and
+  preserves environment values without returning them. Source-owned Codex and
+  checkpoint launch inputs converge on the stable `current` launcher, but need
+  a separately controlled install/reconnect before they are live. See
+  `docs/internal/EXECUTION-GENERATIONS.md`.
 - **FTS drift repair**: `--rebuild-content-index` is the CLI-only repair path; FTS index drift is treated as a hard health failure because `recall` depends on `content_index` mirroring source tables.
 - **Post-sync review**: after scheduled Bridge Syncs or shipped-event reconciliation, use `docs/internal/POST-SYNC-REVIEW.md` to verify DB state, markdown export freshness, and scorecard updates.
 - **Dependency drift**: check with `uv tree --outdated`; refresh `uv.lock` and re-run the full verifier to confirm green.
