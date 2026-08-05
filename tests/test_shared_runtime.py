@@ -32,6 +32,34 @@ _REPO_ROOT = Path(__file__).parents[1]
 _STABLE_LAUNCHER = "/Users/d/.local/state/bridge-db/current/bin/bridge-db-mcp"
 
 
+def _noisy_gnu_stat_shim(tmp_path: Path) -> Path:
+    """Fail BSD stat probes with stdout before emulating GNU file formats."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "stat"
+    shim.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = -f ]; then\n"
+        "    printf '%s\\n' filesystem-status-noise\n"
+        "    exit 1\n"
+        "fi\n"
+        "if [ \"$1\" != -c ]; then exit 64; fi\n"
+        "case \"$(uname -s)\" in\n"
+        "    Darwin)\n"
+        "        case \"$2\" in\n"
+        "            '%u') exec /usr/bin/stat -f '%u' \"$3\" ;;\n"
+        "            '%a') exec /usr/bin/stat -f '%Lp' \"$3\" ;;\n"
+        "            *) exit 64 ;;\n"
+        "        esac\n"
+        "        ;;\n"
+        "    *) exec /usr/bin/stat \"$@\" ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    return bin_dir
+
+
 @pytest.fixture
 def short_runtime_root() -> Iterator[Path]:
     # AF_UNIX paths are short on several platforms. Resolve both the platform
@@ -534,6 +562,9 @@ def test_shared_wrapper_relays_mcp_over_one_idle_bounded_broker(
     shared_root = short_runtime_root / "shared"
     environment = {
         **os.environ,
+        "PATH": os.pathsep.join(
+            (str(_noisy_gnu_stat_shim(tmp_path)), os.environ.get("PATH", ""))
+        ),
         "BRIDGE_DB_ENV_FILE": str(env_file),
         "BRIDGE_DB_PATH": str(tmp_path / "bridge.db"),
         "BRIDGE_FILE_PATH": str(tmp_path / "bridge.md"),

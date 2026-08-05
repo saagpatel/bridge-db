@@ -14,11 +14,13 @@ if [ ! -f "$env_file" ] || [ -L "$env_file" ]; then
     exit 78
 fi
 
-env_owner=$(stat -f '%u' "$env_file" 2>/dev/null || stat -c '%u' "$env_file" 2>/dev/null) || {
+env_owner=$(stat -f '%u' "$env_file" 2>/dev/null) || \
+    env_owner=$(stat -c '%u' "$env_file" 2>/dev/null) || {
     echo "bridge_db.wrapper_env_stat_failed" >&2
     exit 78
 }
-env_mode=$(stat -f '%Lp' "$env_file" 2>/dev/null || stat -c '%a' "$env_file" 2>/dev/null) || {
+env_mode=$(stat -f '%Lp' "$env_file" 2>/dev/null) || \
+    env_mode=$(stat -c '%a' "$env_file" 2>/dev/null) || {
     echo "bridge_db.wrapper_env_stat_failed" >&2
     exit 78
 }
@@ -148,11 +150,13 @@ if [ ! -f "$capability_file" ] || [ -L "$capability_file" ]; then
     echo "bridge_db.shared_relay_capability_file_invalid" >&2
     exit 69
 fi
-capability_owner=$(stat -f '%u' "$capability_file" 2>/dev/null || stat -c '%u' "$capability_file" 2>/dev/null) || {
+capability_owner=$(stat -f '%u' "$capability_file" 2>/dev/null) || \
+    capability_owner=$(stat -c '%u' "$capability_file" 2>/dev/null) || {
     echo "bridge_db.shared_relay_capability_stat_failed" >&2
     exit 69
 }
-capability_mode=$(stat -f '%Lp' "$capability_file" 2>/dev/null || stat -c '%a' "$capability_file" 2>/dev/null) || {
+capability_mode=$(stat -f '%Lp' "$capability_file" 2>/dev/null) || \
+    capability_mode=$(stat -c '%a' "$capability_file" 2>/dev/null) || {
     echo "bridge_db.shared_relay_capability_stat_failed" >&2
     exit 69
 }
