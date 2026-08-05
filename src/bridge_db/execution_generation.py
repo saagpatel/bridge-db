@@ -51,6 +51,10 @@ DEFAULT_CONTRACT_PATHS = (
     "src/bridge_db/tenancy.py",
     "src/bridge_db/tools/__init__.py",
 )
+_SHARED_RUNTIME_CONTRACT_PATH = "src/bridge_db/shared_runtime.py"
+_PRE_SHARED_RUNTIME_CONTRACT_PATHS = tuple(
+    path for path in DEFAULT_CONTRACT_PATHS if path != _SHARED_RUNTIME_CONTRACT_PATH
+)
 
 
 class GenerationContractError(RuntimeError):
@@ -384,9 +388,18 @@ def _verify_selected_digest(
     expected_paths: tuple[str, ...],
 ) -> None:
     paths = manifest.get(f"{kind}_paths")
+    selected_paths = expected_paths
     if paths != list(expected_paths):
-        raise GenerationContractError(f"generation.{kind}_paths_mismatch")
-    selected = _selected_entries(entries, expected_paths, kind=kind)
+        source_paths = {str(entry["path"]) for entry in entries}
+        legacy_contract = (
+            kind == "contract"
+            and paths == list(_PRE_SHARED_RUNTIME_CONTRACT_PATHS)
+            and _SHARED_RUNTIME_CONTRACT_PATH not in source_paths
+        )
+        if not legacy_contract:
+            raise GenerationContractError(f"generation.{kind}_paths_mismatch")
+        selected_paths = _PRE_SHARED_RUNTIME_CONTRACT_PATHS
+    selected = _selected_entries(entries, selected_paths, kind=kind)
     if _entries_digest(selected) != manifest.get(f"{kind}_sha256"):
         raise GenerationContractError(f"generation.{kind}_digest_mismatch")
 
