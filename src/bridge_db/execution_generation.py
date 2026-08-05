@@ -33,6 +33,8 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GENERATION_RE = re.compile(r"^[0-9a-f]{12}-[0-9a-f]{12}$")
 _RESERVED_RELEASE_PATHS = frozenset({"generation-manifest.json", "bin/bridge-db-mcp"})
+_TENANCY_EVIDENCE_NAME = "tenancy-activation-evidence.json"
+_MAX_TENANCY_EVIDENCE_BYTES = 1024 * 1024
 
 DEFAULT_DEPENDENCY_PATHS = ("pyproject.toml", "uv.lock")
 DEFAULT_CONTRACT_PATHS = (
@@ -114,6 +116,157 @@ def _assert_activation_recovery_ready() -> None:
                 str(seal_state), "generation.recovery_seal_unverified"
             )
         )
+
+
+def _normalize_tenancy_evidence_summary(value: object) -> dict[str, Any]:
+    if value is None:
+        return {"state": "legacy_unverified"}
+    if not isinstance(value, dict):
+        raise GenerationContractError("generation.tenancy_evidence_state_invalid")
+    summary = {str(key): item for key, item in cast(dict[object, Any], value).items()}
+    state = summary.get("state")
+    if state in ("inactive", "legacy_unverified", "not_required_for_rollback"):
+        if set(summary) != {"state"}:
+            raise GenerationContractError("generation.tenancy_evidence_state_invalid")
+        return summary
+    expected_fields = {
+        "schema",
+        "state",
+        "generation_id",
+        "evidence_sha256",
+        "policy_sha256",
+        "file_sha256",
+        "owners",
+        "scenarios",
+        "observation_counts",
+    }
+    if (
+        state != "verified"
+        or set(summary) != expected_fields
+        or summary.get("schema") != "BridgeMcpTenancyActivationEvidenceV1"
+        or not isinstance(summary.get("generation_id"), str)
+        or not _GENERATION_RE.fullmatch(cast(str, summary["generation_id"]))
+        or not isinstance(summary.get("evidence_sha256"), str)
+        or not _SHA256_RE.fullmatch(cast(str, summary["evidence_sha256"]))
+        or not isinstance(summary.get("policy_sha256"), str)
+        or not _SHA256_RE.fullmatch(cast(str, summary["policy_sha256"]))
+        or not isinstance(summary.get("file_sha256"), str)
+        or not _SHA256_RE.fullmatch(cast(str, summary["file_sha256"]))
+        or not isinstance(summary.get("owners"), list)
+        or not isinstance(summary.get("scenarios"), list)
+        or not isinstance(summary.get("observation_counts"), dict)
+    ):
+        raise GenerationContractError("generation.tenancy_evidence_state_invalid")
+    owners = cast(list[object], summary["owners"])
+    scenarios = cast(list[object], summary["scenarios"])
+    counts = cast(dict[object, object], summary["observation_counts"])
+    required_owners = {"claude", "codex", "hermes", "personal_ops"}
+    required_scenarios = {
+        "abrupt_exit",
+        "app_restart",
+        "generation_rollover",
+        "normal_close",
+    }
+    if (
+        any(not isinstance(owner, str) for owner in owners)
+        or any(not isinstance(scenario, str) for scenario in scenarios)
+        or owners != sorted(cast(list[str], owners))
+        or scenarios != sorted(cast(list[str], scenarios))
+        or not required_owners.issubset(set(owners))
+        or not required_scenarios.issubset(set(scenarios))
+        or set(counts) != set(owners)
+        or any(
+            not isinstance(count, int) or isinstance(count, bool) or count < 1
+            for count in counts.values()
+        )
+    ):
+        raise GenerationContractError("generation.tenancy_evidence_state_invalid")
+    return summary
+
+
+def _load_tenancy_activation_evidence(
+    root: Path, selected_path: Path | None, generation_id: str
+) -> dict[str, Any]:
+    from bridge_db.tenancy import (
+        TenancyContractError,
+        validate_lifecycle_activation_evidence,
+    )
+
+    path = selected_path or root / _TENANCY_EVIDENCE_NAME
+    if not path.is_absolute():
+        raise GenerationContractError("generation.tenancy_evidence_path_invalid")
+    try:
+        if path.resolve(strict=True) != path:
+            raise GenerationContractError("generation.tenancy_evidence_path_invalid")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError as exc:
+        raise GenerationContractError("generation.tenancy_evidence_missing") from exc
+    except GenerationContractError:
+        raise
+    except OSError as exc:
+        raise GenerationContractError("generation.tenancy_evidence_path_invalid") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o400
+        ):
+            raise GenerationContractError("generation.tenancy_evidence_not_private")
+        if metadata.st_size < 1 or metadata.st_size > _MAX_TENANCY_EVIDENCE_BYTES:
+            raise GenerationContractError("generation.tenancy_evidence_size_invalid")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            encoded = handle.read(_MAX_TENANCY_EVIDENCE_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    if len(encoded) > _MAX_TENANCY_EVIDENCE_BYTES:
+        raise GenerationContractError("generation.tenancy_evidence_size_invalid")
+    try:
+        parsed = cast(
+            object,
+            json.loads(
+                encoded,
+                parse_constant=lambda value: (_ for _ in ()).throw(
+                    ValueError(f"invalid JSON constant: {value}")
+                ),
+            ),
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        raise GenerationContractError("generation.tenancy_evidence_json_invalid") from exc
+    if not isinstance(parsed, dict):
+        raise GenerationContractError("generation.tenancy_evidence_json_invalid")
+    evidence = {
+        str(key): item for key, item in cast(dict[object, Any], parsed).items()
+    }
+    try:
+        summary = validate_lifecycle_activation_evidence(evidence)
+    except TenancyContractError as exc:
+        reason_by_code = {
+            "tenancy.activation_evidence_coverage_missing": (
+                "generation.tenancy_evidence_coverage_missing"
+            ),
+            "tenancy.activation_evidence_digest_mismatch": (
+                "generation.tenancy_evidence_digest_mismatch"
+            ),
+            "tenancy.activation_evidence_requirements_mismatch": (
+                "generation.tenancy_evidence_requirements_mismatch"
+            ),
+            "tenancy.activation_policy_mismatch": (
+                "generation.tenancy_evidence_policy_mismatch"
+            ),
+        }
+        raise GenerationContractError(
+            reason_by_code.get(
+                exc.reason_code, "generation.tenancy_evidence_invalid"
+            )
+        ) from exc
+    if summary.get("generation_id") != generation_id:
+        raise GenerationContractError(
+            "generation.tenancy_evidence_generation_mismatch"
+        )
+    return _normalize_tenancy_evidence_summary(
+        {**summary, "file_sha256": _sha256_bytes(encoded)}
+    )
 
 
 def _utc_text() -> str:
@@ -874,7 +1027,7 @@ def _pending_journal(root: Path) -> dict[str, Any] | None:
     ):
         raise GenerationContractError("generation.activation_journal_invalid")
     journal = _read_manifest(path)
-    expected_fields = {
+    legacy_fields = {
         "schema",
         "operation",
         "old_current",
@@ -883,7 +1036,13 @@ def _pending_journal(root: Path) -> dict[str, Any] | None:
         "created_at",
         "journal_sha256",
     }
-    if set(journal) != expected_fields or journal.get("schema") != ACTIVATION_SCHEMA:
+    extended_fields = legacy_fields | {
+        "old_tenancy_activation_evidence",
+        "new_tenancy_activation_evidence",
+    }
+    if set(journal) not in (legacy_fields, extended_fields) or journal.get(
+        "schema"
+    ) != ACTIVATION_SCHEMA:
         raise GenerationContractError("generation.activation_journal_invalid")
     body = {key: value for key, value in journal.items() if key != "journal_sha256"}
     if journal.get("journal_sha256") != _sha256_bytes(
@@ -901,11 +1060,30 @@ def _pending_journal(root: Path) -> dict[str, Any] | None:
     new_current = journal.get("new_current")
     if not isinstance(new_current, str) or not _GENERATION_RE.fullmatch(new_current):
         raise GenerationContractError("generation.activation_journal_invalid")
-    return journal
+    if set(journal) == extended_fields:
+        old_evidence = _normalize_tenancy_evidence_summary(
+            journal.get("old_tenancy_activation_evidence")
+        )
+        new_evidence = _normalize_tenancy_evidence_summary(
+            journal.get("new_tenancy_activation_evidence")
+        )
+    else:
+        old_evidence = {"state": "legacy_unverified"}
+        new_evidence = {"state": "legacy_unverified"}
+    return {
+        **journal,
+        "old_tenancy_activation_evidence": old_evidence,
+        "new_tenancy_activation_evidence": new_evidence,
+    }
 
 
 def _activation_state_matches(
-    root: Path, *, current: str, previous: str | None, operation: str
+    root: Path,
+    *,
+    current: str,
+    previous: str | None,
+    operation: str,
+    tenancy_evidence: dict[str, Any],
 ) -> bool:
     state_path = root / "activation-state.json"
     if not state_path.is_file() or state_path.is_symlink():
@@ -914,11 +1092,18 @@ def _activation_state_matches(
         state = _read_manifest(state_path)
     except GenerationContractError:
         return False
+    try:
+        state_evidence = _normalize_tenancy_evidence_summary(
+            state.get("tenancy_activation_evidence")
+        )
+    except GenerationContractError:
+        return False
     return bool(
         state.get("schema") == ACTIVATION_SCHEMA
         and state.get("current_generation") == current
         and state.get("previous_generation") == previous
         and state.get("operation") == operation
+        and state_evidence == tenancy_evidence
     )
 
 
@@ -933,7 +1118,11 @@ def _remove_pending_journal(root: Path) -> bool:
 
 
 def _restore_activation_state(
-    root: Path, *, current: str | None, previous: str | None
+    root: Path,
+    *,
+    current: str | None,
+    previous: str | None,
+    tenancy_evidence: dict[str, Any],
 ) -> None:
     state_path = root / "activation-state.json"
     if current is None:
@@ -946,6 +1135,7 @@ def _restore_activation_state(
         "previous_generation": previous,
         "activated_at": _utc_text(),
         "operation": "journal_before_map_restore",
+        "tenancy_activation_evidence": tenancy_evidence,
     }
     _atomic_write(
         state_path,
@@ -963,6 +1153,12 @@ def _recover_pending_activation(root: Path) -> dict[str, Any] | None:
     old_previous = cast(str | None, journal["old_previous"])
     new_current = cast(str, journal["new_current"])
     operation = cast(Literal["activate", "rollback"], journal["operation"])
+    old_tenancy_evidence = cast(
+        dict[str, Any], journal["old_tenancy_activation_evidence"]
+    )
+    new_tenancy_evidence = cast(
+        dict[str, Any], journal["new_tenancy_activation_evidence"]
+    )
     current = _pointer_generation(root, "current")
     previous = _pointer_generation(root, "previous")
 
@@ -971,6 +1167,7 @@ def _recover_pending_activation(root: Path) -> dict[str, Any] | None:
         current=new_current,
         previous=old_current,
         operation=operation,
+        tenancy_evidence=new_tenancy_evidence,
     ):
         _mark_draining(root, old_current, superseded_by=new_current)
         receipt = _write_activation_receipt(
@@ -1004,7 +1201,12 @@ def _recover_pending_activation(root: Path) -> dict[str, Any] | None:
         raise GenerationContractError("generation.activation_journal_map_mismatch")
     _replace_pointer(root, "current", old_current)
     _replace_pointer(root, "previous", old_previous)
-    _restore_activation_state(root, current=old_current, previous=old_previous)
+    _restore_activation_state(
+        root,
+        current=old_current,
+        previous=old_previous,
+        tenancy_evidence=old_tenancy_evidence,
+    )
     if (
         _pointer_generation(root, "current") != old_current
         or _pointer_generation(root, "previous") != old_previous
@@ -1030,10 +1232,22 @@ def _activate_locked(
     *,
     generation_id: str,
     operation: Literal["activate", "rollback"],
+    tenancy_evidence: dict[str, Any] | None,
 ) -> dict[str, Any]:
     verify_generation(root, generation_id)
     old_current = _pointer_generation(root, "current")
     old_previous = _pointer_generation(root, "previous")
+    old_readback = _read_activation_without_pending(root)
+    if old_readback.get("state") not in ("active", "inactive"):
+        raise GenerationContractError("generation.activation_state_mismatch")
+    old_tenancy_evidence = cast(
+        dict[str, Any], old_readback["tenancy_activation_evidence"]
+    )
+    new_tenancy_evidence = (
+        _normalize_tenancy_evidence_summary(tenancy_evidence)
+        if operation == "activate"
+        else {"state": "not_required_for_rollback"}
+    )
     if old_current == generation_id:
         return {
             "schema": ACTIVATION_RECEIPT_SCHEMA,
@@ -1051,6 +1265,8 @@ def _activate_locked(
         "old_previous": old_previous,
         "new_current": generation_id,
         "created_at": _utc_text(),
+        "old_tenancy_activation_evidence": old_tenancy_evidence,
+        "new_tenancy_activation_evidence": new_tenancy_evidence,
     }
     pending = {
         **pending_body,
@@ -1075,6 +1291,7 @@ def _activate_locked(
             "previous_generation": old_current,
             "activated_at": _utc_text(),
             "operation": operation,
+            "tenancy_activation_evidence": new_tenancy_evidence,
         }
         _atomic_write(
             root / "activation-state.json",
@@ -1088,7 +1305,10 @@ def _activate_locked(
             _replace_pointer(root, "current", old_current)
             _replace_pointer(root, "previous", old_previous)
             _restore_activation_state(
-                root, current=old_current, previous=old_previous
+                root,
+                current=old_current,
+                previous=old_previous,
+                tenancy_evidence=old_tenancy_evidence,
             )
             pending_path.unlink(missing_ok=True)
             _fsync_directory(root)
@@ -1120,7 +1340,11 @@ def _activate_locked(
     return receipt
 
 
-def activate_generation(root: Path, generation_id: str) -> dict[str, Any]:
+def activate_generation(
+    root: Path,
+    generation_id: str,
+    tenancy_evidence_path: Path | None = None,
+) -> dict[str, Any]:
     root = _guard_absolute_directory(root)
     with _activation_lock(root):
         recovery = _recover_pending_activation(root)
@@ -1129,8 +1353,16 @@ def activate_generation(root: Path, generation_id: str) -> dict[str, Any]:
             or recovery.get("journal_removal") != "verified"
         ):
             return recovery
+        tenancy_evidence = _load_tenancy_activation_evidence(
+            root, tenancy_evidence_path, generation_id
+        )
         _assert_activation_recovery_ready()
-        return _activate_locked(root, generation_id=generation_id, operation="activate")
+        return _activate_locked(
+            root,
+            generation_id=generation_id,
+            operation="activate",
+            tenancy_evidence=tenancy_evidence,
+        )
 
 
 def rollback_generation(root: Path) -> dict[str, Any]:
@@ -1146,7 +1378,12 @@ def rollback_generation(root: Path) -> dict[str, Any]:
         previous = _pointer_generation(root, "previous")
         if previous is None:
             raise GenerationContractError("generation.rollback_unavailable")
-        return _activate_locked(root, generation_id=previous, operation="rollback")
+        return _activate_locked(
+            root,
+            generation_id=previous,
+            operation="rollback",
+            tenancy_evidence=None,
+        )
 
 
 def read_activation(root: Path) -> dict[str, Any]:
@@ -1173,6 +1410,7 @@ def _read_activation_without_pending(root: Path) -> dict[str, Any]:
             "state": "inactive",
             "current_generation": None,
             "previous_generation": previous,
+            "tenancy_activation_evidence": {"state": "inactive"},
         }
     state_path = root / "activation-state.json"
     state = _read_manifest(state_path)
@@ -1189,6 +1427,9 @@ def _read_activation_without_pending(root: Path) -> dict[str, Any]:
             "reason_code": "generation.activation_state_mismatch",
         }
     verified = verify_generation(root, current)
+    tenancy_evidence = _normalize_tenancy_evidence_summary(
+        state.get("tenancy_activation_evidence")
+    )
     return {
         "schema": ACTIVATION_SCHEMA,
         "state": "active",
@@ -1201,6 +1442,7 @@ def _read_activation_without_pending(root: Path) -> dict[str, Any]:
         "dependency_environment_state": verified["dependency_environment_state"],
         "database_rollback_contract": verified["database_rollback_contract"],
         "claim_ceiling": verified["claim_ceiling"],
+        "tenancy_activation_evidence": tenancy_evidence,
         "launcher_path": str(root / "current" / "bin" / "bridge-db-mcp"),
     }
 
@@ -1291,6 +1533,7 @@ def _parser() -> argparse.ArgumentParser:
     activate = subparsers.add_parser("activate")
     activate.add_argument("--root", type=Path, required=True)
     activate.add_argument("--generation-id", required=True)
+    activate.add_argument("--tenancy-evidence", type=Path)
     readback = subparsers.add_parser("readback")
     readback.add_argument("--root", type=Path, required=True)
     rollback = subparsers.add_parser("rollback")
@@ -1312,7 +1555,9 @@ def main() -> None:
                 python_executable=args.python_executable,
             )
         elif args.command == "activate":
-            result = activate_generation(args.root, args.generation_id)
+            result = activate_generation(
+                args.root, args.generation_id, args.tenancy_evidence
+            )
         elif args.command == "readback":
             result = read_activation(args.root)
         elif args.command == "rollback":

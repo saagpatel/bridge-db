@@ -30,8 +30,23 @@ from bridge_db import clock, config
 LEASE_SCHEMA = "BridgeMcpTenancyLeaseV1"
 PLAN_SCHEMA = "BridgeMcpTenancyPlanV1"
 POLICY_SCHEMA = "BridgeMcpTenancyPolicyV1"
+REPLAY_OBSERVATIONS_SCHEMA = "BridgeMcpTenancyReplayObservationsV1"
+ACTIVATION_EVIDENCE_SCHEMA = "BridgeMcpTenancyActivationEvidenceV1"
 APPLY_SCHEMA = "BridgeMcpTenancyApplyReceiptV1"
 _OWNER_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
+_GENERATION_RE = re.compile(r"^[0-9a-f]{12}-[0-9a-f]{12}$")
+ACTIVATION_REQUIRED_OWNERS = (
+    "claude",
+    "codex",
+    "hermes",
+    "personal_ops",
+)
+ACTIVATION_REQUIRED_SCENARIOS = (
+    "abrupt_exit",
+    "app_restart",
+    "generation_rollover",
+    "normal_close",
+)
 
 ProcessState = Literal["same", "missing", "mismatch", "unknown"]
 ProcessProbe = Callable[[int, str], ProcessState]
@@ -583,14 +598,31 @@ def derive_lifecycle_policy(observations: list[dict[str, Any]]) -> dict[str, Any
         owner = row.get("owner")
         if not isinstance(owner, str) or not _OWNER_RE.fullmatch(owner):
             raise TenancyContractError("tenancy.replay_owner_invalid")
-        for metric_name in ("process_count", "lifetime_seconds", "rss_bytes"):
-            value = row.get(metric_name)
-            if (
-                not isinstance(value, (int, float))
-                or isinstance(value, bool)
-                or value < 0
-            ):
-                raise TenancyContractError("tenancy.replay_value_invalid")
+        process_count = row.get("process_count")
+        rss_bytes = row.get("rss_bytes")
+        lifetime_seconds = row.get("lifetime_seconds")
+        if (
+            not isinstance(process_count, int)
+            or isinstance(process_count, bool)
+            or process_count < 0
+            or not isinstance(rss_bytes, int)
+            or isinstance(rss_bytes, bool)
+            or rss_bytes < 0
+            or not isinstance(lifetime_seconds, (int, float))
+            or isinstance(lifetime_seconds, bool)
+            or lifetime_seconds < 0
+        ):
+            raise TenancyContractError("tenancy.replay_value_invalid")
+        try:
+            lifetime_value = float(lifetime_seconds)
+        except OverflowError as exc:
+            raise TenancyContractError("tenancy.replay_value_invalid") from exc
+        if (
+            not math.isfinite(lifetime_value)
+            or not math.isfinite(lifetime_value * 1.25)
+            or not math.isfinite(lifetime_value * 2)
+        ):
+            raise TenancyContractError("tenancy.replay_value_invalid")
         grouped.setdefault(owner, []).append(row)
     budgets: dict[str, Any] = {}
     for owner, rows in sorted(grouped.items()):
@@ -600,7 +632,9 @@ def derive_lifecycle_policy(observations: list[dict[str, Any]]) -> dict[str, Any
         budgets[owner] = {
             "max_processes": max(process_highwater + 1, 1),
             "max_lifetime_seconds": max(math.ceil(lifetime_highwater * 1.25), 60),
-            "max_rss_bytes": max(math.ceil(rss_highwater * 1.25), 16 * 1024 * 1024),
+            "max_rss_bytes": max(
+                (rss_highwater * 5 + 3) // 4, 16 * 1024 * 1024
+            ),
             "idle_review_seconds": max(math.ceil(lifetime_highwater * 2), 300),
             "derived_from": {
                 "observations": len(rows),
@@ -611,6 +645,114 @@ def derive_lifecycle_policy(observations: list[dict[str, Any]]) -> dict[str, Any
         }
     policy = {"schema": POLICY_SCHEMA, "budgets": budgets}
     return {**policy, "policy_sha256": _sha256_bytes(_stable_json(policy).encode())}
+
+
+def build_lifecycle_activation_evidence(
+    observations: list[dict[str, Any]], *, generation_id: str
+) -> dict[str, Any]:
+    """Bind exact representative replay rows to their derived activation policy."""
+    if not _GENERATION_RE.fullmatch(generation_id):
+        raise TenancyContractError("tenancy.activation_generation_invalid")
+    expected_fields = {
+        "owner",
+        "scenario",
+        "process_count",
+        "lifetime_seconds",
+        "rss_bytes",
+    }
+    owners: set[str] = set()
+    scenarios: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    for row in observations:
+        if set(row) != expected_fields:
+            raise TenancyContractError("tenancy.activation_observation_invalid")
+        scenario = row.get("scenario")
+        if not isinstance(scenario, str) or not _OWNER_RE.fullmatch(scenario):
+            raise TenancyContractError("tenancy.activation_observation_invalid")
+        owner = row.get("owner")
+        if not isinstance(owner, str) or not _OWNER_RE.fullmatch(owner):
+            raise TenancyContractError("tenancy.replay_owner_invalid")
+        owners.add(owner)
+        scenarios.add(scenario)
+        normalized.append(dict(row))
+    if not set(ACTIVATION_REQUIRED_OWNERS).issubset(owners) or not set(
+        ACTIVATION_REQUIRED_SCENARIOS
+    ).issubset(scenarios):
+        raise TenancyContractError("tenancy.activation_evidence_coverage_missing")
+    policy = derive_lifecycle_policy(normalized)
+    body = {
+        "schema": ACTIVATION_EVIDENCE_SCHEMA,
+        "generation_id": generation_id,
+        "requirements": {
+            "owners": list(ACTIVATION_REQUIRED_OWNERS),
+            "scenarios": list(ACTIVATION_REQUIRED_SCENARIOS),
+        },
+        "observations": normalized,
+        "policy": policy,
+    }
+    return {
+        **body,
+        "evidence_sha256": _sha256_bytes(_stable_json(body).encode("utf-8")),
+    }
+
+
+def validate_lifecycle_activation_evidence(
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Recompute and summarize a content-bound replay evidence bundle."""
+    if set(evidence) != {
+        "schema",
+        "generation_id",
+        "requirements",
+        "observations",
+        "policy",
+        "evidence_sha256",
+    } or evidence.get("schema") != ACTIVATION_EVIDENCE_SCHEMA:
+        raise TenancyContractError("tenancy.activation_evidence_invalid")
+    generation_id = evidence.get("generation_id")
+    if not isinstance(generation_id, str) or not _GENERATION_RE.fullmatch(generation_id):
+        raise TenancyContractError("tenancy.activation_generation_invalid")
+    body = {key: value for key, value in evidence.items() if key != "evidence_sha256"}
+    if evidence.get("evidence_sha256") != _sha256_bytes(
+        _stable_json(body).encode("utf-8")
+    ):
+        raise TenancyContractError("tenancy.activation_evidence_digest_mismatch")
+    if evidence.get("requirements") != {
+        "owners": list(ACTIVATION_REQUIRED_OWNERS),
+        "scenarios": list(ACTIVATION_REQUIRED_SCENARIOS),
+    }:
+        raise TenancyContractError("tenancy.activation_evidence_requirements_mismatch")
+    raw_observations = evidence.get("observations")
+    if not isinstance(raw_observations, list):
+        raise TenancyContractError("tenancy.activation_evidence_invalid")
+    raw_rows = cast(list[object], raw_observations)
+    if any(not isinstance(row, dict) for row in raw_rows):
+        raise TenancyContractError("tenancy.activation_evidence_invalid")
+    observations = [
+        {str(key): value for key, value in cast(dict[object, Any], row).items()}
+        for row in raw_rows
+    ]
+    rebuilt = build_lifecycle_activation_evidence(
+        observations, generation_id=generation_id
+    )
+    if rebuilt != evidence:
+        raise TenancyContractError("tenancy.activation_policy_mismatch")
+    owners = sorted({str(row["owner"]) for row in observations})
+    scenarios = sorted({str(row["scenario"]) for row in observations})
+    observation_counts = {
+        owner: sum(row["owner"] == owner for row in observations) for owner in owners
+    }
+    policy = cast(dict[str, Any], evidence["policy"])
+    return {
+        "schema": ACTIVATION_EVIDENCE_SCHEMA,
+        "state": "verified",
+        "generation_id": generation_id,
+        "evidence_sha256": evidence["evidence_sha256"],
+        "policy_sha256": policy["policy_sha256"],
+        "owners": owners,
+        "scenarios": scenarios,
+        "observation_counts": observation_counts,
+    }
 
 
 def _validate_policy(policy: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1048,12 +1190,38 @@ def tenancy_inventory(root: Path | None = None) -> dict[str, Any]:
 
 def _load_json_file(path: Path) -> dict[str, Any]:
     try:
-        raw = cast(object, json.loads(path.read_text(encoding="utf-8")))
-    except (OSError, json.JSONDecodeError) as exc:
+        raw = cast(
+            object,
+            json.loads(
+                path.read_text(encoding="utf-8"),
+                parse_constant=lambda value: (_ for _ in ()).throw(
+                    ValueError(f"invalid JSON constant: {value}")
+                ),
+            ),
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise TenancyContractError("tenancy.input_json_invalid") from exc
     if not isinstance(raw, dict):
         raise TenancyContractError("tenancy.input_json_invalid")
     return {str(key): value for key, value in cast(dict[object, Any], raw).items()}
+
+
+def _load_replay_observations(path: Path) -> list[dict[str, Any]]:
+    payload = _load_json_file(path)
+    if set(payload) != {"schema", "observations"} or payload.get(
+        "schema"
+    ) != REPLAY_OBSERVATIONS_SCHEMA:
+        raise TenancyContractError("tenancy.replay_observations_invalid")
+    raw_observations = payload.get("observations")
+    if not isinstance(raw_observations, list):
+        raise TenancyContractError("tenancy.replay_observations_invalid")
+    raw_rows = cast(list[object], raw_observations)
+    if any(not isinstance(row, dict) for row in raw_rows):
+        raise TenancyContractError("tenancy.replay_observations_invalid")
+    return [
+        {str(key): value for key, value in cast(dict[object, Any], row).items()}
+        for row in raw_rows
+    ]
 
 
 def main() -> None:
@@ -1065,6 +1233,9 @@ def main() -> None:
     plan.add_argument("--root", type=Path, required=True)
     plan.add_argument("--policy", type=Path, required=True)
     plan.add_argument("--current-generation")
+    derive = subparsers.add_parser("derive-activation-evidence")
+    derive.add_argument("--observations", type=Path, required=True)
+    derive.add_argument("--generation-id", required=True)
     apply = subparsers.add_parser("apply")
     apply.add_argument("--root", type=Path, required=True)
     apply.add_argument("--plan", type=Path, required=True)
@@ -1078,6 +1249,11 @@ def main() -> None:
                 root=args.root,
                 policy=_load_json_file(args.policy),
                 current_generation=args.current_generation,
+            )
+        elif args.command == "derive-activation-evidence":
+            result = build_lifecycle_activation_evidence(
+                _load_replay_observations(args.observations),
+                generation_id=args.generation_id,
             )
         else:
             result = apply_lifecycle_plan(

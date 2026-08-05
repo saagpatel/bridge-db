@@ -128,7 +128,13 @@ ancestry, and RSS. Inventory V2 distinguishes live identity-bound processes,
 stale lease records, unknown process state, current RSS, and the historical RSS
 last persisted in each lease. Obsolete generations refuse new requests, finish
 active requests, and cooperatively cancel their own server task. Lifecycle
-apply is exact-target and cannot terminate another process. Snapshot refusal storage stays an additive extension over core SQLite
+apply is exact-target and cannot terminate another process. Forward activation
+requires a private `BridgeMcpTenancyActivationEvidenceV1` bundle, recomputes the
+policy from its exact replay rows, and requires the documented client and
+lifecycle-scenario coverage for the exact requested generation before any
+pointer write. Rollback remains the safety path and does not require new replay
+evidence. Snapshot refusal storage
+stays an additive extension over core SQLite
 `user_version=23`, preserving open/read compatibility with exact previous
 merged generation `d7272d489873faa5ed84c81734636ffc8cecb095`; rollback loses
 the refusal API until roll-forward but does not discard its rows. Activation or

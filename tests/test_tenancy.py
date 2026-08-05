@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from collections.abc import Callable
@@ -13,6 +14,7 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 
 from bridge_db import clock, config
+import bridge_db.tenancy as tenancy_module
 import bridge_db.server as server_module
 from bridge_db.server import (
     InstrumentedFastMCP,
@@ -24,11 +26,15 @@ from bridge_db.tenancy import (
     TenancyContractError,
     TenancyTracker,
     apply_lifecycle_plan,
+    build_lifecycle_activation_evidence,
     derive_lifecycle_policy,
     plan_lifecycle,
     read_active_leases,
     tenancy_inventory,
+    validate_lifecycle_activation_evidence,
 )
+
+_FIXTURE_GENERATION_ID = "0123456789ab-cdef01234567"
 
 
 def _policy() -> dict[str, object]:
@@ -43,6 +49,26 @@ def _policy() -> dict[str, object]:
             for owner in ("codex", "claude", "personal_ops", "hermes")
         ]
     )
+
+
+def _activation_observations() -> list[dict[str, object]]:
+    return [
+        {
+            "owner": owner,
+            "scenario": scenario,
+            "process_count": index + 1,
+            "lifetime_seconds": 120 + index,
+            "rss_bytes": (32 + index) * 1024 * 1024,
+        }
+        for index, (owner, scenario) in enumerate(
+            (
+                ("codex", "normal_close"),
+                ("claude", "app_restart"),
+                ("personal_ops", "abrupt_exit"),
+                ("hermes", "generation_rollover"),
+            )
+        )
+    ]
 
 
 def _tracker(
@@ -337,8 +363,10 @@ async def test_obsolete_lifespan_cancels_own_idle_task_and_closes_lease(
         raise AssertionError("obsolete lifespan did not cancel its own task")
 
     task = asyncio.create_task(run_server_lifespan())
-    await asyncio.wait_for(started.wait(), timeout=1)
-    lease_id = await asyncio.wait_for(task, timeout=1)
+    # SQLite/WAL initialization can exceed one second on a loaded host; the
+    # lifecycle assertion is event-driven and does not depend on that latency.
+    await asyncio.wait_for(started.wait(), timeout=10)
+    lease_id = await asyncio.wait_for(task, timeout=10)
 
     assert read_active_leases(root) == []
     histories = sorted((root / "history").glob(f"{lease_id}-*.json"))
@@ -472,6 +500,101 @@ def test_replay_derived_budgets_cover_four_client_families() -> None:
     assert policy["budgets"]["codex"]["max_processes"] == 4
     assert policy["budgets"]["claude"]["max_lifetime_seconds"] == 250
     assert len(policy["policy_sha256"]) == 64
+
+
+def test_activation_evidence_binds_exact_replays_policy_and_coverage() -> None:
+    evidence = build_lifecycle_activation_evidence(
+        _activation_observations(), generation_id=_FIXTURE_GENERATION_ID
+    )
+
+    summary = validate_lifecycle_activation_evidence(evidence)
+
+    assert summary["state"] == "verified"
+    assert summary["generation_id"] == _FIXTURE_GENERATION_ID
+    assert summary["owners"] == ["claude", "codex", "hermes", "personal_ops"]
+    assert summary["scenarios"] == [
+        "abrupt_exit",
+        "app_restart",
+        "generation_rollover",
+        "normal_close",
+    ]
+    assert summary["observation_counts"] == {
+        "claude": 1,
+        "codex": 1,
+        "hermes": 1,
+        "personal_ops": 1,
+    }
+
+
+def test_activation_evidence_refuses_missing_owner_or_scenario_coverage() -> None:
+    with pytest.raises(TenancyContractError) as refused:
+        build_lifecycle_activation_evidence(
+            _activation_observations()[:-1],
+            generation_id=_FIXTURE_GENERATION_ID,
+        )
+
+    assert refused.value.reason_code == "tenancy.activation_evidence_coverage_missing"
+
+
+def test_replay_policy_refuses_non_finite_derived_budget() -> None:
+    observations = _activation_observations()
+    observations[0]["lifetime_seconds"] = 1e308
+
+    with pytest.raises(TenancyContractError) as refused:
+        build_lifecycle_activation_evidence(
+            observations, generation_id=_FIXTURE_GENERATION_ID
+        )
+
+    assert refused.value.reason_code == "tenancy.replay_value_invalid"
+
+
+def test_activation_evidence_recomputes_policy_instead_of_trusting_digest() -> None:
+    evidence = build_lifecycle_activation_evidence(
+        _activation_observations(), generation_id=_FIXTURE_GENERATION_ID
+    )
+    evidence["policy"]["budgets"]["codex"]["max_processes"] = 999
+    body = {key: value for key, value in evidence.items() if key != "evidence_sha256"}
+    evidence["evidence_sha256"] = hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+    with pytest.raises(TenancyContractError) as refused:
+        validate_lifecycle_activation_evidence(evidence)
+
+    assert refused.value.reason_code == "tenancy.activation_policy_mismatch"
+
+
+def test_derive_activation_evidence_cli_emits_valid_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    observations_path = tmp_path / "observations.json"
+    observations_path.write_text(
+        json.dumps(
+            {
+                "schema": "BridgeMcpTenancyReplayObservationsV1",
+                "observations": _activation_observations(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "bridge-db-tenancy",
+            "derive-activation-evidence",
+            "--observations",
+            str(observations_path),
+            "--generation-id",
+            _FIXTURE_GENERATION_ID,
+        ],
+    )
+
+    tenancy_module.main()
+
+    emitted = json.loads(capsys.readouterr().out)
+    assert validate_lifecycle_activation_evidence(emitted)["state"] == "verified"
 
 
 @pytest.mark.parametrize(

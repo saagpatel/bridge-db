@@ -39,11 +39,22 @@ while retaining the journal for review.
 
 Pending-journal recovery always runs first so an already-committed pointer
 transition can finish its drain/receipt work even if recovery evidence became
-stale after the commit. Before any new `activate` or `rollback` pointer mutation,
-the command then calls the owning recovery lifecycle readers for the configured
-BridgeDB path. Both `RecoveryAnchorV1` and the latest `RecoverySealReceiptV1`
-must read back `state=verified` and `ready=true`; missing, stale, unsealed, or
-invalid evidence fails closed before a pending journal or pointer is written.
+stale after the commit. Before any new forward `activate` pointer mutation, the
+command also requires a private `BridgeMcpTenancyActivationEvidenceV1` bundle.
+It recomputes the policy from the exact replay observations and requires Codex,
+Claude, Personal Ops, and Hermes coverage across normal-close, app-restart,
+abrupt-exit, and generation-rollover scenarios. The bundle, policy, and exact
+file digests plus no-sensitive coverage counts are bound into the activation
+journal, state, readback, and receipt. A missing, mutable, symlinked, malformed,
+incomplete, or policy-mismatched bundle fails before pointer mutation.
+
+Before any new `activate` or `rollback` pointer mutation, the command calls the
+owning recovery lifecycle readers for the configured BridgeDB path. Both
+`RecoveryAnchorV1` and the latest `RecoverySealReceiptV1` must read back
+`state=verified` and `ready=true`; missing, stale, unsealed, or invalid evidence
+fails closed before a pending journal or pointer is written. Rollback remains
+the safety path and does not require new replay evidence; its activation state
+records `not_required_for_rollback` rather than implying replay-policy proof.
 
 ## Commands
 
@@ -63,7 +74,8 @@ python -m bridge_db.execution_generation verify \
 
 python -m bridge_db.execution_generation activate \
   --root /absolute/private/path/to/bridge-db-runtime \
-  --generation-id <generation-id>
+  --generation-id <generation-id> \
+  --tenancy-evidence /absolute/private/path/to/tenancy-activation-evidence.json
 
 python -m bridge_db.execution_generation readback \
   --root /absolute/private/path/to/bridge-db-runtime
@@ -71,6 +83,25 @@ python -m bridge_db.execution_generation readback \
 python -m bridge_db.execution_generation rollback \
   --root /absolute/private/path/to/bridge-db-runtime
 ```
+
+If `--tenancy-evidence` is omitted, activation checks the exact conventional
+path `<execution-root>/tenancy-activation-evidence.json`. The file must be a
+non-symlink regular file owned by the current user with mode `0400`. Build it
+only from controlled replay rows using:
+
+```bash
+python -m bridge_db.tenancy derive-activation-evidence \
+  --observations /absolute/private/path/to/replay-observations.json \
+  --generation-id <generation-id>
+```
+
+The input is `BridgeMcpTenancyReplayObservationsV1` with an `observations`
+array. Each row contains exactly `owner`, `scenario`, `process_count`,
+`lifetime_seconds`, and `rss_bytes`. The command prints the content-bound bundle
+to stdout and binds it to the exact staged generation. Publishing it at the
+activation path and setting mode `0400` are separate operator-controlled
+effects. Aggregate inventory, inferred metrics, synthetic rows, or evidence for
+a different generation are not activation evidence.
 
 Point each MCP client at
 `<execution-root>/current/bin/bridge-db-mcp`. The launcher accepts the normal
@@ -185,7 +216,10 @@ and Python RSS from roughly 4 MiB to 53 MiB. That baseline falsifies an
 observability-only approach and selects client-close instrumentation plus
 per-owner leases and cooperative generation drain; it does not justify pooling
 or cross-process killing. The aggregate snapshot is not exact per-owner replay
-evidence, so an exact replay-derived policy remains an activation prerequisite.
+evidence, so an exact replay-derived policy remains an executable, fail-closed
+activation prerequisite. `derive-activation-evidence` binds the raw replay rows
+to the deterministically recomputed policy; activation revalidates that
+relationship instead of trusting a policy digest alone.
 Same-generation budget excess remains an owner-review decision and does not
 claim to force every tenant below budget. Activation plus controlled client
 reload/reconnect is required before these leases can close legacy direct-path
@@ -260,9 +294,10 @@ database, but the old generation cannot create or acknowledge refusals; that
 feature is degraded until roll-forward.
 
 Both activation and pointer rollback are code-gated on a current verified
-recovery anchor/seal and the normal activation approval. A stale, missing,
-invalid, or explicitly unsealed lifecycle is non-green; source compatibility
-tests do not authorize activation.
+recovery anchor/seal and the normal activation approval. Forward activation is
+additionally gated on exact replay evidence; rollback is deliberately not. A
+stale, missing, invalid, or explicitly unsealed recovery lifecycle is
+non-green; source compatibility tests do not authorize activation.
 
 ## Rollback and drain
 
