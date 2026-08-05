@@ -244,10 +244,11 @@ def _process_observations_by_lease(
     leases: list[tuple[Path, dict[str, Any]]],
 ) -> dict[str, tuple[ProcessState, int | None]]:
     """Bind leases to live identities and RSS in one bounded process-table pass."""
-    expected = {
-        int(record["pid"]): (str(record["lease_id"]), str(record["process_identity"]))
-        for _, record in leases
-    }
+    expected: dict[int, list[tuple[str, str]]] = {}
+    for _, record in leases:
+        expected.setdefault(int(record["pid"]), []).append(
+            (str(record["lease_id"]), str(record["process_identity"]))
+        )
     observations: dict[str, tuple[ProcessState, int | None]] = {}
     if not expected:
         return observations
@@ -263,12 +264,14 @@ def _process_observations_by_lease(
         except OSError:
             return {
                 lease_id: ("unknown", None)
-                for lease_id, _identity in expected.values()
+                for targets in expected.values()
+                for lease_id, _identity in targets
             }
         if result.returncode != 0:
             return {
                 lease_id: ("unknown", None)
-                for lease_id, _identity in expected.values()
+                for targets in expected.values()
+                for lease_id, _identity in targets
             }
         pattern = re.compile(r"^\s*(\d+)\s+(.{24})\s+(\d+)\s*$")
         table: dict[int, tuple[str, int]] = {}
@@ -278,24 +281,28 @@ def _process_observations_by_lease(
                 continue
             pid = int(match.group(1))
             table[pid] = (f"ps-start:{match.group(2)}", int(match.group(3)) * 1024)
-        for pid, (lease_id, identity) in expected.items():
+        for pid, targets in expected.items():
             row = table.get(pid)
-            if row is not None:
+            for lease_id, identity in targets:
+                if row is not None:
+                    observations[lease_id] = (
+                        ("same", row[1])
+                        if row[0] == identity
+                        else ("mismatch", None)
+                    )
+                    continue
+                state = probe_process(pid, identity)
                 observations[lease_id] = (
-                    ("same", row[1]) if row[0] == identity else ("mismatch", None)
+                    ("same", _rss_bytes(pid)) if state == "same" else (state, None)
                 )
-                continue
+        return observations
+
+    for pid, targets in expected.items():
+        for lease_id, identity in targets:
             state = probe_process(pid, identity)
             observations[lease_id] = (
                 ("same", _rss_bytes(pid)) if state == "same" else (state, None)
             )
-        return observations
-
-    for pid, (lease_id, identity) in expected.items():
-        state = probe_process(pid, identity)
-        observations[lease_id] = (
-            ("same", _rss_bytes(pid)) if state == "same" else (state, None)
-        )
     return observations
 
 

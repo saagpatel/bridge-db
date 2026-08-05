@@ -652,6 +652,45 @@ def test_inventory_separates_stale_lease_from_live_process(tmp_path: Path) -> No
     tracker.close()
 
 
+def test_inventory_preserves_live_and_reused_identity_leases_for_one_pid(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "tenancy"
+    live = TenancyTracker(
+        root=root,
+        owner="codex",
+        principal="codex",
+        generation="generation-live",
+        pid=os.getpid(),
+    )
+    reused = _tracker(
+        root,
+        generation="generation-stale",
+        identity="fixture-prior-process-with-reused-pid",
+    )
+    live.start()
+    reused.start()
+
+    inventory = tenancy_inventory(root)
+
+    assert inventory["active_count"] == 1
+    assert inventory["lease_count"] == 2
+    assert inventory["stale_lease_count"] == 1
+    assert inventory["process_states"] == {
+        "same": 1,
+        "missing": 0,
+        "mismatch": 1,
+        "unknown": 0,
+    }
+    assert inventory["generations"] == {"generation-live": 1}
+    assert inventory["lease_generations"] == {
+        "generation-live": 1,
+        "generation-stale": 1,
+    }
+    reused.close()
+    live.close()
+
+
 def test_apply_rejects_changed_lease_and_tampered_plan(tmp_path: Path) -> None:
     root = tmp_path / "tenancy"
     tracker = _tracker(root)
