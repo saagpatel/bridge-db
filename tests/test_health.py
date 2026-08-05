@@ -1492,6 +1492,31 @@ async def test_health_reports_auth_block(
     }
 
 
+async def test_health_fails_closed_when_selected_shared_runtime_is_unverified(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bridge_db.tools import health as health_module
+
+    monkeypatch.setenv("BRIDGE_DB_TRANSPORT_MODE", "shared")
+    monkeypatch.setattr(
+        health_module,
+        "shared_runtime_inventory",
+        lambda: {
+            "schema": "BridgeSharedRuntimeInventoryV1",
+            "state": "unverified",
+            "adoption_state": "unknown",
+            "reason_code": "shared_runtime.fixture_unverified",
+        },
+    )
+
+    metrics = await health_module.collect_health_metrics(db)
+
+    assert metrics["shared_runtime"]["required_for_current_process"] is True
+    assert metrics["shared_runtime"]["ready_for_current_process"] is False
+    assert metrics["storage_ok"] is False
+    assert metrics["ok"] is False
+
+
 async def test_health_reports_ledger_and_orphan_metrics(
     db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
 ) -> None:

@@ -108,18 +108,49 @@ binding=$("$stable_launcher" --ensure-shared-broker) || {
 }
 broker_socket=$(printf '%s\n' "$binding" | sed -n '1p')
 client_lease=$(printf '%s\n' "$binding" | sed -n '2p')
-release_launcher=$(printf '%s\n' "$binding" | sed -n '3p')
-case "$broker_socket:$client_lease:$release_launcher" in
-    /*:/*:/*) ;;
+capability_file=$(printf '%s\n' "$binding" | sed -n '3p')
+release_launcher=$(printf '%s\n' "$binding" | sed -n '4p')
+binding_lines=$(printf '%s\n' "$binding" | wc -l | tr -d '[:space:]')
+case "$broker_socket:$client_lease:$capability_file:$release_launcher" in
+    /*:/*:/*:/*) ;;
     *)
         echo "bridge_db.shared_relay_binding_invalid" >&2
         exit 69
         ;;
 esac
+[ "$binding_lines" = 4 ] || {
+    echo "bridge_db.shared_relay_binding_invalid" >&2
+    exit 69
+}
 unset binding
 unset BRIDGE_DB_PRINCIPAL_TOKEN
 
 relay_dir=${broker_socket%/*}
+capability_dir=$relay_dir/capabilities
+case "$capability_file" in
+    "$capability_dir"/*.header) ;;
+    *)
+        echo "bridge_db.shared_relay_capability_path_invalid" >&2
+        exit 69
+        ;;
+esac
+if [ ! -f "$capability_file" ] || [ -L "$capability_file" ]; then
+    echo "bridge_db.shared_relay_capability_file_invalid" >&2
+    exit 69
+fi
+capability_owner=$(stat -f '%u' "$capability_file" 2>/dev/null || stat -c '%u' "$capability_file" 2>/dev/null) || {
+    echo "bridge_db.shared_relay_capability_stat_failed" >&2
+    exit 69
+}
+capability_mode=$(stat -f '%Lp' "$capability_file" 2>/dev/null || stat -c '%a' "$capability_file" 2>/dev/null) || {
+    echo "bridge_db.shared_relay_capability_stat_failed" >&2
+    exit 69
+}
+if [ "$capability_owner" -ne "$(id -u)" ] || [ "$capability_mode" != "400" ]; then
+    echo "bridge_db.shared_relay_capability_file_not_private" >&2
+    exit 69
+fi
+unset capability_owner capability_mode binding_lines
 header_file=$(mktemp "$relay_dir/relay-headers.XXXXXX") || exit 69
 body_file=$(mktemp "$relay_dir/relay-body.XXXXXX") || {
     rm -f -- "$header_file"
@@ -134,6 +165,7 @@ cleanup_relay() {
     if [ -n "$session_id" ]; then
         curl --silent --show-error --unix-socket "$broker_socket" \
             --request DELETE \
+            --header "@$capability_file" \
             --header "Mcp-Session-Id: $session_id" \
             --output /dev/null \
             http://localhost/mcp >/dev/null 2>&1 || true
@@ -154,6 +186,7 @@ while IFS= read -r message || [ -n "$message" ]; do
             --dump-header "$header_file" \
             --output "$body_file" \
             --write-out '%{http_code}' \
+            --header "@$capability_file" \
             --header 'Accept: application/json, text/event-stream' \
             --header 'Content-Type: application/json' \
             --header "Mcp-Session-Id: $session_id" \
@@ -166,6 +199,7 @@ while IFS= read -r message || [ -n "$message" ]; do
             --dump-header "$header_file" \
             --output "$body_file" \
             --write-out '%{http_code}' \
+            --header "@$capability_file" \
             --header 'Accept: application/json, text/event-stream' \
             --header 'Content-Type: application/json' \
             --header "Mcp-Session-Id: $session_id" \
@@ -177,6 +211,7 @@ while IFS= read -r message || [ -n "$message" ]; do
             --dump-header "$header_file" \
             --output "$body_file" \
             --write-out '%{http_code}' \
+            --header "@$capability_file" \
             --header 'Accept: application/json, text/event-stream' \
             --header 'Content-Type: application/json' \
             --data-binary @- \

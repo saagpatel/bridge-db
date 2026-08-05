@@ -93,6 +93,41 @@ def test_codex_wrapper_parses_only_exact_private_keys_and_forwards_args(
     ]
 
 
+def test_codex_wrapper_defaults_no_argument_launch_to_direct_transport(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "output"
+    launcher = tmp_path / "launcher"
+    launcher.write_text(
+        "#!/bin/sh\nprintf '%s\\n%s\\n' \"$BRIDGE_DB_TRANSPORT_MODE\" \"$#\" > \"$FIXTURE_OUTPUT\"\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    wrapper = _executable_wrapper(tmp_path, launcher)
+    env_file = tmp_path / "bridge-db.env"
+    env_file.write_text(
+        "BRIDGE_DB_PRINCIPAL_TOKEN=fixture-wrapper-secret-abcdefghijklmnopqrstuvwxyz\n"
+        "BRIDGE_DB_AUTH_MODE=warn\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+
+    result = subprocess.run(
+        [str(wrapper)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "BRIDGE_DB_ENV_FILE": str(env_file),
+            "FIXTURE_OUTPUT": str(output),
+        },
+    )
+
+    assert result.returncode == 0
+    assert output.read_text(encoding="utf-8").splitlines() == ["direct", "0"]
+
+
 def test_codex_wrapper_accepts_reviewed_shared_transport_key_for_cli_passthrough(
     tmp_path: Path,
 ) -> None:
@@ -185,3 +220,5 @@ def test_codex_wrapper_source_is_syntax_valid_and_immutable_path_bound() -> None
     assert "/Users/d/Projects/bridge-db" not in source
     assert "source " not in source
     assert ". \"$env_file\"" not in source
+    assert '--header "@$capability_file"' in source
+    assert 'cat "$capability_file"' not in source

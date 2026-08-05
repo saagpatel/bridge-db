@@ -203,12 +203,19 @@ receipts prevent an apply operation from partially mutating multiple leases.
 The direct stdio runtime remains the default and rollback. When the reviewed
 binding selects `BRIDGE_DB_TRANSPORT_MODE=shared`, a no-argument wrapper launch
 registers the shell relay's PID/start identity, then ensures one broker for the
-exact credential and immutable source generation. A private random selector key
-derives the group name, so neither the credential nor a reusable credential
-digest appears in argv, output, socket names, or receipts. The broker binds only
-an owner-only Unix socket, uses stateful Streamable HTTP behind the stdio relay,
-and serializes tool calls so independent MCP session connections cannot
-interleave database work.
+exact credential and complete non-secret launch contract: normalized auth mode,
+generation/manifest, interpreter/runtime source, database, bridge, principal,
+audit/evidence, registry, tenancy, logging, and idle-policy inputs. A private
+random selector key derives the group name, so neither the credential nor a
+reusable credential digest appears in argv, output, socket names, or receipts.
+Each relay also receives a distinct random capability through an owner-only
+mode-`0400` curl header file. Every broker request validates its lease and
+capability hash, then strips the header before MCP dispatch; lifecycle scans
+separately retain the relay's PID/start-identity gate.
+The capability value never enters argv, logs, socket names, leases, history, or
+broker receipts. The broker binds only an owner-only Unix socket, uses stateful
+Streamable HTTP behind the stdio relay, and serializes tool calls so independent
+MCP session connections cannot interleave database work.
 
 Client lease history is preserved. Missing or PID-reused relay records are
 retired after identity readback; unknown process state keeps the broker alive.
@@ -224,6 +231,12 @@ oldest age, and RSS describe live identity-matched processes; `lease_count`,
 stale/unknown counts, lease owner/generation maps, and
 `lease_last_observed_rss_total_bytes` preserve the evidence needed to review
 stale records without presenting them as live memory pressure.
+`BridgeSharedRuntimeInventoryV1`, available in `health`, `status`, and
+`python -m bridge_db --shared-runtime-status`, separately reports broker/socket
+reachability, live/stale/unknown relay identities, and capability-file counts
+without returning group selectors or capability values. When the current
+process selected shared transport, missing or unverified inventory cannot render
+health green.
 
 ## Database rollback compatibility
 

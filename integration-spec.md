@@ -145,9 +145,11 @@ uses the source-owned `config/bridge-db-mcp-immutable` install input, which
 parses the two required credential keys plus the optional reviewed
 `BRIDGE_DB_TRANSPORT_MODE=direct|shared` key. `direct` is the default and exact
 rollback. In `shared` mode, no-argument MCP launches remain stdio to the client
-but use a thin shell relay to one credential- and generation-bound broker over
-an owner-only Unix socket. CLI operations such as `--checkpoint` always bypass
-the relay and execute directly.
+but use a thin shell relay to one credential- and complete-launch-contract-bound
+broker over an owner-only Unix socket. Each relay uses its own request capability
+through a private mode-`0400` curl header file; the value is absent from argv,
+logs, socket names, leases, and receipts. CLI operations such as `--checkpoint`
+always bypass the relay and execute directly.
 The checkpoint LaunchAgent input invokes that same launcher with `--checkpoint`
 through the existing receipt wrapper. Live installation and reconnect/reload
 remain separate governed effects.
@@ -477,17 +479,24 @@ seal directory.
 The client-facing contract is always stdio. `BRIDGE_DB_TRANSPORT_MODE=direct`
 keeps one full `bridge-db` process per client. The opt-in `shared` mode keeps a
 small stdio relay per client and multiplexes requests through Streamable HTTP
-over a private Unix domain socket to one broker per credential and immutable
-source generation. No TCP listener, LaunchAgent, secret in argv, or cross-principal
-broker is introduced.
+over a private Unix domain socket to one broker per credential and complete
+launch contract. The grouping contract binds the database, normalized auth
+mode, immutable generation/runtime source, principal registry, projection and
+audit/evidence paths, tenancy owner/root, logging, and idle policy. No TCP
+listener, LaunchAgent, secret in argv, or cross-principal/config broker is
+introduced.
 
-Relay references are private PID/start-identity leases. The broker preserves
-stale reference history, serializes tool calls across session DB connections,
-and cooperatively exits 300 seconds after the last live relay disappears. It
-never signals another process. Broker startup fails closed after 10 seconds;
-setting the transport mode back to `direct` is the exact rollback and affects
-only future client spawns. Existing transports are never disconnected by this
-path.
+Relay references are private PID/start-identity leases. Every HTTP request also
+requires that relay's unique capability, delivered as an owner-only mode-`0400`
+header file so curl never places the value in argv; only the capability hash is
+retained. The broker preserves stale reference history, serializes tool calls
+across session DB connections, and cooperatively exits 300 seconds after the
+last live relay disappears. It never signals another process. Broker startup
+fails closed after 10 seconds; setting the transport mode back to `direct` is
+the exact rollback and affects only future client spawns. Existing transports
+are never disconnected by this path. `BridgeSharedRuntimeInventoryV1` is
+available from health/status and `--shared-runtime-status`; shared-mode health
+is non-green when that inventory is missing or unverified.
 
 Both modes use the same SQLite file at `~/.local/share/bridge-db/bridge.db` with
 WAL mode + `PRAGMA busy_timeout=15000`. Logical lost-update protection remains

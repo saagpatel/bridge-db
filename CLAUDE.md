@@ -11,6 +11,7 @@ uv run ruff check          # lint
 uv run ruff check --fix    # lint + auto-fix
 uv run python -m bridge_db --doctor  # local environment diagnostics
 uv run python -m bridge_db --status  # compact operator summary
+uv run python -m bridge_db --shared-runtime-status  # no-secret broker/client inventory
 uv run python -m bridge_db --dogfood # read-only observability dogfood pass
 uv run python -m bridge_db.evidence_policy plan  # content-bound evidence inventory
 uv run python -m bridge_db --rebuild-content-index  # repair FTS recall index drift
@@ -45,7 +46,7 @@ verified anchor and seal.
 ## Architecture
 
 - **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=15000`). Core schema is v23: v21 adds non-destructive exact conflict aggregation and explicit overflow counters; v22 adds non-destructive handoff cancellation/quarantine recovery tables; v23 adds hash-only session capabilities and orphan-recovery receipts. Durable owner-bound snapshot refusals use the additive `BridgeSnapshotRefusalSchemaV1` extension without advancing `user_version`, preserving core compatibility with the exact previous merged v23 runtime. Auth state lives in `principals.json` v2 (not the DB): grants expire after 90 days, carry a generation, and are limited to a caller-specific tool scope.
-- **MCP transport**: client-facing stdio (stdout = JSON-RPC, all logging → stderr). Direct mode owns one server lease per client. Opt-in shared mode uses a thin shell relay and one credential/generation broker over a private Unix socket; the broker serializes database access across sessions and exits after its bounded no-client window. Obsolete generations refuse new work and cooperatively close only after active requests finish.
+- **MCP transport**: client-facing stdio (stdout = JSON-RPC, all logging → stderr). Direct mode owns one server lease per client. Opt-in shared mode uses a thin shell relay and one credential/complete-launch-contract broker over a private Unix socket. Every HTTP request carries a distinct relay capability read by curl from an owner-only mode-`0400` header file, never from argv; receipts retain only its hash. The broker serializes database access across sessions and exits after its bounded no-client window. `BridgeSharedRuntimeInventoryV1` is exposed through health/status and `--shared-runtime-status`; selected shared transport fails health closed when that proof is unverified. Obsolete generations refuse new work and cooperatively close only after active requests finish.
 - **MCP tools**: verify the current count with `rg '@mcp\.tool' src/bridge_db -c`. There are 26 tools across 10 modules: activity, handoffs, context, snapshots, cost, export, health, recall (FTS5 lexical search; Phase −1 of the semantic memory layer), audit (read-side observability over the JSONL audit + recall query logs), and conflicts (`get_write_conflicts`). Snapshot callers can inspect family capacity before writing and durably acknowledge an exact refusal. `get_recent_activity` is the raw row-level feed; `get_activity_signal` is the operator-facing feed that compresses lifecycle `session-boundary` telemetry. `health` / `status` include signals for pending handoffs, snapshot refusals, raw and actionable unprocessed shipped events, receiptless processed shipped events, FTS index drift, WAL size, and bridge-file freshness.
 - **Context access**: `get_db(ctx)` helper casts lifespan context to `aiosqlite.Connection`
 - **Tool registration**: `CaptureMCP` pattern in tests — decorators capture raw async fns
@@ -213,6 +214,7 @@ uv run ruff check          # lint
 uv run ruff check --fix    # lint + auto-fix
 uv run python -m bridge_db --doctor  # local environment diagnostics
 uv run python -m bridge_db --status  # compact operator summary
+uv run python -m bridge_db --shared-runtime-status  # no-secret broker/client inventory
 uv run python -m bridge_db --dogfood # read-only observability dogfood pass
 uv run python -m bridge_db --rebuild-content-index  # repair FTS recall index drift
 uv run python -m bridge_db --reconcile-canonical-keys  # backfill GHRA repo_full_name keys

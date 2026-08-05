@@ -13,11 +13,22 @@ All notable changes to bridge-db are documented here.
 - **Lifecycle controls:** private relay identity leases, generation isolation,
   serialized cross-session database access, a 10-second startup ceiling, and a
   300-second no-client idle ceiling bound broker residency without process
-  signaling or a LaunchAgent.
+  signaling or a LaunchAgent. The socket-owning broker publishes its own
+  PID/start-identity receipt after startup, so orphan or foreign sockets cannot
+  be adopted as a successful launch.
+- **Request isolation:** each relay receives a distinct mode-`0400` curl header
+  file; every broker request validates the exact lease and capability hash,
+  while lifecycle scans retain the PID/start-identity gate and the secret stays
+  out of argv, logs, leases, history, and receipts. Broker grouping binds the
+  full effective launch contract, including
+  auth mode and database/evidence targets, rather than token and generation
+  alone.
 - **Residency truth:** `BridgeMcpTenancyInventoryV2` separates live
   identity-matched processes and current RSS from stale lease files and their
-  last-observed RSS, preventing historical lease values from presenting as
-  current machine pressure.
+  last-observed RSS, preserves multiple leases sharing a reused PID, and
+  prevents historical lease values from presenting as current machine pressure.
+  `BridgeSharedRuntimeInventoryV1` adds no-secret broker/socket/client adoption
+  readback and fails selected shared-mode health closed when proof is unverified.
 
 ### Added — same-role handoff ownership
 
