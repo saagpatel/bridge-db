@@ -14,7 +14,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/d/.local/share/launchd-fleet/run-with-receipt.sh</string>
+        <string>/Users/d/.local/state/operator-scripts/current/run-with-receipt.sh</string>
         <string>--automation-id</string>
         <string>com.saagar.bridge-db-checkpoint</string>
         <string>--expect-stdout</string>

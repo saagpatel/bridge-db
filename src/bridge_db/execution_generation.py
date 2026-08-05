@@ -60,6 +60,57 @@ class GenerationContractError(RuntimeError):
         super().__init__(reason_code)
 
 
+def _assert_activation_recovery_ready() -> None:
+    """Require the recovery subsystem's own current anchor and seal verdict."""
+    from bridge_db import config
+    from bridge_db.db import SCHEMA_VERSION
+    from bridge_db.recovery import recovery_anchor_inventory
+    from bridge_db.recovery_seal import recovery_seal_inventory
+
+    try:
+        anchor = recovery_anchor_inventory(
+            config.DB_PATH,
+            expected_schema_version=SCHEMA_VERSION,
+        )
+    except Exception as exc:
+        raise GenerationContractError(
+            "generation.recovery_anchor_unverified"
+        ) from exc
+    anchor_state = anchor.get("state")
+    if anchor.get("ready") is not True or anchor_state != "verified":
+        reason_by_state = {
+            "missing": "generation.recovery_anchor_missing",
+            "stale": "generation.recovery_anchor_stale",
+            "invalid": "generation.recovery_anchor_invalid",
+        }
+        raise GenerationContractError(
+            reason_by_state.get(
+                str(anchor_state), "generation.recovery_anchor_unverified"
+            )
+        )
+    try:
+        seals = recovery_seal_inventory(
+            config.DB_PATH,
+            expected_schema_version=SCHEMA_VERSION,
+            current_anchor=anchor,
+        )
+    except Exception as exc:
+        raise GenerationContractError("generation.recovery_seal_unverified") from exc
+    seal_state = seals.get("state")
+    if seals.get("ready") is not True or seal_state != "verified":
+        reason_by_state = {
+            "missing": "generation.recovery_seal_missing",
+            "stale": "generation.recovery_seal_stale",
+            "recovery_unsealed": "generation.recovery_seal_unsealed",
+            "invalid": "generation.recovery_seal_invalid",
+        }
+        raise GenerationContractError(
+            reason_by_state.get(
+                str(seal_state), "generation.recovery_seal_unverified"
+            )
+        )
+
+
 def _utc_text() -> str:
     return clock.now().isoformat().replace("+00:00", "Z")
 
@@ -1064,6 +1115,7 @@ def activate_generation(root: Path, generation_id: str) -> dict[str, Any]:
             or recovery.get("journal_removal") != "verified"
         ):
             return recovery
+        _assert_activation_recovery_ready()
         return _activate_locked(root, generation_id=generation_id, operation="activate")
 
 
@@ -1076,6 +1128,7 @@ def rollback_generation(root: Path) -> dict[str, Any]:
             or recovery.get("journal_removal") != "verified"
         ):
             return recovery
+        _assert_activation_recovery_ready()
         previous = _pointer_generation(root, "previous")
         if previous is None:
             raise GenerationContractError("generation.rollback_unavailable")

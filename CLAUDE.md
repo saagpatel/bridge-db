@@ -38,8 +38,9 @@ Immutable-generation verification binds the exact release file set, ownership,
 modes, reviewed source, launcher, and external interpreter bytes. Dependency
 lockfiles are bound, but the external installed environment remains explicitly
 unmanaged. Tenancy drain is cooperative: reject new work, finish active work,
-then close the obsolete server. Activation still requires a current verified
-recovery anchor/seal.
+then close the obsolete server. After repairing any pending journal, activation
+and rollback fail closed unless the owning recovery lifecycle reports a current
+verified anchor and seal.
 
 ## Architecture
 

@@ -130,7 +130,9 @@ process. Snapshot refusal storage stays an additive extension over core SQLite
 `user_version=23`, preserving open/read compatibility with exact previous
 merged generation `d7272d489873faa5ed84c81734636ffc8cecb095`; rollback loses
 the refusal API until roll-forward but does not discard its rows. Activation or
-rollback still requires current recovery-anchor/seal evidence.
+rollback calls the owning recovery lifecycle verification and requires current
+verified anchor/seal evidence after any pending-journal recovery. Missing,
+stale, invalid, or unsealed evidence prevents a new pointer mutation.
 
 Claude Code `/Users/d/.claude.json` and Claude Desktop
 `/Users/d/Library/Application Support/Claude/claude_desktop_config.json` converge

@@ -23,7 +23,7 @@ def test_checkpoint_launch_agent_uses_receipt_wrapper_and_stable_launcher() -> N
     assert payload["RunAtLoad"] is True
     assert payload["ProgramArguments"] == [
         "/bin/bash",
-        "/Users/d/.local/share/launchd-fleet/run-with-receipt.sh",
+        "/Users/d/.local/state/operator-scripts/current/run-with-receipt.sh",
         "--automation-id",
         "com.saagar.bridge-db-checkpoint",
         "--expect-stdout",
@@ -34,6 +34,7 @@ def test_checkpoint_launch_agent_uses_receipt_wrapper_and_stable_launcher() -> N
     ]
     serialized = path.read_text(encoding="utf-8")
     assert "/Users/d/Projects/bridge-db" not in serialized
+    assert "/Users/d/.local/share/launchd-fleet/run-with-receipt.sh" not in serialized
     assert "<string>uv</string>" not in serialized
 
 

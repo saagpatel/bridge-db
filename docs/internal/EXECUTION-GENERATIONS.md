@@ -29,6 +29,14 @@ committed map. It restores a before/partial map before retry, finalizes drain
 and receipt actions for a committed map, and refuses any arbitrary pointer map
 while retaining the journal for review.
 
+Pending-journal recovery always runs first so an already-committed pointer
+transition can finish its drain/receipt work even if recovery evidence became
+stale after the commit. Before any new `activate` or `rollback` pointer mutation,
+the command then calls the owning recovery lifecycle readers for the configured
+BridgeDB path. Both `RecoveryAnchorV1` and the latest `RecoverySealReceiptV1`
+must read back `state=verified` and `ready=true`; missing, stale, unsealed, or
+invalid evidence fails closed before a pending journal or pointer is written.
+
 ## Commands
 
 Run from the exact clean reviewed checkout, with an existing dependency
@@ -144,9 +152,11 @@ It parses (never sources) only `BRIDGE_DB_PRINCIPAL_TOKEN` and
 `BRIDGE_DB_ENV_FILE`, then execs the stable launcher. Unknown or duplicate keys
 fail closed without printing values. The source-owned
 `config/com.saagar.bridge-db-checkpoint.plist` preserves the 30-minute
-run-with-receipt contract while invoking the same stable launcher with
-`--checkpoint`. These are reviewed install inputs only; source presence is not
-proof of live installation or client reconnect.
+run-with-receipt contract through the reviewed operator-script pointer
+`/Users/d/.local/state/operator-scripts/current/run-with-receipt.sh`, while
+invoking the same stable launcher with `--checkpoint`. These are reviewed
+install inputs only; source presence is not proof of live installation or
+client reconnect.
 
 ## MCP tenancy lifecycle
 
@@ -198,9 +208,10 @@ previous-runtime-style open and core write. Rollback therefore preserves the
 database, but the old generation cannot create or acknowledge refusals; that
 feature is degraded until roll-forward.
 
-Pointer rollback is still gated on a current verified recovery anchor/seal and
-the normal activation approval. A stale or missing recovery seal is non-green;
-source compatibility tests do not authorize activation.
+Both activation and pointer rollback are code-gated on a current verified
+recovery anchor/seal and the normal activation approval. A stale, missing,
+invalid, or explicitly unsealed lifecycle is non-green; source compatibility
+tests do not authorize activation.
 
 ## Rollback and drain
 

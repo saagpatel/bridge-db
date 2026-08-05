@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -13,6 +15,8 @@ from pathlib import Path
 import pytest
 
 import bridge_db.execution_generation as execution_generation
+from bridge_db import config, recovery, recovery_seal
+from bridge_db.db import SCHEMA_VERSION, open_db
 from bridge_db.execution_generation import (
     GenerationContractError,
     activate_generation,
@@ -75,6 +79,40 @@ def _stage(source: Path, root: Path, sha: str) -> dict[str, object]:
         reviewed_sha=sha,
         python_executable=Path(sys.executable),
     )
+
+
+def _initialize_recovery_database(db_path: Path) -> None:
+    async def initialize() -> None:
+        db = await open_db(db_path)
+        await db.close()
+
+    asyncio.run(initialize())
+
+
+def _make_recovery_ready(db_path: Path) -> None:
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    sealed = recovery_seal.seal_recovery_batch(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+        batch_id="execution-generation-fixture",
+        owner="codex",
+    )
+    assert sealed["outcome"] == "recovery_sealed"
+    assert sealed["ready"] is True
+
+
+@pytest.fixture
+def _recovery_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    db_path = tmp_path / "activation-bridge.db"
+    _initialize_recovery_database(db_path)
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    _make_recovery_ready(db_path)
+    return db_path
 
 
 def _commit_generation(
@@ -288,8 +326,184 @@ def test_stage_refuses_dirty_or_wrong_source_identity(tmp_path: Path) -> None:
     assert wrong.value.reason_code == "generation.reviewed_sha_mismatch"
 
 
+def test_activation_gate_refuses_missing_recovery_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "activation-bridge.db"
+    _initialize_recovery_database(db_path)
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    generation_id = str(_stage(source, root, sha)["generation_id"])
+
+    with pytest.raises(GenerationContractError) as refused:
+        activate_generation(root, generation_id)
+
+    assert refused.value.reason_code == "generation.recovery_anchor_missing"
+    assert not (root / "current").exists()
+    assert not (root / ".activation.pending.json").exists()
+
+
+def test_activation_cli_reports_recovery_gate_failure_without_pointer_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "activation-bridge.db"
+    _initialize_recovery_database(db_path)
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    generation_id = str(_stage(source, root, sha)["generation_id"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "bridge-db-execution-generation",
+            "activate",
+            "--root",
+            str(root),
+            "--generation-id",
+            generation_id,
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exited:
+        execution_generation.main()
+
+    assert exited.value.code == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": False,
+        "reason_code": "generation.recovery_anchor_missing",
+    }
+    assert not (root / "current").exists()
+
+
+def test_activation_gate_refuses_missing_recovery_seal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "activation-bridge.db"
+    _initialize_recovery_database(db_path)
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    generation_id = str(_stage(source, root, sha)["generation_id"])
+
+    with pytest.raises(GenerationContractError) as refused:
+        activate_generation(root, generation_id)
+
+    assert refused.value.reason_code == "generation.recovery_seal_missing"
+    assert not (root / "current").exists()
+
+
+def test_activation_gate_refuses_stale_recovery_lifecycle(
+    tmp_path: Path, _recovery_ready: Path
+) -> None:
+    with sqlite3.connect(_recovery_ready) as changed:
+        changed.execute(
+            "INSERT INTO activity_log "
+            "(source, timestamp, project_name, summary) VALUES (?, ?, ?, ?)",
+            (
+                "codex",
+                "2026-08-05T00:00:00Z",
+                "bridge-db",
+                "source changed after recovery seal",
+            ),
+        )
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    generation_id = str(_stage(source, root, sha)["generation_id"])
+
+    with pytest.raises(GenerationContractError) as refused:
+        activate_generation(root, generation_id)
+
+    assert refused.value.reason_code == "generation.recovery_anchor_stale"
+    assert not (root / "current").exists()
+
+
+def test_activation_gate_refuses_stale_recovery_seal(
+    tmp_path: Path, _recovery_ready: Path
+) -> None:
+    with sqlite3.connect(_recovery_ready) as changed:
+        changed.execute(
+            "INSERT INTO activity_log "
+            "(source, timestamp, project_name, summary) VALUES (?, ?, ?, ?)",
+            (
+                "codex",
+                "2026-08-05T00:00:00Z",
+                "bridge-db",
+                "source changed before unsealed anchor rotation",
+            ),
+        )
+    rotated = recovery.rotate_recovery_anchor(
+        _recovery_ready,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    assert rotated["ready"] is True
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    generation_id = str(_stage(source, root, sha)["generation_id"])
+
+    with pytest.raises(GenerationContractError) as refused:
+        activate_generation(root, generation_id)
+
+    assert refused.value.reason_code == "generation.recovery_seal_stale"
+    assert not (root / "current").exists()
+
+
+def test_activation_gate_refuses_terminal_unsealed_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "activation-bridge.db"
+    _initialize_recovery_database(db_path)
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    def fail_rotation(*_args: object, **_kwargs: object) -> None:
+        raise OSError("fixture recovery rotation failure")
+
+    monkeypatch.setattr(recovery_seal, "rotate_recovery_anchor", fail_rotation)
+    unsealed = recovery_seal.seal_recovery_batch(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+        batch_id="execution-generation-unsealed",
+        owner="codex",
+    )
+    assert unsealed["outcome"] == "recovery_unsealed"
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    generation_id = str(_stage(source, root, sha)["generation_id"])
+
+    with pytest.raises(GenerationContractError) as refused:
+        activate_generation(root, generation_id)
+
+    assert refused.value.reason_code == "generation.recovery_seal_unsealed"
+    assert not (root / "current").exists()
+
+
+def test_activation_gate_accepts_current_verified_anchor_and_seal(
+    tmp_path: Path, _recovery_ready: Path
+) -> None:
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    generation_id = str(_stage(source, root, sha)["generation_id"])
+
+    activated = activate_generation(root, generation_id)
+
+    assert activated["outcome"] == "activated"
+    assert read_activation(root)["current_generation"] == generation_id
+
+
 def test_activation_second_generation_and_rollback_have_exact_readback(
     tmp_path: Path,
+    _recovery_ready: Path,
 ) -> None:
     source, first_sha = _source_repo(tmp_path)
     root = tmp_path / "runtime"
@@ -320,7 +534,38 @@ def test_activation_second_generation_and_rollback_have_exact_readback(
     assert read_activation(root)["previous_generation"] == second_id
 
 
-def test_pending_before_map_is_restored_then_activation_retried(tmp_path: Path) -> None:
+def test_rollback_gate_refuses_stale_recovery_without_pointer_change(
+    tmp_path: Path, _recovery_ready: Path
+) -> None:
+    source, first_sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    first_id = str(_stage(source, root, first_sha)["generation_id"])
+    activate_generation(root, first_id)
+    second_id, _ = _commit_generation(source, root, marker="fixture-two")
+    activate_generation(root, second_id)
+    with sqlite3.connect(_recovery_ready) as changed:
+        changed.execute(
+            "INSERT INTO activity_log "
+            "(source, timestamp, project_name, summary) VALUES (?, ?, ?, ?)",
+            (
+                "codex",
+                "2026-08-05T00:00:00Z",
+                "bridge-db",
+                "source changed before rollback",
+            ),
+        )
+
+    with pytest.raises(GenerationContractError) as refused:
+        rollback_generation(root)
+
+    assert refused.value.reason_code == "generation.recovery_anchor_stale"
+    assert read_activation(root)["current_generation"] == second_id
+    assert read_activation(root)["previous_generation"] == first_id
+
+
+def test_pending_before_map_is_restored_then_activation_retried(
+    tmp_path: Path, _recovery_ready: Path
+) -> None:
     source, first_sha = _source_repo(tmp_path)
     root = tmp_path / "runtime"
     first_id = str(_stage(source, root, first_sha)["generation_id"])
@@ -342,7 +587,9 @@ def test_pending_before_map_is_restored_then_activation_retried(tmp_path: Path) 
     assert not (root / ".activation.pending.json").exists()
 
 
-def test_pending_partial_pointer_map_is_restored_then_retried(tmp_path: Path) -> None:
+def test_pending_partial_pointer_map_is_restored_then_retried(
+    tmp_path: Path, _recovery_ready: Path
+) -> None:
     source, first_sha = _source_repo(tmp_path)
     root = tmp_path / "runtime"
     first_id = str(_stage(source, root, first_sha)["generation_id"])
@@ -364,7 +611,9 @@ def test_pending_partial_pointer_map_is_restored_then_retried(tmp_path: Path) ->
     assert read_activation(root)["previous_generation"] == first_id
 
 
-def test_pending_committed_map_finalizes_post_actions_once(tmp_path: Path) -> None:
+def test_pending_committed_map_finalizes_post_actions_once(
+    tmp_path: Path, _recovery_ready: Path
+) -> None:
     source, first_sha = _source_repo(tmp_path)
     root = tmp_path / "runtime"
     first_id = str(_stage(source, root, first_sha)["generation_id"])
@@ -395,7 +644,9 @@ def test_pending_committed_map_finalizes_post_actions_once(tmp_path: Path) -> No
     assert not (root / ".activation.pending.json").exists()
 
 
-def test_pending_arbitrary_pointer_map_is_refused_and_retained(tmp_path: Path) -> None:
+def test_pending_arbitrary_pointer_map_is_refused_and_retained(
+    tmp_path: Path, _recovery_ready: Path
+) -> None:
     source, first_sha = _source_repo(tmp_path)
     root = tmp_path / "runtime"
     first_id = str(_stage(source, root, first_sha)["generation_id"])
@@ -420,7 +671,9 @@ def test_pending_arbitrary_pointer_map_is_refused_and_retained(tmp_path: Path) -
 
 
 def test_post_action_failure_recovers_without_pointer_rollback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _recovery_ready: Path,
 ) -> None:
     source, first_sha = _source_repo(tmp_path)
     root = tmp_path / "runtime"
@@ -441,6 +694,18 @@ def test_post_action_failure_recovers_without_pointer_rollback(
     )
     assert read_activation(root)["state"] == "interrupted"
 
+    with sqlite3.connect(_recovery_ready) as changed:
+        changed.execute(
+            "INSERT INTO activity_log "
+            "(source, timestamp, project_name, summary) VALUES (?, ?, ?, ?)",
+            (
+                "codex",
+                "2026-08-05T00:00:00Z",
+                "bridge-db",
+                "source changed after pointer commit",
+            ),
+        )
+
     monkeypatch.setattr(execution_generation, "_mark_draining", original_mark)
     recovered = activate_generation(root, second_id)
 
@@ -449,7 +714,9 @@ def test_post_action_failure_recovers_without_pointer_rollback(
     assert read_activation(root)["previous_generation"] == first_id
 
 
-def test_committed_rollback_recovery_does_not_roll_forward(tmp_path: Path) -> None:
+def test_committed_rollback_recovery_does_not_roll_forward(
+    tmp_path: Path, _recovery_ready: Path
+) -> None:
     source, first_sha = _source_repo(tmp_path)
     root = tmp_path / "runtime"
     first_id = str(_stage(source, root, first_sha)["generation_id"])
@@ -479,7 +746,9 @@ def test_committed_rollback_recovery_does_not_roll_forward(tmp_path: Path) -> No
     assert read_activation(root)["previous_generation"] == second_id
 
 
-def test_readback_fails_closed_on_pending_or_pointer_mismatch(tmp_path: Path) -> None:
+def test_readback_fails_closed_on_pending_or_pointer_mismatch(
+    tmp_path: Path, _recovery_ready: Path
+) -> None:
     source, sha = _source_repo(tmp_path)
     root = tmp_path / "runtime"
     staged = _stage(source, root, sha)
