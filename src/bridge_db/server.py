@@ -42,7 +42,28 @@ class AppContext:
 class InstrumentedFastMCP(FastMCP):
     """Account every MCP tool request in the process-owned tenancy lease."""
 
-    async def call_tool(
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._bridge_shared_runtime = False
+        self._bridge_request_lock = asyncio.Lock()
+        self._bridge_shared_tenancy_tracker: TenancyTracker | None = None
+
+    def enable_shared_runtime(self, tracker: TenancyTracker | None = None) -> None:
+        """Serialize one broker's shared DB connection across MCP sessions."""
+        self._bridge_shared_runtime = True
+        self._bridge_shared_tenancy_tracker = tracker
+
+    def shared_tenancy_tracker(self) -> TenancyTracker | None:
+        return self._bridge_shared_tenancy_tracker
+
+    def close_shared_runtime(self) -> None:
+        tracker = self._bridge_shared_tenancy_tracker
+        if tracker is not None:
+            tracker.close(reason="shared_broker_close")
+        self._bridge_shared_tenancy_tracker = None
+        self._bridge_shared_runtime = False
+
+    async def _call_tool_accounted(
         self, name: str, arguments: dict[str, Any]
     ) -> Sequence[ContentBlock] | dict[str, Any]:
         context = self.get_context()
@@ -60,6 +81,14 @@ class InstrumentedFastMCP(FastMCP):
         finally:
             tracker.request_finished(name, outcome=outcome)
 
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any]
+    ) -> Sequence[ContentBlock] | dict[str, Any]:
+        if self._bridge_shared_runtime:
+            async with self._bridge_request_lock:
+                return await self._call_tool_accounted(name, arguments)
+        return await self._call_tool_accounted(name, arguments)
+
 
 async def monitor_tenancy_retirement(
     tracker: TenancyTracker,
@@ -75,6 +104,29 @@ async def monitor_tenancy_retirement(
             return
 
 
+def build_tenancy_tracker(
+    principal: str | None,
+) -> tuple[TenancyTracker, dict[str, Any]]:
+    """Build one tracker bound to the current immutable runtime identity."""
+    from bridge_db.execution_generation import runtime_generation_identity
+
+    runtime_generation = runtime_generation_identity()
+    manifest_path = runtime_generation.get("manifest_path")
+    execution_root = (
+        Path(str(manifest_path)).parents[2]
+        if runtime_generation["state"] == "verified" and manifest_path
+        else None
+    )
+    tracker = TenancyTracker(
+        root=tenancy_root(),
+        owner=owner_for_principal(principal),
+        principal=principal,
+        generation=runtime_generation.get("generation_id"),
+        execution_root=execution_root,
+    )
+    return tracker, runtime_generation
+
+
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # noqa: ARG001
     from bridge_db.audit import log_audit
@@ -84,13 +136,11 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # 
         load_principal_grants,
         resolve_grant,
     )
-    from bridge_db.execution_generation import runtime_generation_identity
-
     raw_token = os.environ.get("BRIDGE_DB_PRINCIPAL_TOKEN")
     token = raw_token.strip() if raw_token is not None else None
     grant = resolve_grant(token, load_principal_grants(config.PRINCIPALS_PATH))
     principal = grant.caller if grant is not None else None
-    runtime_generation = runtime_generation_identity()
+    tracker, runtime_generation = build_tenancy_tracker(principal)
     if grant is not None and clock.now() >= grant.expires_at:
         log_audit(
             "auth.bind",
@@ -115,33 +165,31 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # 
         runtime_generation.get("generation_id") or "mutable",
         runtime_generation["state"],
     )
-    manifest_path = runtime_generation.get("manifest_path")
-    execution_root = (
-        Path(str(manifest_path)).parents[2]
-        if runtime_generation["state"] == "verified" and manifest_path
+    shared_tracker = (
+        server.shared_tenancy_tracker()
+        if isinstance(server, InstrumentedFastMCP)
         else None
     )
-    tracker = TenancyTracker(
-        root=tenancy_root(),
-        owner=owner_for_principal(principal),
-        principal=principal,
-        generation=runtime_generation.get("generation_id"),
-        execution_root=execution_root,
-    )
-    tracker.start()
-    server_task = asyncio.current_task()
-    if server_task is None:
-        tracker.close(reason="server_task_unavailable")
-        raise RuntimeError("tenancy.server_task_unavailable")
+    owns_tracker = shared_tracker is None
+    if shared_tracker is not None:
+        tracker = shared_tracker
+    else:
+        tracker.start()
     cooperative_shutdown = asyncio.Event()
+    monitor_task: asyncio.Task[None] | None = None
+    if owns_tracker:
+        server_task = asyncio.current_task()
+        if server_task is None:
+            tracker.close(reason="server_task_unavailable")
+            raise RuntimeError("tenancy.server_task_unavailable")
 
-    def request_cooperative_shutdown() -> None:
-        cooperative_shutdown.set()
-        server_task.cancel()
+        def request_cooperative_shutdown() -> None:
+            cooperative_shutdown.set()
+            server_task.cancel()
 
-    monitor_task = asyncio.create_task(
-        monitor_tenancy_retirement(tracker, request_cooperative_shutdown)
-    )
+        monitor_task = asyncio.create_task(
+            monitor_tenancy_retirement(tracker, request_cooperative_shutdown)
+        )
     db: aiosqlite.Connection | None = None
     close_reason = "normal_close"
     try:
@@ -167,15 +215,17 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # 
         close_reason = "server_error"
         raise
     finally:
-        monitor_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await monitor_task
+        if monitor_task is not None:
+            monitor_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await monitor_task
         try:
             if db is not None:
                 await db.close()
         finally:
-            tracker.close(reason=close_reason)
-        logger.info("bridge-db shut down")
+            if owns_tracker:
+                tracker.close(reason=close_reason)
+        logger.info("bridge-db session shut down")
 
 
 mcp = InstrumentedFastMCP(

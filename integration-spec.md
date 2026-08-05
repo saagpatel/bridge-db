@@ -122,11 +122,13 @@ but its installed package, standard-library, shared-library, and OS environment
 is explicitly unmanaged; lockfile binding is not an environment-convergence
 claim.
 
-Each MCP process publishes a private owner/principal/generation lease with
-request timing, lifecycle reason, PID ancestry, and RSS. Obsolete generations
-refuse new requests, finish active requests, and cooperatively cancel their own
-server task. Lifecycle apply is exact-target and cannot terminate another
-process. Snapshot refusal storage stays an additive extension over core SQLite
+Each direct MCP process and each shared broker publishes a private
+owner/principal/generation lease with request timing, lifecycle reason, PID
+ancestry, and RSS. Inventory V2 distinguishes live identity-bound processes,
+stale lease records, unknown process state, current RSS, and the historical RSS
+last persisted in each lease. Obsolete generations refuse new requests, finish
+active requests, and cooperatively cancel their own server task. Lifecycle
+apply is exact-target and cannot terminate another process. Snapshot refusal storage stays an additive extension over core SQLite
 `user_version=23`, preserving open/read compatibility with exact previous
 merged generation `d7272d489873faa5ed84c81734636ffc8cecb095`; rollback loses
 the refusal API until roll-forward but does not discard its rows. Activation or
@@ -140,7 +142,12 @@ through `bridge_db.client_rebinding`: only the exact legacy `bridge-db`
 command/args are changed, environment values are preserved without output, and
 each target gets a private exact-byte backup plus digest-bound restore. Codex
 uses the source-owned `config/bridge-db-mcp-immutable` install input, which
-parses only the two reviewed credential keys before execing the stable launcher.
+parses the two required credential keys plus the optional reviewed
+`BRIDGE_DB_TRANSPORT_MODE=direct|shared` key. `direct` is the default and exact
+rollback. In `shared` mode, no-argument MCP launches remain stdio to the client
+but use a thin shell relay to one credential- and generation-bound broker over
+an owner-only Unix socket. CLI operations such as `--checkpoint` always bypass
+the relay and execute directly.
 The checkpoint LaunchAgent input invokes that same launcher with `--checkpoint`
 through the existing receipt wrapper. Live installation and reconnect/reload
 remain separate governed effects.
@@ -465,14 +472,24 @@ seal directory.
 
 ---
 
-## No Daemon Needed
+## Direct and shared local runtimes
 
-Each MCP client (CC, Codex, Claude Desktop) launches its own `bridge-db` process via
-stdio. All processes share the same SQLite file at `~/.local/share/bridge-db/bridge.db`
-with WAL mode + `PRAGMA busy_timeout=15000` for concurrent writer waiting. Logical
-lost-update protection is handled by context-section CAS and handoff claim guards,
-not by WAL alone.
+The client-facing contract is always stdio. `BRIDGE_DB_TRANSPORT_MODE=direct`
+keeps one full `bridge-db` process per client. The opt-in `shared` mode keeps a
+small stdio relay per client and multiplexes requests through Streamable HTTP
+over a private Unix domain socket to one broker per credential and immutable
+source generation. No TCP listener, LaunchAgent, secret in argv, or cross-principal
+broker is introduced.
 
-There is no shared bridge-db daemon, no HTTP transport, and no need for a LaunchAgent.
-The stdio model is client-managed: the server process lives exactly as long as the
-client session that spawned it.
+Relay references are private PID/start-identity leases. The broker preserves
+stale reference history, serializes tool calls over its one SQLite connection,
+and cooperatively exits 300 seconds after the last live relay disappears. It
+never signals another process. Broker startup fails closed after 10 seconds;
+setting the transport mode back to `direct` is the exact rollback and affects
+only future client spawns. Existing transports are never disconnected by this
+path.
+
+Both modes use the same SQLite file at `~/.local/share/bridge-db/bridge.db` with
+WAL mode + `PRAGMA busy_timeout=15000`. Logical lost-update protection remains
+the responsibility of context-section CAS and handoff claim guards, not WAL
+alone.

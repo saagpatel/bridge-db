@@ -50,7 +50,7 @@ def _tracker(
     *,
     owner: str = "codex",
     generation: str = "generation-one",
-    identity: str = "fixture-process-start",
+    identity: str | None = "fixture-process-start",
 ) -> TenancyTracker:
     return TenancyTracker(
         root=root,
@@ -390,11 +390,11 @@ def test_generation_rollover_rechecks_exact_pid_ancestry(tmp_path: Path) -> None
 
 def test_app_restart_preserves_both_close_history_records(tmp_path: Path) -> None:
     root = tmp_path / "tenancy"
-    before = _tracker(root, identity="fixture-process-before-restart")
+    before = _tracker(root, identity=None)
     before.start()
     before.close(reason="app_restart")
 
-    after = _tracker(root, identity="fixture-process-after-restart")
+    after = _tracker(root, identity=None)
     after.start()
     assert tenancy_inventory(root)["active_count"] == 1
     after.close(reason="normal_close_after_restart")
@@ -558,21 +558,97 @@ async def test_instrumented_mcp_accounts_success_and_failure(
     ]
 
 
+@pytest.mark.asyncio
+async def test_shared_runtime_serializes_one_broker_database_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = 0
+    highwater = 0
+
+    class _Lifespan:
+        tenancy_tracker = None
+
+    class _Request:
+        lifespan_context = _Lifespan()
+
+    class _Context:
+        request_context = _Request()
+
+    async def _call_tool(
+        _self: FastMCP, _name: str, _arguments: dict[str, object]
+    ) -> dict[str, object]:
+        nonlocal active, highwater
+        active += 1
+        highwater = max(highwater, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return {"ok": True}
+
+    server = InstrumentedFastMCP("shared-serialization-test")
+    server.enable_shared_runtime()
+    monkeypatch.setattr(server, "get_context", lambda: _Context())
+    monkeypatch.setattr(FastMCP, "call_tool", _call_tool)
+
+    await asyncio.gather(
+        server.call_tool("first", {}),
+        server.call_tool("second", {}),
+    )
+
+    assert highwater == 1
+
+
 def test_inventory_reports_owner_generation_requests_and_rss(tmp_path: Path) -> None:
     root = tmp_path / "tenancy"
-    tracker = _tracker(root, owner="hermes", generation="generation-hermes")
+    tracker = TenancyTracker(
+        root=root,
+        owner="hermes",
+        principal="hermes",
+        generation="generation-hermes",
+        pid=os.getpid(),
+    )
     tracker.start()
     tracker.request_started("health")
 
     inventory = tenancy_inventory(root)
 
     assert inventory["state"] == "observed"
+    assert inventory["schema"] == "BridgeMcpTenancyInventoryV2"
     assert inventory["active_count"] == 1
+    assert inventory["lease_count"] == 1
+    assert inventory["stale_lease_count"] == 0
+    assert inventory["process_states"] == {
+        "same": 1,
+        "missing": 0,
+        "mismatch": 0,
+        "unknown": 0,
+    }
     assert inventory["owners"] == {"hermes": 1}
     assert inventory["generations"] == {"generation-hermes": 1}
     assert inventory["active_request_count"] == 1
     assert inventory["rss_total_bytes"] > 0
+    assert inventory["rss_measurement_state"] == "observed"
+    assert inventory["rss_observed_process_count"] == 1
+    assert inventory["rss_unverified_process_count"] == 0
+    assert inventory["lease_last_observed_rss_total_bytes"] > 0
     tracker.request_finished("health", outcome="succeeded")
+    tracker.close()
+
+
+def test_inventory_separates_stale_lease_from_live_process(tmp_path: Path) -> None:
+    root = tmp_path / "tenancy"
+    tracker = _tracker(root, identity="fixture-not-the-live-process-identity")
+    tracker.start()
+
+    inventory = tenancy_inventory(root)
+
+    assert inventory["active_count"] == 0
+    assert inventory["lease_count"] == 1
+    assert inventory["stale_lease_count"] == 1
+    assert inventory["process_states"]["mismatch"] == 1
+    assert inventory["owners"] == {}
+    assert inventory["lease_owners"] == {"codex": 1}
+    assert inventory["rss_total_bytes"] == 0
+    assert inventory["lease_last_observed_rss_total_bytes"] > 0
     tracker.close()
 
 

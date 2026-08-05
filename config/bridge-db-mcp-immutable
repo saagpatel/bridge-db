@@ -29,8 +29,10 @@ fi
 
 token_seen=0
 auth_seen=0
+transport_seen=0
 bridge_token=
 bridge_auth_mode=
+bridge_transport_mode=direct
 while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
         ''|'#'*) ;;
@@ -50,6 +52,14 @@ while IFS= read -r line || [ -n "$line" ]; do
             auth_seen=1
             bridge_auth_mode=${line#BRIDGE_DB_AUTH_MODE=}
             ;;
+        BRIDGE_DB_TRANSPORT_MODE=*)
+            if [ "$transport_seen" -ne 0 ]; then
+                echo "bridge_db.wrapper_env_duplicate_key" >&2
+                exit 78
+            fi
+            transport_seen=1
+            bridge_transport_mode=${line#BRIDGE_DB_TRANSPORT_MODE=}
+            ;;
         *)
             echo "bridge_db.wrapper_env_unknown_key" >&2
             exit 78
@@ -68,9 +78,134 @@ case "$bridge_auth_mode" in
         exit 78
         ;;
 esac
+case "$bridge_transport_mode" in
+    direct|shared) ;;
+    *)
+        echo "bridge_db.wrapper_transport_mode_invalid" >&2
+        exit 78
+        ;;
+esac
 
 BRIDGE_DB_PRINCIPAL_TOKEN=$bridge_token
 BRIDGE_DB_AUTH_MODE=$bridge_auth_mode
-export BRIDGE_DB_PRINCIPAL_TOKEN BRIDGE_DB_AUTH_MODE
+BRIDGE_DB_TRANSPORT_MODE=$bridge_transport_mode
+export BRIDGE_DB_PRINCIPAL_TOKEN BRIDGE_DB_AUTH_MODE BRIDGE_DB_TRANSPORT_MODE
 unset BRIDGE_DB_ENV_FILE bridge_token bridge_auth_mode line env_owner env_mode
-exec /Users/d/.local/state/bridge-db/current/bin/bridge-db-mcp "$@"
+
+stable_launcher=/Users/d/.local/state/bridge-db/current/bin/bridge-db-mcp
+if [ "$bridge_transport_mode" = direct ] || [ "$#" -ne 0 ]; then
+    exec "$stable_launcher" "$@"
+fi
+
+command -v curl >/dev/null 2>&1 || {
+    echo "bridge_db.shared_relay_curl_missing" >&2
+    exit 69
+}
+
+binding=$($stable_launcher --ensure-shared-broker) || {
+    echo "bridge_db.shared_relay_broker_unavailable" >&2
+    exit 69
+}
+broker_socket=$(printf '%s\n' "$binding" | sed -n '1p')
+client_lease=$(printf '%s\n' "$binding" | sed -n '2p')
+release_launcher=$(printf '%s\n' "$binding" | sed -n '3p')
+case "$broker_socket:$client_lease:$release_launcher" in
+    /*:/*:/*) ;;
+    *)
+        echo "bridge_db.shared_relay_binding_invalid" >&2
+        exit 69
+        ;;
+esac
+unset binding
+unset BRIDGE_DB_PRINCIPAL_TOKEN
+
+relay_dir=${broker_socket%/*}
+header_file=$(mktemp "$relay_dir/relay-headers.XXXXXX") || exit 69
+body_file=$(mktemp "$relay_dir/relay-body.XXXXXX") || {
+    rm -f -- "$header_file"
+    exit 69
+}
+chmod 600 "$header_file" "$body_file"
+session_id=
+protocol_version=
+
+cleanup_relay() {
+    relay_status=$?
+    if [ -n "$session_id" ]; then
+        curl --silent --show-error --unix-socket "$broker_socket" \
+            --request DELETE \
+            --header "Mcp-Session-Id: $session_id" \
+            --output /dev/null \
+            http://localhost/mcp >/dev/null 2>&1 || true
+    fi
+    "$release_launcher" --release-shared-client "$client_lease" \
+        >/dev/null 2>&1 || true
+    rm -f -- "$header_file" "$body_file"
+    exit "$relay_status"
+}
+trap cleanup_relay EXIT HUP INT TERM
+
+while IFS= read -r message || [ -n "$message" ]; do
+    : > "$header_file"
+    : > "$body_file"
+    if [ -n "$session_id" ] && [ -n "$protocol_version" ]; then
+        http_status=$(printf '%s' "$message" | curl --silent --show-error \
+            --unix-socket "$broker_socket" \
+            --dump-header "$header_file" \
+            --output "$body_file" \
+            --write-out '%{http_code}' \
+            --header 'Accept: application/json, text/event-stream' \
+            --header 'Content-Type: application/json' \
+            --header "Mcp-Session-Id: $session_id" \
+            --header "Mcp-Protocol-Version: $protocol_version" \
+            --data-binary @- \
+            http://localhost/mcp) || exit 69
+    elif [ -n "$session_id" ]; then
+        http_status=$(printf '%s' "$message" | curl --silent --show-error \
+            --unix-socket "$broker_socket" \
+            --dump-header "$header_file" \
+            --output "$body_file" \
+            --write-out '%{http_code}' \
+            --header 'Accept: application/json, text/event-stream' \
+            --header 'Content-Type: application/json' \
+            --header "Mcp-Session-Id: $session_id" \
+            --data-binary @- \
+            http://localhost/mcp) || exit 69
+    else
+        http_status=$(printf '%s' "$message" | curl --silent --show-error \
+            --unix-socket "$broker_socket" \
+            --dump-header "$header_file" \
+            --output "$body_file" \
+            --write-out '%{http_code}' \
+            --header 'Accept: application/json, text/event-stream' \
+            --header 'Content-Type: application/json' \
+            --data-binary @- \
+            http://localhost/mcp) || exit 69
+    fi
+
+    case "$http_status" in
+        200)
+            if [ -z "$session_id" ]; then
+                session_id=$(awk '
+                    tolower($1) == "mcp-session-id:" {
+                        gsub("\\r", "", $2); value=$2
+                    }
+                    END { print value }
+                ' "$header_file")
+            fi
+            if [ -z "$protocol_version" ]; then
+                protocol_version=$(sed -n \
+                    's/.*"protocolVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+                    "$body_file" | sed -n '1p')
+            fi
+            body=$(tr -d '\n' < "$body_file")
+            [ -n "$body" ] || exit 69
+            printf '%s\n' "$body"
+            ;;
+        202) ;;
+        *)
+            echo "bridge_db.shared_relay_http_$http_status" >&2
+            exit 69
+            ;;
+    esac
+done

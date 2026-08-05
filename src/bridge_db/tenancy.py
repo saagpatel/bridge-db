@@ -157,7 +157,7 @@ def _read_json(path: Path) -> dict[str, Any]:
     return {str(key): value for key, value in cast(dict[object, Any], raw).items()}
 
 
-def _process_identity(pid: int) -> str | None:
+def process_identity(pid: int) -> str | None:
     proc_stat = Path(f"/proc/{pid}/stat")
     try:
         if proc_stat.is_file():
@@ -240,6 +240,65 @@ def _rss_bytes(pid: int | None = None) -> int:
     return int(usage if sys_platform_is_macos() else usage * 1024)
 
 
+def _process_observations_by_lease(
+    leases: list[tuple[Path, dict[str, Any]]],
+) -> dict[str, tuple[ProcessState, int | None]]:
+    """Bind leases to live identities and RSS in one bounded process-table pass."""
+    expected = {
+        int(record["pid"]): (str(record["lease_id"]), str(record["process_identity"]))
+        for _, record in leases
+    }
+    observations: dict[str, tuple[ProcessState, int | None]] = {}
+    if not expected:
+        return observations
+    if sys_platform_is_macos():
+        try:
+            result = subprocess.run(
+                ["ps", "-axo", "pid=,lstart=,rss="],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+        except OSError:
+            return {
+                lease_id: ("unknown", None)
+                for lease_id, _identity in expected.values()
+            }
+        if result.returncode != 0:
+            return {
+                lease_id: ("unknown", None)
+                for lease_id, _identity in expected.values()
+            }
+        pattern = re.compile(r"^\s*(\d+)\s+(.{24})\s+(\d+)\s*$")
+        table: dict[int, tuple[str, int]] = {}
+        for line in result.stdout.splitlines():
+            match = pattern.match(line)
+            if match is None:
+                continue
+            pid = int(match.group(1))
+            table[pid] = (f"ps-start:{match.group(2)}", int(match.group(3)) * 1024)
+        for pid, (lease_id, identity) in expected.items():
+            row = table.get(pid)
+            if row is not None:
+                observations[lease_id] = (
+                    ("same", row[1]) if row[0] == identity else ("mismatch", None)
+                )
+                continue
+            state = probe_process(pid, identity)
+            observations[lease_id] = (
+                ("same", _rss_bytes(pid)) if state == "same" else (state, None)
+            )
+        return observations
+
+    for pid, (lease_id, identity) in expected.items():
+        state = probe_process(pid, identity)
+        observations[lease_id] = (
+            ("same", _rss_bytes(pid)) if state == "same" else (state, None)
+        )
+    return observations
+
+
 def sys_platform_is_macos() -> bool:
     return os.uname().sysname == "Darwin"
 
@@ -253,7 +312,7 @@ def probe_process(pid: int, expected_identity: str) -> ProcessState:
         return "unknown"
     except OSError:
         return "unknown"
-    observed = _process_identity(pid)
+    observed = process_identity(pid)
     if observed is None:
         return "unknown"
     return "same" if observed == expected_identity else "mismatch"
@@ -341,7 +400,7 @@ class TenancyTracker:
         if not _OWNER_RE.fullmatch(self.owner):
             raise TenancyContractError("tenancy.owner_invalid")
         self.pid = self.pid or os.getpid()
-        self.process_identity = self.process_identity or _process_identity(self.pid)
+        self.process_identity = self.process_identity or process_identity(self.pid)
         if self.process_identity is None:
             raise TenancyContractError("tenancy.process_identity_unknown")
         identity_seed = f"{self.owner}\0{self.pid}\0{self.process_identity}\0{self.generation or 'mutable'}"
@@ -884,10 +943,11 @@ def tenancy_inventory(root: Path | None = None) -> dict[str, Any]:
     selected = root or tenancy_root()
     if not selected.exists():
         return {
-            "schema": "BridgeMcpTenancyInventoryV1",
+            "schema": "BridgeMcpTenancyInventoryV2",
             "state": "missing",
             "root": str(selected),
             "active_count": 0,
+            "lease_count": 0,
             "owners": {},
             "generations": {},
             "active_request_count": 0,
@@ -896,7 +956,7 @@ def tenancy_inventory(root: Path | None = None) -> dict[str, Any]:
         leases = read_active_leases(selected)
     except TenancyContractError as exc:
         return {
-            "schema": "BridgeMcpTenancyInventoryV1",
+            "schema": "BridgeMcpTenancyInventoryV2",
             "state": "unverified",
             "root": str(selected),
             "active_count": None,
@@ -904,33 +964,78 @@ def tenancy_inventory(root: Path | None = None) -> dict[str, Any]:
         }
     owners: dict[str, int] = {}
     generations: dict[str, int] = {}
+    lease_owners: dict[str, int] = {}
+    lease_generations: dict[str, int] = {}
     active_requests = 0
+    lease_active_requests = 0
     oldest: datetime | None = None
+    oldest_lease: datetime | None = None
+    observations = _process_observations_by_lease(leases)
+    process_states: dict[str, int] = {
+        "same": 0,
+        "missing": 0,
+        "mismatch": 0,
+        "unknown": 0,
+    }
     rss_total = 0
+    lease_rss_total = 0
     for _, record in leases:
         owner = str(record.get("owner"))
         generation = str(record.get("generation") or "mutable")
-        owners[owner] = owners.get(owner, 0) + 1
-        generations[generation] = generations.get(generation, 0) + 1
-        active_requests += int(record.get("active_request_count", 0))
-        rss_total += int(record.get("rss_bytes", 0))
+        lease_owners[owner] = lease_owners.get(owner, 0) + 1
+        lease_generations[generation] = lease_generations.get(generation, 0) + 1
+        lease_active_requests += int(record.get("active_request_count", 0))
+        lease_id = str(record["lease_id"])
+        process_state, current_rss = observations[lease_id]
+        process_states[process_state] += 1
+        if process_state == "same":
+            owners[owner] = owners.get(owner, 0) + 1
+            generations[generation] = generations.get(generation, 0) + 1
+            active_requests += int(record.get("active_request_count", 0))
+            if current_rss is not None:
+                rss_total += current_rss
+        lease_rss_total += int(record.get("rss_bytes", 0))
         created = _parse_utc(record.get("created_at"))
-        oldest = created if oldest is None or created < oldest else oldest
+        oldest_lease = (
+            created if oldest_lease is None or created < oldest_lease else oldest_lease
+        )
+        if process_state == "same":
+            oldest = created if oldest is None or created < oldest else oldest
     age = (
         max((clock.now().astimezone(UTC) - oldest).total_seconds(), 0)
         if oldest is not None
         else None
     )
+    lease_age = (
+        max((clock.now().astimezone(UTC) - oldest_lease).total_seconds(), 0)
+        if oldest_lease is not None
+        else None
+    )
+    live_count = process_states["same"]
+    unknown_count = process_states["unknown"]
     return {
-        "schema": "BridgeMcpTenancyInventoryV1",
+        "schema": "BridgeMcpTenancyInventoryV2",
         "state": "observed",
         "root": str(selected),
-        "active_count": len(leases),
+        "active_count": live_count,
+        "lease_count": len(leases),
+        "stale_lease_count": process_states["missing"]
+        + process_states["mismatch"],
+        "unknown_process_count": unknown_count,
+        "process_states": process_states,
         "owners": owners,
         "generations": generations,
+        "lease_owners": lease_owners,
+        "lease_generations": lease_generations,
         "active_request_count": active_requests,
+        "lease_active_request_count": lease_active_requests,
         "rss_total_bytes": rss_total,
+        "rss_measurement_state": "observed" if unknown_count == 0 else "partial",
+        "rss_observed_process_count": live_count,
+        "rss_unverified_process_count": unknown_count,
+        "lease_last_observed_rss_total_bytes": lease_rss_total,
         "oldest_age_seconds": age,
+        "oldest_lease_age_seconds": lease_age,
     }
 
 

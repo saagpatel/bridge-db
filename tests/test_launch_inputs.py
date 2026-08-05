@@ -93,6 +93,45 @@ def test_codex_wrapper_parses_only_exact_private_keys_and_forwards_args(
     ]
 
 
+def test_codex_wrapper_accepts_reviewed_shared_transport_key_for_cli_passthrough(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "output"
+    launcher = tmp_path / "launcher"
+    launcher.write_text(
+        "#!/bin/sh\nprintf '%s\\n%s\\n' \"$BRIDGE_DB_TRANSPORT_MODE\" \"$*\" > \"$FIXTURE_OUTPUT\"\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    wrapper = _executable_wrapper(tmp_path, launcher)
+    env_file = tmp_path / "bridge-db.env"
+    env_file.write_text(
+        "BRIDGE_DB_PRINCIPAL_TOKEN=fixture-wrapper-secret-abcdefghijklmnopqrstuvwxyz\n"
+        "BRIDGE_DB_AUTH_MODE=warn\n"
+        "BRIDGE_DB_TRANSPORT_MODE=shared\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+
+    result = subprocess.run(
+        [str(wrapper), "--checkpoint"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "BRIDGE_DB_ENV_FILE": str(env_file),
+            "FIXTURE_OUTPUT": str(output),
+        },
+    )
+
+    assert result.returncode == 0
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        "shared",
+        "--checkpoint",
+    ]
+
+
 @pytest.mark.parametrize(
     "bad_content",
     [
@@ -101,6 +140,8 @@ def test_codex_wrapper_parses_only_exact_private_keys_and_forwards_args(
         "BRIDGE_DB_PRINCIPAL_TOKEN=fixture-secret-abcdefghijklmnopqrstuvwxyz\n"
         "BRIDGE_DB_PRINCIPAL_TOKEN=duplicate-secret-abcdefghijklmnopqrstuvwxyz\n"
         "BRIDGE_DB_AUTH_MODE=warn\n",
+        "BRIDGE_DB_PRINCIPAL_TOKEN=fixture-secret-abcdefghijklmnopqrstuvwxyz\n"
+        "BRIDGE_DB_AUTH_MODE=warn\nBRIDGE_DB_TRANSPORT_MODE=surprise\n",
     ],
 )
 def test_codex_wrapper_refuses_unknown_or_duplicate_keys_without_secret_output(
@@ -140,7 +181,7 @@ def test_codex_wrapper_source_is_syntax_valid_and_immutable_path_bound() -> None
     )
 
     assert result.returncode == 0, result.stderr
-    assert f'exec {_STABLE_LAUNCHER} "$@"' in source
+    assert f"stable_launcher={_STABLE_LAUNCHER}" in source
     assert "/Users/d/Projects/bridge-db" not in source
     assert "source " not in source
     assert ". \"$env_file\"" not in source

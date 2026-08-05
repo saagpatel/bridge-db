@@ -57,6 +57,7 @@ def _source_repo(tmp_path: Path) -> tuple[Path, str]:
         "src/bridge_db/execution_generation.py": "GENERATION = 'fixture'\n",
         "src/bridge_db/secure_binding.py": "BINDING = 'fixture'\n",
         "src/bridge_db/server.py": "SERVER = 'fixture'\n",
+        "src/bridge_db/shared_runtime.py": "SHARED_RUNTIME = 'fixture'\n",
         "src/bridge_db/snapshot_service.py": "SNAPSHOT = 'fixture'\n",
         "src/bridge_db/tenancy.py": "TENANCY = 'fixture'\n",
         "src/bridge_db/tools/__init__.py": "TOOLS = ()\n",
