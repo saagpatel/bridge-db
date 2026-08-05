@@ -18,6 +18,14 @@ recomputed from the reviewed SHA prefix and full tracked-source digest. Staging
 also rechecks the clean reviewed checkout after copying, so a concurrent source
 mutation cannot be published under the reviewed identity.
 
+Verification accepts the exact pre-shared-runtime contract path set only when
+the generation's complete tracked source inventory does not contain
+`src/bridge_db/shared_runtime.py`. This narrow compatibility rule keeps the
+installed predecessor readable and rollbackable after the shared-runtime
+contract path was added; staging still emits only the current complete contract
+path set, and a generation containing shared-runtime source cannot downgrade
+that digest boundary.
+
 The release tree is read-only. `current` and `previous` are relative symlinks
 under one private execution root. Activation replaces `current` atomically,
 records `previous`, writes an exact readback receipt, and leaves an explicit

@@ -216,6 +216,89 @@ def test_stage_is_content_addressed_immutable_and_idempotent(tmp_path: Path) -> 
     }
 
 
+def test_pre_shared_runtime_generation_remains_verified_and_rollbackable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _recovery_ready: Path,
+) -> None:
+    source, _ = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    shared_runtime = source / "src" / "bridge_db" / "shared_runtime.py"
+    shared_runtime.unlink()
+    _git(source, "add", "-A")
+    _git(source, "commit", "-m", "fixture pre-shared runtime")
+    legacy_sha = _git(source, "rev-parse", "HEAD")
+    current_contract_paths = execution_generation.DEFAULT_CONTRACT_PATHS
+    legacy_contract_paths = tuple(
+        path
+        for path in current_contract_paths
+        if path != "src/bridge_db/shared_runtime.py"
+    )
+    monkeypatch.setattr(
+        execution_generation, "DEFAULT_CONTRACT_PATHS", legacy_contract_paths
+    )
+    legacy = stage_generation(
+        source=source,
+        root=root,
+        reviewed_sha=legacy_sha,
+        python_executable=Path(sys.executable),
+        contract_paths=legacy_contract_paths,
+    )
+    legacy_id = str(legacy["generation_id"])
+    monkeypatch.setattr(
+        execution_generation, "DEFAULT_CONTRACT_PATHS", current_contract_paths
+    )
+
+    assert verify_generation(root, legacy_id)["state"] == "verified"
+    activate_generation(root, legacy_id)
+
+    shared_runtime.write_text("SHARED_RUNTIME = 'fixture'\n", encoding="utf-8")
+    _git(source, "add", ".")
+    _git(source, "commit", "-m", "fixture shared runtime")
+    current_sha = _git(source, "rev-parse", "HEAD")
+    current_id = str(_stage(source, root, current_sha)["generation_id"])
+
+    activation = activate_generation(root, current_id)
+    assert activation["readback"]["previous_generation"] == legacy_id
+    rollback = rollback_generation(root)
+    assert rollback["outcome"] == "activated"
+    assert read_activation(root)["current_generation"] == legacy_id
+
+
+def test_verify_rejects_legacy_contract_downgrade_with_shared_runtime(
+    tmp_path: Path,
+) -> None:
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    generation_id = str(_stage(source, root, sha)["generation_id"])
+    manifest_path = root / "releases" / generation_id / "generation-manifest.json"
+    manifest_path.chmod(0o644)
+    manifest = json.loads(manifest_path.read_text())
+    legacy_paths = [
+        path
+        for path in manifest["contract_paths"]
+        if path != "src/bridge_db/shared_runtime.py"
+    ]
+    selected_entries = [
+        entry for entry in manifest["source_files"] if entry["path"] in legacy_paths
+    ]
+    manifest["contract_paths"] = legacy_paths
+    manifest["contract_sha256"] = hashlib.sha256(
+        json.dumps(
+            selected_entries, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    manifest_path.chmod(0o444)
+
+    with pytest.raises(GenerationContractError) as refused:
+        verify_generation(root, generation_id)
+
+    assert refused.value.reason_code == "generation.contract_paths_mismatch"
+
+
 def test_verify_rejects_extra_files_and_metadata_drift(tmp_path: Path) -> None:
     source, sha = _source_repo(tmp_path)
     root = tmp_path / "runtime"
