@@ -24,10 +24,17 @@ env_mode=$(stat -f '%Lp' "$env_file" 2>/dev/null) || \
     echo "bridge_db.wrapper_env_stat_failed" >&2
     exit 78
 }
-if [ "$env_owner" -ne "$(id -u)" ] || [ "$env_mode" != "600" ]; then
-    echo "bridge_db.wrapper_env_file_not_private" >&2
+expected_owner=$(id -u) || {
+    echo "bridge_db.wrapper_env_stat_failed" >&2
     exit 78
-fi
+}
+case "$env_owner:$env_mode" in
+    "$expected_owner:600") ;;
+    *)
+        echo "bridge_db.wrapper_env_file_not_private" >&2
+        exit 78
+        ;;
+esac
 
 token_seen=0
 auth_seen=0
@@ -160,10 +167,13 @@ capability_mode=$(stat -f '%Lp' "$capability_file" 2>/dev/null) || \
     echo "bridge_db.shared_relay_capability_stat_failed" >&2
     exit 69
 }
-if [ "$capability_owner" -ne "$(id -u)" ] || [ "$capability_mode" != "400" ]; then
-    echo "bridge_db.shared_relay_capability_file_not_private" >&2
-    exit 69
-fi
+case "$capability_owner:$capability_mode" in
+    "$expected_owner:400") ;;
+    *)
+        echo "bridge_db.shared_relay_capability_file_not_private" >&2
+        exit 69
+        ;;
+esac
 unset capability_owner capability_mode binding_lines
 header_file=$(mktemp "$relay_dir/relay-headers.XXXXXX") || exit 69
 body_file=$(mktemp "$relay_dir/relay-body.XXXXXX") || {
@@ -176,6 +186,7 @@ protocol_version=
 
 cleanup_relay() {
     relay_status=$?
+    trap - EXIT HUP INT TERM
     if [ -n "$session_id" ]; then
         curl --silent --show-error --unix-socket "$broker_socket" \
             --request DELETE \
@@ -189,7 +200,10 @@ cleanup_relay() {
     rm -f -- "$header_file" "$body_file"
     exit "$relay_status"
 }
-trap cleanup_relay EXIT HUP INT TERM
+trap cleanup_relay EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 while IFS= read -r message || [ -n "$message" ]; do
     : > "$header_file"
