@@ -482,7 +482,7 @@ source generation. No TCP listener, LaunchAgent, secret in argv, or cross-princi
 broker is introduced.
 
 Relay references are private PID/start-identity leases. The broker preserves
-stale reference history, serializes tool calls over its one SQLite connection,
+stale reference history, serializes tool calls across session DB connections,
 and cooperatively exits 300 seconds after the last live relay disappears. It
 never signals another process. Broker startup fails closed after 10 seconds;
 setting the transport mode back to `direct` is the exact rollback and affects

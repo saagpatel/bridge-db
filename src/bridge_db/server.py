@@ -49,7 +49,7 @@ class InstrumentedFastMCP(FastMCP):
         self._bridge_shared_tenancy_tracker: TenancyTracker | None = None
 
     def enable_shared_runtime(self, tracker: TenancyTracker | None = None) -> None:
-        """Serialize one broker's shared DB connection across MCP sessions."""
+        """Serialize one broker's database access across MCP sessions."""
         self._bridge_shared_runtime = True
         self._bridge_shared_tenancy_tracker = tracker
 

@@ -221,8 +221,9 @@ from an owner-only env file. `direct` is the default rollback. `shared` retains
 stdio for the client while a thin shell relay uses one authenticated,
 generation-bound broker over a private Unix socket; command-line maintenance
 operations remain direct. The broker has no TCP listener or LaunchAgent,
-serializes its shared SQLite connection, and exits after the final relay has
-been absent for its bounded idle window. `config/com.saagar.bridge-db-checkpoint.plist` preserves the existing
+serializes database access across MCP sessions, and exits after the final relay
+has been absent for its bounded idle window.
+`config/com.saagar.bridge-db-checkpoint.plist` preserves the existing
 30-minute receipt wrapper through the reviewed operator-script pointer while
 running that launcher with `--checkpoint`.
 `bridge_db.client_rebinding` performs exact Claude Code/Desktop JSON command

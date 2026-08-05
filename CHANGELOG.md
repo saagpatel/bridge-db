@@ -4,6 +4,21 @@ All notable changes to bridge-db are documented here.
 
 ## [Unreleased] — 2026-08-05
 
+### Added — bounded shared local runtime
+
+- **Opt-in broker:** `BRIDGE_DB_TRANSPORT_MODE=shared` keeps client-facing
+  stdio while thin shell relays share one credential- and generation-bound
+  broker over an owner-only Unix socket. Direct mode remains the default and
+  exact rollback; existing transports are never disconnected.
+- **Lifecycle controls:** private relay identity leases, generation isolation,
+  serialized cross-session database access, a 10-second startup ceiling, and a
+  300-second no-client idle ceiling bound broker residency without process
+  signaling or a LaunchAgent.
+- **Residency truth:** `BridgeMcpTenancyInventoryV2` separates live
+  identity-matched processes and current RSS from stale lease files and their
+  last-observed RSS, preventing historical lease values from presenting as
+  current machine pressure.
+
 ### Added — same-role handoff ownership
 
 - **Schema v23**: adds hash-only, one-time handoff session capabilities and

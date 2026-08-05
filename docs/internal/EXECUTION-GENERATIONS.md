@@ -207,8 +207,8 @@ exact credential and immutable source generation. A private random selector key
 derives the group name, so neither the credential nor a reusable credential
 digest appears in argv, output, socket names, or receipts. The broker binds only
 an owner-only Unix socket, uses stateful Streamable HTTP behind the stdio relay,
-and serializes tool calls so independent MCP sessions cannot interleave work on
-its one SQLite connection.
+and serializes tool calls so independent MCP session connections cannot
+interleave database work.
 
 Client lease history is preserved. Missing or PID-reused relay records are
 retired after identity readback; unknown process state keeps the broker alive.

@@ -102,7 +102,7 @@ command -v curl >/dev/null 2>&1 || {
     exit 69
 }
 
-binding=$($stable_launcher --ensure-shared-broker) || {
+binding=$("$stable_launcher" --ensure-shared-broker) || {
     echo "bridge_db.shared_relay_broker_unavailable" >&2
     exit 69
 }

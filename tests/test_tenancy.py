@@ -559,7 +559,7 @@ async def test_instrumented_mcp_accounts_success_and_failure(
 
 
 @pytest.mark.asyncio
-async def test_shared_runtime_serializes_one_broker_database_connection(
+async def test_shared_runtime_serializes_one_broker_database_access(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     active = 0
