@@ -26,6 +26,7 @@ from bridge_db.execution_generation import (
     stage_generation,
     verify_generation,
 )
+from bridge_db.tenancy import build_lifecycle_activation_evidence
 
 
 def _git(source: Path, *arguments: str) -> str:
@@ -74,12 +75,45 @@ def _source_repo(tmp_path: Path) -> tuple[Path, str]:
 
 
 def _stage(source: Path, root: Path, sha: str) -> dict[str, object]:
-    return stage_generation(
+    result = stage_generation(
         source=source,
         root=root,
         reviewed_sha=sha,
         python_executable=Path(sys.executable),
     )
+    _write_tenancy_activation_evidence(root, str(result["generation_id"]))
+    return result
+
+
+def _write_tenancy_activation_evidence(root: Path, generation_id: str) -> Path:
+    path = root / "tenancy-activation-evidence.json"
+    if path.exists():
+        path.chmod(0o600)
+    evidence = build_lifecycle_activation_evidence(
+        [
+            {
+                "owner": owner,
+                "scenario": scenario,
+                "process_count": index + 1,
+                "lifetime_seconds": 120 + index,
+                "rss_bytes": (32 + index) * 1024 * 1024,
+            }
+            for index, (owner, scenario) in enumerate(
+                (
+                    ("codex", "normal_close"),
+                    ("claude", "app_restart"),
+                    ("personal_ops", "abrupt_exit"),
+                    ("hermes", "generation_rollover"),
+                )
+            )
+        ],
+        generation_id=generation_id,
+    )
+    path.write_text(
+        json.dumps(evidence, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    path.chmod(0o400)
+    return path
 
 
 def _initialize_recovery_database(db_path: Path) -> None:
@@ -245,6 +279,7 @@ def test_pre_shared_runtime_generation_remains_verified_and_rollbackable(
         contract_paths=legacy_contract_paths,
     )
     legacy_id = str(legacy["generation_id"])
+    _write_tenancy_activation_evidence(root, legacy_id)
     monkeypatch.setattr(
         execution_generation, "DEFAULT_CONTRACT_PATHS", current_contract_paths
     )
@@ -428,6 +463,69 @@ def test_activation_gate_refuses_missing_recovery_anchor(
     assert not (root / ".activation.pending.json").exists()
 
 
+def test_activation_gate_refuses_missing_tenancy_evidence_before_pointer_write(
+    tmp_path: Path, _recovery_ready: Path
+) -> None:
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    generation_id = str(_stage(source, root, sha)["generation_id"])
+    (root / "tenancy-activation-evidence.json").unlink()
+
+    with pytest.raises(GenerationContractError) as refused:
+        activate_generation(root, generation_id)
+
+    assert refused.value.reason_code == "generation.tenancy_evidence_missing"
+    assert not (root / "current").exists()
+    assert not (root / ".activation.pending.json").exists()
+
+
+def test_activation_gate_refuses_mutable_or_tampered_tenancy_evidence(
+    tmp_path: Path, _recovery_ready: Path
+) -> None:
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    generation_id = str(_stage(source, root, sha)["generation_id"])
+    evidence_path = root / "tenancy-activation-evidence.json"
+    evidence_path.chmod(0o600)
+
+    with pytest.raises(GenerationContractError) as mutable:
+        activate_generation(root, generation_id)
+    assert mutable.value.reason_code == "generation.tenancy_evidence_not_private"
+
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    evidence["observations"][0]["process_count"] += 1
+    evidence_path.write_text(
+        json.dumps(evidence, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    evidence_path.chmod(0o400)
+    with pytest.raises(GenerationContractError) as tampered:
+        activate_generation(root, generation_id)
+    assert (
+        tampered.value.reason_code
+        == "generation.tenancy_evidence_digest_mismatch"
+    )
+    assert not (root / "current").exists()
+
+
+def test_activation_gate_refuses_replay_evidence_for_another_generation(
+    tmp_path: Path, _recovery_ready: Path
+) -> None:
+    source, first_sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    first_id = str(_stage(source, root, first_sha)["generation_id"])
+    second_id, _ = _commit_generation(source, root, marker="fixture-two")
+    assert first_id != second_id
+
+    with pytest.raises(GenerationContractError) as refused:
+        activate_generation(root, first_id)
+
+    assert (
+        refused.value.reason_code
+        == "generation.tenancy_evidence_generation_mismatch"
+    )
+    assert not (root / "current").exists()
+
+
 def test_activation_cli_reports_recovery_gate_failure_without_pointer_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -583,6 +681,11 @@ def test_activation_gate_accepts_current_verified_anchor_and_seal(
 
     assert activated["outcome"] == "activated"
     assert read_activation(root)["current_generation"] == generation_id
+    evidence = activated["readback"]["tenancy_activation_evidence"]
+    assert evidence["state"] == "verified"
+    assert evidence["owners"] == ["claude", "codex", "hermes", "personal_ops"]
+    assert len(evidence["evidence_sha256"]) == 64
+    assert len(evidence["file_sha256"]) == 64
 
 
 def test_activation_second_generation_and_rollback_have_exact_readback(
@@ -616,6 +719,9 @@ def test_activation_second_generation_and_rollback_have_exact_readback(
     assert rollback["outcome"] == "activated"
     assert read_activation(root)["current_generation"] == first_id
     assert read_activation(root)["previous_generation"] == second_id
+    assert read_activation(root)["tenancy_activation_evidence"] == {
+        "state": "not_required_for_rollback"
+    }
 
 
 def test_rollback_gate_refuses_stale_recovery_without_pointer_change(
@@ -718,6 +824,7 @@ def test_pending_committed_map_finalizes_post_actions_once(
         current=second_id,
         previous=first_id,
     )
+    (root / "tenancy-activation-evidence.json").unlink()
 
     result = activate_generation(root, second_id)
 
@@ -725,6 +832,9 @@ def test_pending_committed_map_finalizes_post_actions_once(
     assert result["recovery_disposition"] == "committed_finalized"
     assert (root / "drain" / f"{first_id}.json").is_file()
     assert Path(str(result["receipt_path"])).is_file()
+    assert result["readback"]["tenancy_activation_evidence"] == {
+        "state": "legacy_unverified"
+    }
     assert not (root / ".activation.pending.json").exists()
 
 

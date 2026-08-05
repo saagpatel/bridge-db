@@ -177,6 +177,7 @@ uv run python -m bridge_db --recover-orphaned-handoff 42 --recovery-reason "clai
 uv run python -m bridge_db --quarantine-cleared-operator-handoffs  # recoverable legacy relabel
 uv run python -m bridge_db --restore-handoff-trust 42  # exact-row recovery
 python -m bridge_db.execution_generation readback --root <private-runtime-root>
+python -m bridge_db.tenancy derive-activation-evidence --observations <private-replay-observations.json> --generation-id <generation-id>
 python -m bridge_db.secure_binding --caller codex --secret-fd 3 --principals-path <path> --binding-path <path>
 python -m bridge_db.client_rebinding rebind --client claude-code --config-path /Users/d/.claude.json --backup-root <private-backup-root>
 python -m bridge_db.tenancy status --root <private-tenancy-root>
@@ -246,8 +247,8 @@ that a live client has reloaded them.
 ## Data
 
 - **DB**: `~/.local/share/bridge-db/bridge.db`
-- **Schema compatibility**: core `user_version=23` plus the additive backward-readable refusal extension, verified against exact previous merged generation `d7272d489873faa5ed84c81734636ffc8cecb095`. Activation and pointer rollback enforce the owning recovery lifecycle's current verified anchor/seal verdict after repairing any pending journal; source compatibility is not activation authority.
-- **MCP tenancy**: Inventory V2 separates live identity-bound processes from stale lease files, preserves multiple leases that share a reused PID, and reports current RSS separately from lease-last-observed RSS. Direct servers and shared brokers account for requests, PID ancestry, and generation. `BridgeSharedRuntimeInventoryV1` separately reports broker reachability, relay capabilities, and stale/unknown client identities without exposing selector or capability values. Obsolete generations refuse new work and cooperatively close after active requests finish; lifecycle tooling cannot terminate another process.
+- **Schema compatibility**: core `user_version=23` plus the additive backward-readable refusal extension, verified against exact previous merged generation `d7272d489873faa5ed84c81734636ffc8cecb095`. Activation and pointer rollback enforce the owning recovery lifecycle's current verified anchor/seal verdict after repairing any pending journal; forward activation additionally requires exact tenancy replay evidence. Source compatibility is not activation authority.
+- **MCP tenancy**: Inventory V2 separates live identity-bound processes from stale lease files, preserves multiple leases that share a reused PID, and reports current RSS separately from lease-last-observed RSS. Direct servers and shared brokers account for requests, PID ancestry, and generation. `BridgeSharedRuntimeInventoryV1` separately reports broker reachability, relay capabilities, and stale/unknown client identities without exposing selector or capability values. Obsolete generations refuse new work and cooperatively close after active requests finish; lifecycle tooling cannot terminate another process. Forward generation activation requires a mode-`0400` `BridgeMcpTenancyActivationEvidenceV1` bundle and re-derives its policy from the bound replay rows before any pointer write; rollback does not require new replay evidence.
 - **Bridge file**: `~/.claude/projects/<encoded-home>/memory/claude_ai_context.md`
   (Claude Code encodes your home dir path by replacing `/` with `-`; the default is derived
   automatically at runtime — override via `BRIDGE_FILE_PATH` if needed)

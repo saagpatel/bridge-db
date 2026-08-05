@@ -31,6 +31,7 @@ uv run python -m bridge_db --recover-orphaned-handoff 42 --recovery-reason "sess
 uv run python -m bridge_db --quarantine-cleared-operator-handoffs  # recoverable legacy relabel
 uv run python -m bridge_db --restore-handoff-trust 42  # exact recovery image
 python -m bridge_db.execution_generation readback --root <private-runtime-root>
+python -m bridge_db.tenancy derive-activation-evidence --observations <private-replay-observations.json> --generation-id <generation-id>
 python -m bridge_db.client_rebinding rebind --client claude-code --config-path /Users/d/.claude.json --backup-root <private-backup-root>
 python -m bridge_db.tenancy status --root <private-tenancy-root>
 ```
@@ -41,7 +42,10 @@ lockfiles are bound, but the external installed environment remains explicitly
 unmanaged. Tenancy drain is cooperative: reject new work, finish active work,
 then close the obsolete server. After repairing any pending journal, activation
 and rollback fail closed unless the owning recovery lifecycle reports a current
-verified anchor and seal.
+verified anchor and seal. Forward activation also requires an exact private
+replay-evidence bundle whose policy, client coverage, and lifecycle-scenario
+coverage recompute successfully; rollback remains the safety path without new
+replay evidence.
 
 ## Architecture
 
@@ -158,7 +162,9 @@ verified anchor and seal.
   binds tracked source, dependency, contract, interpreter, and launcher
   digests. Activation uses atomic `current`/`previous` pointers, interruption
   journals, exact readback receipts, and cooperative drain markers. It never
-  kills a process or deletes a release. Runtime health is verified only when
+  kills a process or deletes a release. Forward activation requires content-bound
+  replay observations and their exactly recomputed tenancy policy before any
+  pointer write. Runtime health is verified only when
   the complete immutable release reads back. Codex credential rotation/binding
   accepts the secret only through a protected descriptor and never emits the
   secret or digest. Exact Claude JSON rebinding writes a private backup and
