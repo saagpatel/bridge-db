@@ -231,8 +231,10 @@ also requires the relay's current PID/start identity to match its lease. The bro
 no TCP listener or LaunchAgent, serializes database access across MCP sessions,
 and exits after the final relay has been absent for its bounded idle window.
 `health` / `status` and `python -m bridge_db --shared-runtime-status` expose the
-no-secret `BridgeSharedRuntimeInventoryV1`; selected shared transport cannot
-report ready when that inventory is missing or unverified.
+no-secret `BridgeSharedRuntimeInventoryV1`. Health/status additionally expose
+`BridgeSharedRuntimeReadinessV1`, which requires the exact current launch group,
+broker PID/start identity, receipt, and socket; another active group cannot make
+selected shared transport report ready.
 `config/com.saagar.bridge-db-checkpoint.plist` preserves the existing
 30-minute receipt wrapper through the reviewed operator-script pointer while
 running that launcher with `--checkpoint`.

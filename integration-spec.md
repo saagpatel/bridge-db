@@ -496,8 +496,10 @@ last live relay disappears. It never signals another process. Broker startup
 fails closed after 10 seconds; setting the transport mode back to `direct` is
 the exact rollback and affects only future client spawns. Existing transports
 are never disconnected by this path. `BridgeSharedRuntimeInventoryV1` is
-available from health/status and `--shared-runtime-status`; shared-mode health
-is non-green when that inventory is missing or unverified.
+available from health/status and `--shared-runtime-status` for aggregate
+no-secret readback. `BridgeSharedRuntimeReadinessV1` separately gates
+health/status on the exact current launch group, broker PID/start identity,
+receipt, and socket, so unrelated group activity cannot make shared mode green.
 
 Both modes use the same SQLite file at `~/.local/share/bridge-db/bridge.db` with
 WAL mode + `PRAGMA busy_timeout=15000`. Logical lost-update protection remains

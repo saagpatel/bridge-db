@@ -22,6 +22,7 @@ from bridge_db import config
 from bridge_db import shared_runtime as shared_runtime_module
 from bridge_db.shared_runtime import (
     SharedRuntimeContractError,
+    shared_runtime_current_readiness,
     shared_runtime_inventory,
     shared_runtime_paths,
 )
@@ -88,6 +89,66 @@ def test_shared_runtime_partitions_private_groups_by_credential_and_generation(
         different_database.group,
     ):
         assert stat.S_IMODE(path.stat().st_mode) == 0o700
+
+
+def test_current_readiness_cannot_borrow_an_unrelated_active_group(
+    short_runtime_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "BRIDGE_DB_SHARED_RUNTIME_ROOT", str(short_runtime_root / "shared")
+    )
+    monkeypatch.setenv("BRIDGE_DB_GENERATION_ID", "generation-one")
+    monkeypatch.setattr(config, "AUTH_MODE", "off")
+    monkeypatch.setenv(
+        "BRIDGE_DB_PRINCIPAL_TOKEN",
+        "fixture-first-shared-secret-abcdefghijklmnopqrstuvwxyz",
+    )
+    first = shared_runtime_paths()
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(first.socket))
+    identity = process_identity(os.getpid())
+    assert identity is not None
+    shared_runtime_module._atomic_json(  # pyright: ignore[reportPrivateUsage]
+        first.broker_receipt,
+        {
+            "schema": shared_runtime_module.BROKER_SCHEMA,
+            "state": "ready",
+            "group_id": first.group.name,
+            "launch_contract_sha256": (
+                shared_runtime_module._launch_contract_sha256()  # pyright: ignore[reportPrivateUsage]
+            ),
+            "pid": os.getpid(),
+            "process_identity": identity,
+            "socket": str(first.socket),
+            "started_at": "2026-08-05T00:00:00Z",
+            "generation": "generation-one",
+            "auth_mode": "off",
+            "transport": "streamable_http_over_private_unix_socket",
+        },
+        replace=False,
+    )
+    def selected_socket(path: Path) -> bool:
+        return path == first.socket
+
+    monkeypatch.setattr(shared_runtime_module, "_probe_socket", selected_socket)
+
+    try:
+        assert shared_runtime_inventory(first.root)["adoption_state"] == "active"
+        assert shared_runtime_current_readiness()["ready"] is True
+
+        monkeypatch.setenv(
+            "BRIDGE_DB_PRINCIPAL_TOKEN",
+            "fixture-second-shared-secret-abcdefghijklmnopqrstuvwxyz",
+        )
+        unrelated = shared_runtime_current_readiness()
+
+        assert shared_runtime_inventory(first.root)["adoption_state"] == "active"
+        assert unrelated["state"] == "missing"
+        assert unrelated["ready"] is False
+        assert unrelated["reason_code"] == "shared_runtime.current_group_missing"
+    finally:
+        listener.close()
+        first.socket.unlink(missing_ok=True)
 
 
 def test_stale_broker_receipt_and_socket_are_archived_before_restart(

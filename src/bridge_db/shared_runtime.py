@@ -33,6 +33,7 @@ from bridge_db.tenancy import probe_process, process_identity, tenancy_root
 CLIENT_SCHEMA = "BridgeSharedRuntimeClientLeaseV1"
 BROKER_SCHEMA = "BridgeSharedRuntimeBrokerReceiptV1"
 INVENTORY_SCHEMA = "BridgeSharedRuntimeInventoryV1"
+READINESS_SCHEMA = "BridgeSharedRuntimeReadinessV1"
 LAUNCH_CONTRACT_SCHEMA = "BridgeSharedRuntimeLaunchContractV1"
 _KEY_RE = re.compile(r"^[0-9a-f]{16}-[0-9a-f]{12}$")
 _LEASE_RE = re.compile(r"^[0-9a-f]{24}$")
@@ -252,9 +253,11 @@ def _read_json(path: Path) -> dict[str, Any]:
     return {str(key): value for key, value in cast(dict[object, Any], raw).items()}
 
 
-def _selector_secret(root: Path) -> bytes:
+def _selector_secret(root: Path, *, create: bool = True) -> bytes:
     path = root / "selector.key"
     if not path.exists():
+        if not create:
+            raise SharedRuntimeContractError("shared_runtime.selector_missing")
         descriptor, temporary_name = tempfile.mkstemp(
             dir=root, prefix=".selector.key.pending-"
         )
@@ -283,14 +286,16 @@ def _selector_secret(root: Path) -> bytes:
     return value
 
 
-def _credential_key(root: Path) -> str:
+def _credential_key(root: Path, *, create_selector: bool = True) -> str:
     raw_token = os.environ.get("BRIDGE_DB_PRINCIPAL_TOKEN")
     token = raw_token.strip() if raw_token is not None else ""
     if len(token) < 32:
         raise SharedRuntimeContractError("shared_runtime.credential_invalid")
     contract = _launch_contract_bytes()
     selector = hmac.new(
-        _selector_secret(root), token.encode("utf-8") + b"\0" + contract, hashlib.sha256
+        _selector_secret(root, create=create_selector),
+        token.encode("utf-8") + b"\0" + contract,
+        hashlib.sha256,
     ).hexdigest()[:16]
     return f"{selector}-{hashlib.sha256(contract).hexdigest()[:12]}"
 
@@ -333,6 +338,87 @@ def shared_runtime_paths() -> SharedRuntimePaths:
     if not _KEY_RE.fullmatch(key):  # pragma: no cover - construction invariant
         raise SharedRuntimeContractError("shared_runtime.key_invalid")
     return _paths_for_group(root, root / key)
+
+
+def shared_runtime_current_readiness() -> dict[str, Any]:
+    """Read exact current-broker readiness without exposing its selector."""
+    readiness: dict[str, Any] = {
+        "schema": READINESS_SCHEMA,
+        "state": "missing",
+        "ready": False,
+        "adoption_state": "inactive",
+        "receipt_state": "missing",
+        "broker_process_state": "missing",
+        "socket_reachable": False,
+    }
+    root = _shared_runtime_root_path()
+    if not root.exists():
+        readiness["reason_code"] = "shared_runtime.root_missing"
+        return readiness
+    try:
+        root = _guard_private_directory(root, create=False)
+        key = _credential_key(root, create_selector=False)
+        group = root / key
+        if not group.exists():
+            readiness["reason_code"] = "shared_runtime.current_group_missing"
+            return readiness
+        paths = _paths_for_group(root, group, create=False)
+        if not paths.broker_receipt.exists():
+            readiness["reason_code"] = (
+                "shared_runtime.current_broker_receipt_missing"
+            )
+            return readiness
+        record = _read_json(paths.broker_receipt)
+        _validate_broker_record(paths, record)
+        pid = int(record["pid"])
+        identity = str(record["process_identity"])
+        process_state = probe_process(pid, identity)
+        socket_reachable = _probe_socket(paths.socket)
+        receipt_state = str(record["state"])
+        readiness.update(
+            {
+                "state": "observed",
+                "adoption_state": (
+                    "active"
+                    if receipt_state == "ready"
+                    and process_state == "same"
+                    and socket_reachable
+                    and pid == os.getpid()
+                    else "draining"
+                    if receipt_state == "draining"
+                    and process_state == "same"
+                    and socket_reachable
+                    and pid == os.getpid()
+                    else "unknown"
+                    if process_state == "unknown"
+                    else "inactive"
+                ),
+                "receipt_state": receipt_state,
+                "broker_process_state": process_state,
+                "socket_reachable": socket_reachable,
+            }
+        )
+        readiness["ready"] = readiness["adoption_state"] == "active"
+        if not readiness["ready"]:
+            readiness["reason_code"] = (
+                "shared_runtime.current_broker_pid_mismatch"
+                if pid != os.getpid()
+                else "shared_runtime.current_broker_not_ready"
+            )
+        return readiness
+    except (OSError, SharedRuntimeContractError) as exc:
+        readiness.update(
+            {
+                "state": "unverified",
+                "adoption_state": "unknown",
+                "reason_code": (
+                    exc.reason_code
+                    if isinstance(exc, SharedRuntimeContractError)
+                    else "shared_runtime.current_readiness_failed"
+                ),
+            }
+        )
+        return readiness
 
 
 def _empty_shared_runtime_inventory(selected: Path, *, state: str) -> dict[str, Any]:
@@ -832,6 +918,8 @@ def _validate_broker_record(
 ) -> None:
     contract_sha256 = record.get("launch_contract_sha256")
     launch_contract = _launch_contract()
+    pid = record.get("pid")
+    identity = record.get("process_identity")
     if (
         record.get("schema") != BROKER_SCHEMA
         or record.get("group_id") != paths.group.name
@@ -843,6 +931,11 @@ def _validate_broker_record(
         or contract_sha256 != _launch_contract_sha256()
         or record.get("generation") != launch_contract["generation"]
         or record.get("auth_mode") != launch_contract["auth_mode"]
+        or not isinstance(pid, int)
+        or isinstance(pid, bool)
+        or pid < 1
+        or not isinstance(identity, str)
+        or not identity
     ):
         raise SharedRuntimeContractError("shared_runtime.broker_receipt_invalid")
 

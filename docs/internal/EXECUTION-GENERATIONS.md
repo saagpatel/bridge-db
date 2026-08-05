@@ -234,9 +234,11 @@ stale records without presenting them as live memory pressure.
 `BridgeSharedRuntimeInventoryV1`, available in `health`, `status`, and
 `python -m bridge_db --shared-runtime-status`, separately reports broker/socket
 reachability, live/stale/unknown relay identities, and capability-file counts
-without returning group selectors or capability values. When the current
-process selected shared transport, missing or unverified inventory cannot render
-health green.
+without returning group selectors or capability values.
+`BridgeSharedRuntimeReadinessV1` is the narrower health/status gate: it derives
+the current group without creating state or exposing its selector, then requires
+the exact broker PID/start identity, receipt, and socket. Aggregate activity in
+another group therefore cannot render selected shared transport green.
 
 ## Database rollback compatibility
 

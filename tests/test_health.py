@@ -1492,7 +1492,7 @@ async def test_health_reports_auth_block(
     }
 
 
-async def test_health_fails_closed_when_selected_shared_runtime_is_unverified(
+async def test_health_does_not_borrow_readiness_from_an_unrelated_active_group(
     db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from bridge_db.tools import health as health_module
@@ -1503,16 +1503,29 @@ async def test_health_fails_closed_when_selected_shared_runtime_is_unverified(
         "shared_runtime_inventory",
         lambda: {
             "schema": "BridgeSharedRuntimeInventoryV1",
-            "state": "unverified",
-            "adoption_state": "unknown",
-            "reason_code": "shared_runtime.fixture_unverified",
+            "state": "observed",
+            "adoption_state": "active",
+            "ready_broker_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        health_module,
+        "shared_runtime_current_readiness",
+        lambda: {
+            "schema": "BridgeSharedRuntimeReadinessV1",
+            "state": "missing",
+            "ready": False,
+            "adoption_state": "inactive",
+            "reason_code": "shared_runtime.current_group_missing",
         },
     )
 
     metrics = await health_module.collect_health_metrics(db)
 
+    assert metrics["shared_runtime"]["adoption_state"] == "active"
     assert metrics["shared_runtime"]["required_for_current_process"] is True
     assert metrics["shared_runtime"]["ready_for_current_process"] is False
+    assert metrics["shared_runtime"]["current_group"]["ready"] is False
     assert metrics["storage_ok"] is False
     assert metrics["ok"] is False
 

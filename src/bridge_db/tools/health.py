@@ -27,7 +27,10 @@ from bridge_db.evidence import (
 from bridge_db.execution_generation import runtime_generation_identity
 from bridge_db.recovery import recovery_anchor_inventory
 from bridge_db.recovery_seal import recovery_seal_inventory
-from bridge_db.shared_runtime import shared_runtime_inventory
+from bridge_db.shared_runtime import (
+    shared_runtime_current_readiness,
+    shared_runtime_inventory,
+)
 from bridge_db.tenancy import tenancy_inventory
 from bridge_db.tools.context import parse_owned_sections
 
@@ -174,16 +177,27 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "BRIDGE_DB_TRANSPORT_MODE", "direct"
     ).strip().lower()
     shared_runtime_required = selected_transport_mode == "shared"
+    current_shared_runtime = (
+        shared_runtime_current_readiness()
+        if shared_runtime_required
+        else {
+            "schema": "BridgeSharedRuntimeReadinessV1",
+            "state": "not_required",
+            "ready": True,
+            "adoption_state": "not_required",
+        }
+    )
     shared_runtime_ready = (
         selected_transport_mode == "direct"
         or (
             shared_runtime_required
-            and shared_runtime["state"] == "observed"
-            and shared_runtime["adoption_state"] == "active"
+            and current_shared_runtime["state"] == "observed"
+            and current_shared_runtime["ready"] is True
         )
     )
     shared_runtime = {
         **shared_runtime,
+        "current_group": current_shared_runtime,
         "selected_transport_mode": selected_transport_mode,
         "required_for_current_process": shared_runtime_required,
         "ready_for_current_process": shared_runtime_ready,

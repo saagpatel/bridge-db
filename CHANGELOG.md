@@ -29,7 +29,9 @@ All notable changes to bridge-db are documented here.
   last-observed RSS, preserves multiple leases sharing a reused PID, and
   prevents historical lease values from presenting as current machine pressure.
   `BridgeSharedRuntimeInventoryV1` adds no-secret broker/socket/client adoption
-  readback and fails selected shared-mode health closed when proof is unverified.
+  readback. `BridgeSharedRuntimeReadinessV1` separately binds shared-mode health
+  to the exact current launch group, broker PID/start identity, receipt, and
+  socket, so an unrelated active group cannot make readiness green.
 
 ### Added — same-role handoff ownership
 
