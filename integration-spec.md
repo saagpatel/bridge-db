@@ -107,6 +107,14 @@ observability tools `recall_stats`, `audit_tail`, and `get_write_conflicts`.
 This exact `uv`-based stdio launch path is the documented local target and has been
 validated in the current setup.
 
+The convergence target is the immutable launcher at
+`<private-runtime-root>/current/bin/bridge-db-mcp`. Each client must use that
+same pointer after controlled activation; a mutable checkout remains supported
+for development but `health`/`status` label it `mutable_direct_path`, not a
+verified installed generation. Staging, rollback, drain, and no-secret-output
+Codex binding are specified in
+`docs/internal/EXECUTION-GENERATIONS.md`.
+
 ### vibe-code-handoff (updated workflow)
 
 **Fallback (file-based):**

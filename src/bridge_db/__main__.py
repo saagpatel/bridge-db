@@ -133,6 +133,11 @@ async def run_status(*, now: datetime | None = None) -> bool:
     print(f"  Projection health: {summary['projection_health']}")
     print(f"  Operating state: {summary['operating_state']}")
     print(
+        "  Execution generation:"
+        f" state={summary['signals']['execution_generation_state']},"
+        f" id={summary['signals']['execution_generation_id'] or 'none'}"
+    )
+    print(
         "  DB:"
         f" exists={summary['db']['exists']},"
         f" schema=v{summary['db']['schema_version']}"
@@ -268,6 +273,11 @@ def _status_attention(summary: dict[str, Any]) -> str | None:
         notes.append(
             "unacknowledged_snapshot_refusals="
             f"{signals['unacknowledged_snapshot_refusals']}"
+        )
+    if signals["execution_generation_state"] != "verified":
+        notes.append(
+            "execution_generation_state="
+            f"{signals['execution_generation_state']}"
         )
     if signals["fts_missing"]:
         notes.append(f"fts_missing={signals['fts_missing']}")

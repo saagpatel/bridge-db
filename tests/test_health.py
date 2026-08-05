@@ -880,7 +880,8 @@ async def test_status_ignores_lifecycle_only_activity_for_snapshot_supersession(
     assert cc["state"] == "fresh"
     assert cc["superseding_activity_id"] is None
     assert cc["next_action"] == "none"
-    assert result["operating_state"] == "fresh"
+    assert result["operating_state"] == "attention"
+    assert result["signals"]["execution_generation_state"] == "mutable_direct_path"
 
 
 async def test_status_uses_latest_substantive_activity_despite_newer_lifecycle_row(
@@ -930,7 +931,12 @@ async def test_status_freshness_reports_stale_snapshots_without_degrading_health
             "action": "cc_refresh_snapshot",
             "owner": "cc",
             "reason": "cc snapshot freshness is stale.",
-        }
+        },
+        {
+            "action": "activate_reviewed_generation",
+            "owner": "operator",
+            "reason": "BridgeDB is not running from a verified immutable generation.",
+        },
     ]
 
 

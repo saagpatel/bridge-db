@@ -172,6 +172,8 @@ uv run python -m bridge_db --cancel-handoff 42 --cancel-reason "superseded"  # e
 uv run python -m bridge_db --recover-orphaned-handoff 42 --recovery-reason "claiming session vanished"  # expired/legacy active claim
 uv run python -m bridge_db --quarantine-cleared-operator-handoffs  # recoverable legacy relabel
 uv run python -m bridge_db --restore-handoff-trust 42  # exact-row recovery
+python -m bridge_db.execution_generation readback --root <private-runtime-root>
+python -m bridge_db.secure_binding --caller codex --secret-fd 3 --principals-path <path> --binding-path <path>
 uv run python -m bridge_db          # start MCP server (stdio)
 uv run python -m bridge_db.migration  # migrate from bridge markdown
 ```
@@ -202,6 +204,14 @@ claude mcp add --scope user bridge-db -- uv run --directory /path/to/bridge-db p
 command = "uv"
 args = ["run", "--directory", "/path/to/bridge-db", "python", "-m", "bridge_db"]
 ```
+
+For immutable activation, point client launchers at
+`<private-runtime-root>/current/bin/bridge-db-mcp` instead of a mutable checkout.
+See [`docs/internal/EXECUTION-GENERATIONS.md`](docs/internal/EXECUTION-GENERATIONS.md)
+for deterministic staging, atomic activation/readback, rollback, cooperative
+drain, and the no-secret-output Codex binding path. `health`/`status` label a
+direct mutable checkout as operating attention; that is not proof of an
+installed generation.
 
 ## Data
 

@@ -29,6 +29,7 @@ uv run python -m bridge_db --cancel-handoff 42 --cancel-reason "superseded"  # u
 uv run python -m bridge_db --recover-orphaned-handoff 42 --recovery-reason "session vanished"  # expired/legacy active claim
 uv run python -m bridge_db --quarantine-cleared-operator-handoffs  # recoverable legacy relabel
 uv run python -m bridge_db --restore-handoff-trust 42  # exact recovery image
+python -m bridge_db.execution_generation readback --root <private-runtime-root>
 ```
 
 ## Architecture
@@ -142,6 +143,14 @@ uv run python -m bridge_db --restore-handoff-trust 42  # exact recovery image
   claiming ownership of another principal's rows or snapshots. The checkpoint
   LaunchAgent remains WAL-only, and reads never auto-seal or create recovery
   seal evidence.
+- **Execution generations**: staging requires an exact clean reviewed SHA and
+  binds tracked source, dependency, contract, interpreter, and launcher
+  digests. Activation uses atomic `current`/`previous` pointers, interruption
+  journals, exact readback receipts, and cooperative drain markers. It never
+  kills a process or deletes a release. Runtime health is verified only when
+  the complete immutable release reads back. Codex credential rotation/binding
+  accepts the secret only through a protected descriptor and never emits the
+  secret or digest. See `docs/internal/EXECUTION-GENERATIONS.md`.
 - **FTS drift repair**: `--rebuild-content-index` is the CLI-only repair path; FTS index drift is treated as a hard health failure because `recall` depends on `content_index` mirroring source tables.
 - **Post-sync review**: after scheduled Bridge Syncs or shipped-event reconciliation, use `docs/internal/POST-SYNC-REVIEW.md` to verify DB state, markdown export freshness, and scorecard updates.
 - **Dependency drift**: check with `uv tree --outdated`; refresh `uv.lock` and re-run the full verifier to confirm green.

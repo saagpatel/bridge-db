@@ -6,6 +6,7 @@ import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 import aiosqlite
 from mcp.server.fastmcp import FastMCP
@@ -28,17 +29,22 @@ class AppContext:
     principal: str | None = None
     credential_hash: str | None = None
     credential_generation: int | None = None
+    generation_id: str | None = None
+    generation_state: str = "mutable_direct_path"
+    runtime_generation: dict[str, Any] | None = None
 
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # noqa: ARG001
     from bridge_db.audit import log_audit
     from bridge_db.auth import auth_mode, hash_token, load_principal_grants, resolve_grant
+    from bridge_db.execution_generation import runtime_generation_identity
 
     raw_token = os.environ.get("BRIDGE_DB_PRINCIPAL_TOKEN")
     token = raw_token.strip() if raw_token is not None else None
     grant = resolve_grant(token, load_principal_grants(config.PRINCIPALS_PATH))
     principal = grant.caller if grant is not None else None
+    runtime_generation = runtime_generation_identity()
     if grant is not None and clock.now() >= grant.expires_at:
         log_audit(
             "auth.bind",
@@ -56,10 +62,12 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # 
     elif principal is not None:
         log_audit("auth.bind", None, None, ok=True, detail=f"principal={principal}")
     logger.info(
-        "bridge-db starting, db=%s principal=%s auth_mode=%s",
+        "bridge-db starting, db=%s principal=%s auth_mode=%s generation=%s state=%s",
         config.DB_PATH,
         principal or "unbound",
         auth_mode(),
+        runtime_generation.get("generation_id") or "mutable",
+        runtime_generation["state"],
     )
     db = await open_db(config.DB_PATH)
     try:
@@ -68,6 +76,9 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # 
             principal=principal,
             credential_hash=hash_token(token) if token and principal else None,
             credential_generation=grant.generation if grant is not None else None,
+            generation_id=runtime_generation.get("generation_id"),
+            generation_state=str(runtime_generation["state"]),
+            runtime_generation=runtime_generation,
         )
     finally:
         await db.close()

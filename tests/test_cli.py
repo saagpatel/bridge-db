@@ -526,7 +526,8 @@ async def test_run_status_clarifies_dispositioned_unprocessed_shipped(
     assert "unprocessed_shipped=1" in captured
     assert "actionable_unprocessed_shipped=0" in captured
     assert "dispositioned_unprocessed_shipped=1" in captured
-    assert "Attention:" not in captured
+    assert "Attention: execution_generation_state=mutable_direct_path" in captured
+    assert "Execution generation: state=mutable_direct_path, id=none" in captured
     assert "record_disposition" not in captured
 
 
@@ -983,7 +984,7 @@ asyncio.run(main())
         ).read_text(encoding="utf-8")
     if flag == "--status":
         assert "contexts=0" in result.stdout
-        assert "Attention:" not in result.stdout
+        assert "Attention: execution_generation_state=mutable_direct_path" in result.stdout
 
 
 def test_enroll_writes_hashed_token_with_0600(

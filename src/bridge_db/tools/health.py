@@ -23,6 +23,7 @@ from bridge_db.evidence import (
     legacy_raw_query_inventory,
     migration_backup_inventory,
 )
+from bridge_db.execution_generation import runtime_generation_identity
 from bridge_db.recovery import recovery_anchor_inventory
 from bridge_db.recovery_seal import recovery_seal_inventory
 from bridge_db.tools.context import parse_owned_sections
@@ -163,6 +164,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     reason). Both must always read 0 and are the compensating detection control
     for the field requirements the old NOT NULL columns enforced.
     """
+    runtime_generation = runtime_generation_identity()
     cursor = await db.execute("PRAGMA user_version")
     row = await cursor.fetchone()
     schema_version: int = row[0] if row else 0
@@ -449,6 +451,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
             "principals_file_exists": config.PRINCIPALS_PATH.exists(),
             "principals_enrolled": len(load_principals(config.PRINCIPALS_PATH)),
         },
+        "runtime_generation": runtime_generation,
     }
 
 
@@ -683,6 +686,14 @@ def _freshness_next_actions(
                 "reason": "Pending or active handoffs exceeded freshness thresholds or have unknown age.",
             }
         )
+    if health["runtime_generation"]["state"] != "verified":
+        actions.append(
+            {
+                "action": "activate_reviewed_generation",
+                "owner": "operator",
+                "reason": "BridgeDB is not running from a verified immutable generation.",
+            }
+        )
     return actions[:5]
 
 
@@ -704,6 +715,8 @@ def _freshness_overall(
     if shipped_events["next_action"] != "none":
         return "attention"
     if health["unacknowledged_snapshot_refusals"] > 0:
+        return "attention"
+    if health["runtime_generation"]["state"] != "verified":
         return "attention"
     if any(snapshot["state"] == "unknown" for snapshot in snapshots.values()):
         return "unknown"
@@ -819,6 +832,7 @@ async def collect_status_summary(
         },
         "row_counts": health["row_counts"],
         "source_trust_breakdown": health["source_trust_breakdown"],
+        "runtime_generation": health["runtime_generation"],
         "pending_handoffs_by_trust": pending_handoffs_by_trust,
         "signals": {
             "pending_handoffs": pending_handoffs,
@@ -847,6 +861,10 @@ async def collect_status_summary(
             "oldest_unacknowledged_snapshot_refusal_age_hours": health[
                 "oldest_unacknowledged_snapshot_refusal_age_hours"
             ],
+            "execution_generation_state": health["runtime_generation"]["state"],
+            "execution_generation_id": health["runtime_generation"].get(
+                "generation_id"
+            ),
             "audit_degraded": health["evidence_lifecycle"]["audit_degraded"],
             "evidence_disposition_degraded": health["evidence_lifecycle"][
                 "disposition_degraded"
