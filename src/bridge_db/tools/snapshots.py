@@ -186,6 +186,31 @@ def register(mcp: FastMCP) -> None:
                 )
                 if family_count >= retention_limit:
                     await db.rollback()
+                    # BD-INV-1's philosophy is that no prune is silent. A refusal
+                    # to write is the same class of event: it changes what the
+                    # ledger will contain. Without this line a saturated family
+                    # is invisible in the audit log, so a caller that does not
+                    # inspect `ok` cannot be distinguished after the fact from a
+                    # caller that never wrote at all.
+                    log_audit(
+                        "save_snapshot.refused",
+                        caller,
+                        None,
+                        ok=False,
+                        detail=(
+                            f"reason=snapshot.retention_would_prune system={system} "
+                            f"family={family} retained={family_count} "
+                            f"limit={retention_limit} date={snap_date}"
+                        ),
+                    )
+                    logger.warning(
+                        "snapshot refused: system=%s family=%s retained=%d limit=%d "
+                        "(no write performed; caller must check ok)",
+                        system,
+                        family,
+                        family_count,
+                        retention_limit,
+                    )
                     return {
                         "ok": False,
                         "reason_code": "snapshot.retention_would_prune",

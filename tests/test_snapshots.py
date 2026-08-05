@@ -13,6 +13,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 from bridge_db import config
 from bridge_db.db import open_db
+from bridge_db.audit import iter_jsonl
 from bridge_db.tools import cost as cost_mod
 from bridge_db.tools import snapshots as snap_mod
 
@@ -66,10 +67,14 @@ def cost_fns(db: aiosqlite.Connection) -> dict[str, Any]:
 # ── Snapshots ────────────────────────────────────────────────────────────────
 
 
-async def test_save_snapshot_cc(db: aiosqlite.Connection, snap_fns: dict[str, Any]) -> None:
+async def test_save_snapshot_cc(
+    db: aiosqlite.Connection, snap_fns: dict[str, Any]
+) -> None:
     ctx = make_ctx(db)
     result = await snap_fns["save_snapshot"](
-        caller="cc", data={"active_projects": "ink, bridge-db", "lessons": "- use WAL"}, ctx=ctx
+        caller="cc",
+        data={"active_projects": "ink, bridge-db", "lessons": "- use WAL"},
+        ctx=ctx,
     )
     assert result["ok"] is True
     assert result["system"] == "cc"
@@ -97,13 +102,17 @@ async def test_save_snapshot_persists_and_echoes_source_trust(
     asserted = await snap_fns["save_snapshot"](
         caller="cc", data={"v": "1"}, source_trust="operator", ctx=ctx
     )
-    defaulted = await snap_fns["save_snapshot"](caller="codex", data={"v": "2"}, ctx=ctx)
+    defaulted = await snap_fns["save_snapshot"](
+        caller="codex", data={"v": "2"}, ctx=ctx
+    )
 
     assert asserted["source_trust"] == "agent"
     assert asserted["source_trust_clamped"] is True
     assert defaulted["source_trust"] == "agent"
 
-    cursor = await db.execute("SELECT system, source_trust FROM system_snapshots ORDER BY id")
+    cursor = await db.execute(
+        "SELECT system, source_trust FROM system_snapshots ORDER BY id"
+    )
     rows: list[aiosqlite.Row] = await cursor.fetchall()  # type: ignore[assignment]
     trust = {r["system"]: r["source_trust"] for r in rows}
     assert trust["cc"] == "agent"
@@ -149,6 +158,7 @@ async def test_save_snapshot_auth_off_rejects_unbound_operator_forgery(
     count_row = await cursor.fetchone()
     assert count_row is not None
     assert count_row[0] == 0
+
 
 async def test_save_snapshot_claude_ai_raises(
     db: aiosqlite.Connection, snap_fns: dict[str, Any]
@@ -328,6 +338,66 @@ async def test_save_snapshot_preserve_existing_refuses_full_family_without_mutat
     assert db.in_transaction is False
 
 
+async def test_save_snapshot_refusal_emits_audit_line(
+    db: aiosqlite.Connection,
+    snap_fns: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused write must leave a trace.
+
+    BD-INV-1's philosophy is that no prune is silent. A refusal is the same
+    class of event: it decides what the ledger will contain. Before this,
+    a saturated family produced ok=False and no audit line at all, so a
+    caller that ignored `ok` was indistinguishable after the fact from a
+    caller that never wrote.
+    """
+    monkeypatch.setattr(config, "SNAPSHOT_RETENTION_PER_SYSTEM", 2)
+    ctx = make_ctx(db)
+    for i in range(2):
+        await snap_fns["save_snapshot"](caller="cc", data={"i": i}, ctx=ctx)
+
+    result = await snap_fns["save_snapshot"](
+        caller="cc",
+        data={"i": "refused"},
+        retention_policy="preserve_existing",
+        ctx=ctx,
+    )
+    assert result["ok"] is False
+    assert result["mutation_performed"] is False
+
+    events = [
+        event
+        for event in iter_jsonl(config.AUDIT_LOG_PATH)
+        if event.get("tool") == "save_snapshot.refused"
+    ]
+    assert len(events) == 1, "a refused snapshot write must emit exactly one audit line"
+    refused = events[0]
+    assert refused.get("ok") is False
+    assert refused.get("caller") == "cc"
+    detail = str(refused.get("detail", ""))
+    assert "snapshot.retention_would_prune" in detail
+    assert "retained=2" in detail
+    assert "limit=2" in detail
+
+
+async def test_save_snapshot_accepted_write_emits_no_refusal_line(
+    db: aiosqlite.Connection,
+    snap_fns: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control: a write that succeeds must not look like a refusal."""
+    monkeypatch.setattr(config, "SNAPSHOT_RETENTION_PER_SYSTEM", 2)
+    ctx = make_ctx(db)
+    result = await snap_fns["save_snapshot"](caller="cc", data={"i": 1}, ctx=ctx)
+
+    assert result["ok"] is True
+    assert [
+        event
+        for event in iter_jsonl(config.AUDIT_LOG_PATH)
+        if event.get("tool") == "save_snapshot.refused"
+    ] == []
+
+
 async def test_save_snapshot_preserve_existing_accepts_under_limit_without_pruning(
     db: aiosqlite.Connection,
     snap_fns: dict[str, Any],
@@ -466,10 +536,14 @@ async def test_save_snapshot_preserve_existing_serializes_capacity_admission(
 # ── Cost ─────────────────────────────────────────────────────────────────────
 
 
-async def test_record_cost_upsert(db: aiosqlite.Connection, cost_fns: dict[str, Any]) -> None:
+async def test_record_cost_upsert(
+    db: aiosqlite.Connection, cost_fns: dict[str, Any]
+) -> None:
     ctx = make_ctx(db)
     await cost_fns["record_cost"](caller="cc", month="2026-04", amount=55.0, ctx=ctx)
-    await cost_fns["record_cost"](caller="cc", month="2026-04", amount=75.0, ctx=ctx)  # update
+    await cost_fns["record_cost"](
+        caller="cc", month="2026-04", amount=75.0, ctx=ctx
+    )  # update
 
     cursor = await db.execute(
         "SELECT COUNT(*) FROM cost_records WHERE system='cc' AND month='2026-04'"
@@ -521,7 +595,9 @@ async def test_record_cost_bad_month_raises(
 ) -> None:
     ctx = make_ctx(db)
     with pytest.raises(ToolError, match="Invalid month"):
-        await cost_fns["record_cost"](caller="cc", month="April 2026", amount=10.0, ctx=ctx)
+        await cost_fns["record_cost"](
+            caller="cc", month="April 2026", amount=10.0, ctx=ctx
+        )
 
 
 async def test_record_cost_claude_ai_raises(
@@ -529,7 +605,9 @@ async def test_record_cost_claude_ai_raises(
 ) -> None:
     ctx = make_ctx(db)
     with pytest.raises(ToolError, match="cannot record costs"):
-        await cost_fns["record_cost"](caller="claude_ai", month="2026-04", amount=10.0, ctx=ctx)
+        await cost_fns["record_cost"](
+            caller="claude_ai", month="2026-04", amount=10.0, ctx=ctx
+        )
 
 
 async def test_get_cost_history_filter_by_system(
