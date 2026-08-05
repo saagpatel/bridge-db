@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/d</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>Label</key>
+    <string>com.saagar.bridge-db-checkpoint</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/d/.local/state/operator-scripts/current/run-with-receipt.sh</string>
+        <string>--automation-id</string>
+        <string>com.saagar.bridge-db-checkpoint</string>
+        <string>--expect-stdout</string>
+        <string>Overall: truncated</string>
+        <string>--</string>
+        <string>/Users/d/.local/state/bridge-db/current/bin/bridge-db-mcp</string>
+        <string>--checkpoint</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>/Users/d/Library/Logs/bridge-db-checkpoint.log</string>
+    <key>StandardOutPath</key>
+    <string>/Users/d/Library/Logs/bridge-db-checkpoint.log</string>
+    <key>StartInterval</key>
+    <integer>1800</integer>
+</dict>
+</plist>

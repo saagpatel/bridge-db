@@ -385,6 +385,37 @@ async def test_health_row_counts_reflect_data(
     assert result["fts_index"]["orphaned"] == 0
 
 
+async def test_health_surfaces_unacknowledged_snapshot_refusal(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
+) -> None:
+    (tmp_path / "test.db").touch()
+    await db.execute(
+        """
+        INSERT INTO snapshot_refusals (
+            caller, system, snapshot_family, snapshot_date, reason_code,
+            retained_count, retention_limit, payload_sha256, next_state
+        ) VALUES (
+            'cc', 'cc', 'default', '2026-08-05',
+            'snapshot.retention_would_prune', 10, 10, ?,
+            'capacity_blocked_acknowledgement_required'
+        )
+        """,
+        ("a" * 64,),
+    )
+    await db.commit()
+
+    health = await fns["health"](ctx=make_ctx(db))
+    status = await fns["status"](ctx=make_ctx(db))
+
+    assert health["row_counts"]["snapshot_refusals"] == 1
+    assert health["unacknowledged_snapshot_refusals"] == 1
+    assert status["signals"]["unacknowledged_snapshot_refusals"] == 1
+    assert any(
+        action["action"] == "acknowledge_snapshot_refusal"
+        for action in status["freshness"]["next_actions"]
+    )
+
+
 async def test_health_source_trust_breakdown(
     db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
 ) -> None:
@@ -849,7 +880,8 @@ async def test_status_ignores_lifecycle_only_activity_for_snapshot_supersession(
     assert cc["state"] == "fresh"
     assert cc["superseding_activity_id"] is None
     assert cc["next_action"] == "none"
-    assert result["operating_state"] == "fresh"
+    assert result["operating_state"] == "attention"
+    assert result["signals"]["execution_generation_state"] == "mutable_direct_path"
 
 
 async def test_status_uses_latest_substantive_activity_despite_newer_lifecycle_row(
@@ -899,7 +931,12 @@ async def test_status_freshness_reports_stale_snapshots_without_degrading_health
             "action": "cc_refresh_snapshot",
             "owner": "cc",
             "reason": "cc snapshot freshness is stale.",
-        }
+        },
+        {
+            "action": "activate_reviewed_generation",
+            "owner": "operator",
+            "reason": "BridgeDB is not running from a verified immutable generation.",
+        },
     ]
 
 

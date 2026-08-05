@@ -20,6 +20,7 @@ import aiosqlite
 
 from bridge_db.config import BRIDGE_FILE_PATH, DB_PATH
 from bridge_db.db import open_db, repopulate_content_index
+from bridge_db.snapshot_service import save_snapshot_record
 
 logger = logging.getLogger("bridge_db.migration")
 
@@ -210,17 +211,27 @@ async def _insert_context_section(
 async def _insert_snapshot(
     db: aiosqlite.Connection, system: str, snap_date: str, data: dict[str, Any]
 ) -> bool:
-    """Insert a snapshot. Returns True if inserted, False if system already has one."""
-    cursor = await db.execute("SELECT 1 FROM system_snapshots WHERE system = ? LIMIT 1", (system,))
-    if await cursor.fetchone() is not None:
-        logger.debug("system_snapshots: %s already has a snapshot, skipping", system)
-        return False
-    await db.execute(
-        "INSERT INTO system_snapshots (system, snapshot_date, data) VALUES (?, ?, ?)",
-        (system, snap_date, json.dumps(data)),
+    """Use the explicit empty-system migration exemption for one initial seed."""
+    result = await save_snapshot_record(
+        db,
+        caller=system,
+        system=system,
+        data=data,
+        snapshot_date=snap_date,
+        source_trust="agent",
+        retention_policy="preserve_existing",
+        initial_seed=True,
     )
-    logger.info("Inserted snapshot: system=%s date=%s", system, snap_date)
-    return True
+    if result["mutation_performed"]:
+        logger.info(
+            "Inserted initial migration snapshot: system=%s date=%s exemption=%s",
+            system,
+            snap_date,
+            result["initial_seed_exemption"],
+        )
+        return True
+    logger.debug("system_snapshots: %s already has a snapshot, skipping", system)
+    return False
 
 
 async def _upsert_cost_record(

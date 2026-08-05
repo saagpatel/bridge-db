@@ -35,6 +35,8 @@ _SCOPES_BY_CALLER: dict[str, frozenset[str]] = {
         {
             "log_activity",
             "save_snapshot",
+            "get_snapshot_capacity",
+            "acknowledge_snapshot_refusal",
             "record_cost",
             "record_disposition",
             "pick_up_handoff",
@@ -48,6 +50,8 @@ _SCOPES_BY_CALLER: dict[str, frozenset[str]] = {
         {
             "log_activity",
             "save_snapshot",
+            "get_snapshot_capacity",
+            "acknowledge_snapshot_refusal",
             "record_cost",
             "record_disposition",
             "pick_up_handoff",

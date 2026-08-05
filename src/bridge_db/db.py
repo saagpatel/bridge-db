@@ -18,6 +18,7 @@ logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
 SCHEMA_VERSION = 23
+SNAPSHOT_REFUSAL_EXTENSION_SCHEMA = "BridgeSnapshotRefusalSchemaV1"
 
 # A migration post-hook runs after its DDL, before the version bump+commit
 # (e.g. FTS repopulation). Its return value is ignored.
@@ -250,6 +251,26 @@ CREATE TABLE IF NOT EXISTS system_snapshots (
 );
 
 CREATE INDEX IF NOT EXISTS idx_snapshot_system ON system_snapshots(system, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS snapshot_refusals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    caller TEXT NOT NULL CHECK(caller IN ('cc', 'codex')),
+    system TEXT NOT NULL CHECK(system IN ('cc', 'codex')),
+    snapshot_family TEXT NOT NULL,
+    snapshot_date TEXT NOT NULL,
+    reason_code TEXT NOT NULL CHECK(reason_code = 'snapshot.retention_would_prune'),
+    retained_count INTEGER NOT NULL CHECK(retained_count >= 0),
+    retention_limit INTEGER NOT NULL CHECK(retention_limit >= 1),
+    payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256) = 64),
+    acknowledgement_state TEXT CHECK(acknowledgement_state IS NULL OR acknowledgement_state IN ('preserve_history', 'retry_after_owner_action', 'superseded')),
+    acknowledged_by TEXT CHECK(acknowledged_by IS NULL OR acknowledged_by IN ('cc', 'codex')),
+    next_state TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    acknowledged_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_snapshot_refusals_owner_state
+    ON snapshot_refusals(caller, acknowledgement_state, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS pending_handoffs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -739,6 +760,32 @@ CREATE TABLE IF NOT EXISTS handoff_orphan_recovery_receipts (
 );
 """
 
+# BridgeSnapshotRefusalSchemaV1 is deliberately additive over the core schema.
+# Existing v23 databases from the exact previous merged generation receive this
+# table without advancing user_version, so pointer rollback keeps its core upper
+# bound while preserving refusal rows for roll-forward.
+_SNAPSHOT_REFUSAL_EXTENSION_DDL = """
+CREATE TABLE IF NOT EXISTS snapshot_refusals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    caller TEXT NOT NULL CHECK(caller IN ('cc', 'codex')),
+    system TEXT NOT NULL CHECK(system IN ('cc', 'codex')),
+    snapshot_family TEXT NOT NULL,
+    snapshot_date TEXT NOT NULL,
+    reason_code TEXT NOT NULL CHECK(reason_code = 'snapshot.retention_would_prune'),
+    retained_count INTEGER NOT NULL CHECK(retained_count >= 0),
+    retention_limit INTEGER NOT NULL CHECK(retention_limit >= 1),
+    payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256) = 64),
+    acknowledgement_state TEXT CHECK(acknowledgement_state IS NULL OR acknowledgement_state IN ('preserve_history', 'retry_after_owner_action', 'superseded')),
+    acknowledged_by TEXT CHECK(acknowledged_by IS NULL OR acknowledged_by IN ('cc', 'codex')),
+    next_state TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    acknowledged_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_snapshot_refusals_owner_state
+    ON snapshot_refusals(caller, acknowledgement_state, created_at DESC);
+"""
+
 # Column definitions for the v14 ADD COLUMN step. Kept character-identical to the
 # activity_log block in _SCHEMA_DDL so a fresh install and a migrated DB converge
 # (see tests/test_schema_convergence_concurrency.py). NOTE: the synced/policy
@@ -842,7 +889,11 @@ async def _backup_db_file(db: aiosqlite.Connection, label: str) -> None:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as check:
             integrity = check.execute("PRAGMA integrity_check").fetchone()
             backup_version = int(check.execute("PRAGMA user_version").fetchone()[0])
-        if integrity is None or integrity[0] != "ok" or backup_version != expected_version:
+        if (
+            integrity is None
+            or integrity[0] != "ok"
+            or backup_version != expected_version
+        ):
             raise RuntimeError(
                 f"migration backup {path} failed SQLite/version verification; "
                 "refusing destructive migration"
@@ -1137,6 +1188,11 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         raise RuntimeError(
             f"Migration ladder ended at v{current_version}, expected v{SCHEMA_VERSION}"
         )
+    # Snapshot refusals are an additive v1 extension over the v23 core schema.
+    # Exact previous merged generation d7272d4 safely ignores and preserves it.
+    if not await _table_exists(db, "snapshot_refusals"):
+        await db.executescript(_SNAPSHOT_REFUSAL_EXTENSION_DDL)
+        await db.commit()
     logger.debug("Schema at v%d", current_version)
 
 

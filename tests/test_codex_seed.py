@@ -354,3 +354,62 @@ async def test_codex_seed_populates_content_index(
         assert row[0] >= 1
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_codex_seed_honors_capacity_refusal_without_deleting_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    bridge_path = tmp_path / "bridge.md"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(config, "BRIDGE_FILE_PATH", bridge_path)
+    monkeypatch.setattr(config, "SNAPSHOT_RETENTION_PER_SYSTEM", 1)
+
+    db = await open_db(db_path)
+    await db.execute(
+        "INSERT INTO system_snapshots (system, snapshot_date, data) VALUES (?, ?, ?)",
+        (
+            "codex",
+            "2026-04-13",
+            json.dumps(
+                {
+                    "infrastructure": "preserved",
+                    "automation_digest": "preserved",
+                    "active_projects": "preserved",
+                }
+            ),
+        ),
+    )
+    await db.commit()
+    await db.close()
+
+    result = await apply_manifest(make_v2_manifest(), dry_run=False)
+
+    assert result["ok"] is False
+    assert result["snapshot_write"] == "refused_capacity"
+    assert result["activity_write"] == "blocked_snapshot_refusal"
+    assert result["acknowledgement_required"] is True
+    assert result["next_state"] == "capacity_blocked_acknowledgement_required"
+
+    db = await open_db(db_path)
+    try:
+        snapshot_count = await (
+            await db.execute("SELECT COUNT(*) FROM system_snapshots")
+        ).fetchone()
+        activity_count = await (
+            await db.execute("SELECT COUNT(*) FROM activity_log")
+        ).fetchone()
+        refusal = await (
+            await db.execute(
+                "SELECT caller, acknowledgement_state FROM snapshot_refusals WHERE id = ?",
+                (result["refusal_id"],),
+            )
+        ).fetchone()
+        assert snapshot_count is not None and snapshot_count[0] == 1
+        assert activity_count is not None and activity_count[0] == 0
+        assert refusal is not None
+        assert refusal["caller"] == "codex"
+        assert refusal["acknowledgement_state"] is None
+    finally:
+        await db.close()

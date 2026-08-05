@@ -107,6 +107,44 @@ observability tools `recall_stats`, `audit_tail`, and `get_write_conflicts`.
 This exact `uv`-based stdio launch path is the documented local target and has been
 validated in the current setup.
 
+The convergence target is the immutable launcher at
+`<private-runtime-root>/current/bin/bridge-db-mcp`. Each client must use that
+same pointer after controlled activation; a mutable checkout remains supported
+for development but `health`/`status` label it `mutable_direct_path`, not a
+verified installed generation. Staging, rollback, drain, and no-secret-output
+Codex binding are specified in
+`docs/internal/EXECUTION-GENERATIONS.md`.
+
+Generation verification is exact-tree and fail-closed: unexpected bytes,
+owner/mode drift, interpreter drift, source-copy races, and generation-ID
+mismatch are non-green. The external interpreter executable is digest-bound,
+but its installed package, standard-library, shared-library, and OS environment
+is explicitly unmanaged; lockfile binding is not an environment-convergence
+claim.
+
+Each MCP process publishes a private owner/principal/generation lease with
+request timing, lifecycle reason, PID ancestry, and RSS. Obsolete generations
+refuse new requests, finish active requests, and cooperatively cancel their own
+server task. Lifecycle apply is exact-target and cannot terminate another
+process. Snapshot refusal storage stays an additive extension over core SQLite
+`user_version=23`, preserving open/read compatibility with exact previous
+merged generation `d7272d489873faa5ed84c81734636ffc8cecb095`; rollback loses
+the refusal API until roll-forward but does not discard its rows. Activation or
+rollback calls the owning recovery lifecycle verification and requires current
+verified anchor/seal evidence after any pending-journal recovery. Missing,
+stale, invalid, or unsealed evidence prevents a new pointer mutation.
+
+Claude Code `/Users/d/.claude.json` and Claude Desktop
+`/Users/d/Library/Application Support/Claude/claude_desktop_config.json` converge
+through `bridge_db.client_rebinding`: only the exact legacy `bridge-db`
+command/args are changed, environment values are preserved without output, and
+each target gets a private exact-byte backup plus digest-bound restore. Codex
+uses the source-owned `config/bridge-db-mcp-immutable` install input, which
+parses only the two reviewed credential keys before execing the stable launcher.
+The checkpoint LaunchAgent input invokes that same launcher with `--checkpoint`
+through the existing receipt wrapper. Live installation and reconnect/reload
+remain separate governed effects.
+
 ### vibe-code-handoff (updated workflow)
 
 **Fallback (file-based):**
@@ -178,6 +216,16 @@ under-limit write returns `retention_policy="preserve_existing"` and
 `mutation_performed=false` without inserting, pruning, or garbage-collecting
 snapshot FTS rows. The caller must not retry without a separate decision that
 explicitly permits `retention_policy="prune_oldest"`.
+
+Snapshot owners should call `get_snapshot_capacity(caller=..., data=...)`
+before assembling a write. A preserve-mode capacity refusal returns a durable
+`refusal_id`, `acknowledgement_required=true`, and an explicit `next_state`.
+The same bound owner must call `acknowledge_snapshot_refusal` with its decision;
+foreign principals cannot acknowledge it, and no acknowledgement authorizes
+history deletion. Unacknowledged refusals remain visible in `health` and
+`status`. The private Codex seed and one-time empty-system markdown migration
+use this same admission service, so there is no repository-owned direct writer
+that can silently prune snapshot history.
 
 `get_pending_handoffs` is a bounded paged read. It returns at most 100 rows by
 default (maximum 200); pass the last returned `id` as `before_id` to fetch the
@@ -368,8 +416,8 @@ cleanup, clears degradation, or rewrites historical records.
 
 | Principal | Write capabilities | Boundaries |
 |---|---|---|
-| `codex` | `log_activity(caller="codex")`, `save_snapshot(caller="codex")`, `record_cost(caller="codex")`, source-owned `record_disposition(caller="codex")`, `pick_up_handoff`/`clear_handoff` where their gates allow it, and scoped CLI `--seal-recovery-batch` | Owns Codex truth and verification; a recovery seal proves the complete current image but does not authorize writing or refreshing `cc` snapshots or Claude.ai sections |
-| `cc` | `log_activity(caller="cc")`, `save_snapshot(caller="cc")`, `record_cost(caller="cc")`, source-owned `record_disposition(caller="cc")`, `pick_up_handoff`/`clear_handoff` where their gates allow it, and scoped CLI `--seal-recovery-batch` | Owns Claude Code state and session telemetry; a recovery seal proves the complete current image but does not authorize writing Codex snapshots or Claude.ai sections |
+| `codex` | `log_activity(caller="codex")`, `get_snapshot_capacity` / `save_snapshot` / owner-bound `acknowledge_snapshot_refusal`, `record_cost(caller="codex")`, source-owned `record_disposition(caller="codex")`, `pick_up_handoff`/`clear_handoff` where their gates allow it, and scoped CLI `--seal-recovery-batch` | Owns Codex truth and verification; a recovery seal proves the complete current image but does not authorize writing or refreshing `cc` snapshots or Claude.ai sections |
+| `cc` | `log_activity(caller="cc")`, `get_snapshot_capacity` / `save_snapshot` / owner-bound `acknowledge_snapshot_refusal`, `record_cost(caller="cc")`, source-owned `record_disposition(caller="cc")`, `pick_up_handoff`/`clear_handoff` where their gates allow it, and scoped CLI `--seal-recovery-batch` | Owns Claude Code state and session telemetry; a recovery seal proves the complete current image but does not authorize writing Codex snapshots or Claude.ai sections |
 | `claude_ai` | `update_section` for `career`, `speaking`, `research`, and `capabilities`; channel-bound `create_handoff(caller="claude_ai")`; compatibility file edits to those four sections followed by `sync_from_file` | Advisory and dispatch surface; MCP handoffs cannot mint operator trust and must not act as local execution proof |
 | `notion_os` | `log_activity(caller="notion_os")`, `record_cost(caller="notion_os")`, `record_disposition(caller="notion_os")` | Owns Notion-side receipts/activity it actually verified; must not infer project mappings beyond `notion_sync` |
 | `personal_ops` | `log_activity(caller="personal_ops")`, `record_cost(caller="personal_ops")`, `record_disposition(caller="personal_ops")` | Owns operator-facing coordination receipts; must not replace repo-local or bridge-db verification |

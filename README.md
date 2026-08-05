@@ -29,6 +29,7 @@ uv run pytest    # verify the install
 - Schema v21: adds non-destructive write-conflict identity aggregation. Exact repeat conflicts increment `occurrence_count`; distinct identity growth is capped at 10,000 and then rolls into an explicit per-surface overflow aggregate. Legacy receipts remain unchanged and are labeled `aggregation_state="legacy"`.
 - Schema v22 adds append-only handoff cancellation receipts and exact-row trust quarantine images. Legacy cleared operator rows can be relabeled `ingested` without deletion and restored only while the captured row still matches.
 - Schema v23 adds one-time, 24-hour handoff completion capabilities and append-only orphan-recovery receipts. The database stores only capability hashes; the claiming session receives the sole bearer value.
+- The additive `BridgeSnapshotRefusalSchemaV1` extension over core v23 adds durable, owner-bound snapshot-capacity refusal receipts and explicit acknowledgement/next-state handling without advancing `user_version`. A refusal stores only a payload digest, never the rejected snapshot body.
 - FTS5 `content_index` mirrors all content tables; `health` and `status` verify source-row / FTS-row alignment.
 - `status` includes a native freshness block for owner-specific snapshot, activity, handoff, and shipped-event attention. Freshness attention is advisory: top-level `ok` / `overall` remain tied to DB, schema, fallback-file, and FTS health.
 - 26 MCP tools across 10 modules (activity, handoffs, context, snapshots, cost, export, health, recall, audit, conflicts).
@@ -56,14 +57,14 @@ No shared daemon. Each MCP client spawns its own `bridge-db` process via stdio. 
 
 Verify the current tool count from source with
 `rg '@mcp\.tool' src/bridge_db -c`. As of the 2026-07-12 v14 collapse, the
-surface is 24 tools across these 10 modules:
+surface is 26 tools across these 10 modules:
 
 | Module | Tools |
 |---|---|
 | activity | `log_activity`, `get_recent_activity`, `get_activity_signal`, `get_shipped_events`, `record_disposition` |
 | handoffs | `create_handoff`, `get_pending_handoffs`, `pick_up_handoff`, `clear_handoff` |
 | context | `update_section`, `get_section`, `get_all_sections`, `sync_from_file` |
-| snapshots | `save_snapshot`, `get_latest_snapshot` |
+| snapshots | `save_snapshot`, `get_snapshot_capacity`, `acknowledge_snapshot_refusal`, `get_latest_snapshot` |
 | cost | `record_cost`, `get_cost_history` |
 | export | `export_bridge_markdown` |
 | health | `health`, `status` |
@@ -171,11 +172,19 @@ uv run python -m bridge_db --cancel-handoff 42 --cancel-reason "superseded"  # e
 uv run python -m bridge_db --recover-orphaned-handoff 42 --recovery-reason "claiming session vanished"  # expired/legacy active claim
 uv run python -m bridge_db --quarantine-cleared-operator-handoffs  # recoverable legacy relabel
 uv run python -m bridge_db --restore-handoff-trust 42  # exact-row recovery
+python -m bridge_db.execution_generation readback --root <private-runtime-root>
+python -m bridge_db.secure_binding --caller codex --secret-fd 3 --principals-path <path> --binding-path <path>
+python -m bridge_db.client_rebinding rebind --client claude-code --config-path /Users/d/.claude.json --backup-root <private-backup-root>
+python -m bridge_db.tenancy status --root <private-tenancy-root>
 uv run python -m bridge_db          # start MCP server (stdio)
 uv run python -m bridge_db.migration  # migrate from bridge markdown
 ```
 
-The private Codex baseline seed accepts explicit versioned fingerprints.
+The private Codex baseline seed accepts explicit versioned fingerprints and
+uses the same no-silent-prune admission service as `save_snapshot`. It never
+deletes retained snapshots directly; a full target family produces a durable
+refusal ID and blocks the paired activity write until the owner handles the
+refusal.
 Legacy `snapshot-v1` is accepted only before `2026-08-18T00:00:00Z`; unknown
 versions and expired v1 manifests fail closed. New manifests should use the whole-manifest
 `manifest-v2` contract documented in
@@ -198,9 +207,29 @@ command = "uv"
 args = ["run", "--directory", "/path/to/bridge-db", "python", "-m", "bridge_db"]
 ```
 
+For immutable activation, point client launchers at
+`<private-runtime-root>/current/bin/bridge-db-mcp` instead of a mutable checkout.
+See [`docs/internal/EXECUTION-GENERATIONS.md`](docs/internal/EXECUTION-GENERATIONS.md)
+for deterministic staging, atomic activation/readback, rollback, cooperative
+drain, and the no-secret-output Codex binding path. `health`/`status` label a
+direct mutable checkout as operating attention; that is not proof of an
+installed generation.
+
+The source-owned `config/bridge-db-mcp-immutable` is the Codex install input; it
+parses only token/auth-mode keys from an owner-only env file and execs the stable
+launcher. `config/com.saagar.bridge-db-checkpoint.plist` preserves the existing
+30-minute receipt wrapper through the reviewed operator-script pointer while
+running that launcher with `--checkpoint`.
+`bridge_db.client_rebinding` performs exact Claude Code/Desktop JSON command
+replacement with private digest-named backups, exact readback, digest-bound
+restore, and no environment-value output. None of these source assets establish
+that a live client has reloaded them.
+
 ## Data
 
 - **DB**: `~/.local/share/bridge-db/bridge.db`
+- **Schema compatibility**: core `user_version=23` plus the additive backward-readable refusal extension, verified against exact previous merged generation `d7272d489873faa5ed84c81734636ffc8cecb095`. Activation and pointer rollback enforce the owning recovery lifecycle's current verified anchor/seal verdict after repairing any pending journal; source compatibility is not activation authority.
+- **MCP tenancy**: private per-process owner/principal/generation leases account for requests, PID ancestry, and RSS. Obsolete generations refuse new work and cooperatively close after active requests finish; lifecycle tooling cannot terminate another process.
 - **Bridge file**: `~/.claude/projects/<encoded-home>/memory/claude_ai_context.md`
   (Claude Code encodes your home dir path by replacing `/` with `-`; the default is derived
   automatically at runtime — override via `BRIDGE_FILE_PATH` if needed)
@@ -339,7 +368,14 @@ rewritten, or silently clipped; they remain readable and exportable.
   `retention_policy="preserve_existing"` atomically admits an under-limit
   family without pruning or refuses a full family before insert with
   `snapshot.retention_would_prune`. The legacy deletion path is available only
-  through an explicit `retention_policy="prune_oldest"` call.
+  through an explicit `retention_policy="prune_oldest"` call. Call
+  `get_snapshot_capacity` before assembling a write. Every preserve-mode
+  refusal returns a durable `refusal_id`, `acknowledgement_required=true`, and
+  an explicit `next_state`; the bound owner records its decision with
+  `acknowledge_snapshot_refusal`. Acknowledgement never grants deletion
+  authority. Markdown bootstrap has one narrow migration exemption: it may
+  seed a system only while that system has no snapshot rows, through the same
+  admission service.
 - Context: each section is limited to 256 KiB and the five-section registry to
   1 MiB total. An over-budget legacy database may accept a bounded replacement
   only when it reduces total bytes.

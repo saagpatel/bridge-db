@@ -23,8 +23,10 @@ from bridge_db.evidence import (
     legacy_raw_query_inventory,
     migration_backup_inventory,
 )
+from bridge_db.execution_generation import runtime_generation_identity
 from bridge_db.recovery import recovery_anchor_inventory
 from bridge_db.recovery_seal import recovery_seal_inventory
+from bridge_db.tenancy import tenancy_inventory
 from bridge_db.tools.context import parse_owned_sections
 
 logger = logging.getLogger("bridge_db.tools.health")
@@ -34,6 +36,7 @@ _ROW_COUNT_TABLES = (
     "activity_log",
     "pending_handoffs",
     "system_snapshots",
+    "snapshot_refusals",
     "cost_records",
 )
 _ACTIVITY_SOURCES = ("cc", "codex", "claude_ai", "notion_os", "personal_ops")
@@ -162,6 +165,8 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     reason). Both must always read 0 and are the compensating detection control
     for the field requirements the old NOT NULL columns enforced.
     """
+    runtime_generation = runtime_generation_identity()
+    tenancy = tenancy_inventory()
     cursor = await db.execute("PRAGMA user_version")
     row = await cursor.fetchone()
     schema_version: int = row[0] if row else 0
@@ -272,6 +277,16 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     open_write_conflicts: int = open_conflict_row[0] if open_conflict_row else 0
     oldest_open_conflict_age_hours: float | None = _age_hours(
         open_conflict_row[1] if open_conflict_row else None, _utc_now()
+    )
+
+    cursor = await db.execute(
+        "SELECT COUNT(*), MIN(created_at) FROM snapshot_refusals "
+        "WHERE acknowledgement_state IS NULL"
+    )
+    refusal_row = await cursor.fetchone()
+    unacknowledged_snapshot_refusals: int = refusal_row[0] if refusal_row else 0
+    oldest_unacknowledged_snapshot_refusal_age_hours: float | None = _age_hours(
+        refusal_row[1] if refusal_row else None, _utc_now()
     )
 
     db_path = config.DB_PATH
@@ -423,6 +438,10 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "disposition_orphan_count": disposition_orphan_count,
         "open_write_conflicts": open_write_conflicts,
         "oldest_open_conflict_age_hours": oldest_open_conflict_age_hours,
+        "unacknowledged_snapshot_refusals": unacknowledged_snapshot_refusals,
+        "oldest_unacknowledged_snapshot_refusal_age_hours": (
+            oldest_unacknowledged_snapshot_refusal_age_hours
+        ),
         "wal_size_bytes": wal_size_bytes,
         "wal_warning": wal_warning,
         "fts_index": fts_index,
@@ -434,6 +453,8 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
             "principals_file_exists": config.PRINCIPALS_PATH.exists(),
             "principals_enrolled": len(load_principals(config.PRINCIPALS_PATH)),
         },
+        "runtime_generation": runtime_generation,
+        "tenancy": tenancy,
     }
 
 
@@ -637,6 +658,14 @@ def _freshness_next_actions(
                 "reason": "Actionable SHIPPED rows need receipt-backed sync or disposition.",
             }
         )
+    if health["unacknowledged_snapshot_refusals"] > 0:
+        actions.append(
+            {
+                "action": "acknowledge_snapshot_refusal",
+                "owner": "snapshot_owner",
+                "reason": "A snapshot write refusal has no owner next-state acknowledgement.",
+            }
+        )
     for owner in _SNAPSHOT_SYSTEMS:
         snapshot = snapshots[owner]
         if snapshot["state"] in {"stale", "superseded", "missing", "unknown"}:
@@ -660,6 +689,14 @@ def _freshness_next_actions(
                 "reason": "Pending or active handoffs exceeded freshness thresholds or have unknown age.",
             }
         )
+    if health["runtime_generation"]["state"] != "verified":
+        actions.append(
+            {
+                "action": "activate_reviewed_generation",
+                "owner": "operator",
+                "reason": "BridgeDB is not running from a verified immutable generation.",
+            }
+        )
     return actions[:5]
 
 
@@ -679,6 +716,10 @@ def _freshness_overall(
     if not health["ok"]:
         return "attention"
     if shipped_events["next_action"] != "none":
+        return "attention"
+    if health["unacknowledged_snapshot_refusals"] > 0:
+        return "attention"
+    if health["runtime_generation"]["state"] != "verified":
         return "attention"
     if any(snapshot["state"] == "unknown" for snapshot in snapshots.values()):
         return "unknown"
@@ -794,6 +835,8 @@ async def collect_status_summary(
         },
         "row_counts": health["row_counts"],
         "source_trust_breakdown": health["source_trust_breakdown"],
+        "runtime_generation": health["runtime_generation"],
+        "tenancy": health["tenancy"],
         "pending_handoffs_by_trust": pending_handoffs_by_trust,
         "signals": {
             "pending_handoffs": pending_handoffs,
@@ -816,6 +859,21 @@ async def collect_status_summary(
                 health["claude_ai_section_drift"]["drifted_sections"]
             ),
             "open_write_conflicts": health["open_write_conflicts"],
+            "unacknowledged_snapshot_refusals": health[
+                "unacknowledged_snapshot_refusals"
+            ],
+            "oldest_unacknowledged_snapshot_refusal_age_hours": health[
+                "oldest_unacknowledged_snapshot_refusal_age_hours"
+            ],
+            "execution_generation_state": health["runtime_generation"]["state"],
+            "execution_generation_id": health["runtime_generation"].get(
+                "generation_id"
+            ),
+            "tenancy_state": health["tenancy"]["state"],
+            "tenancy_active_count": health["tenancy"].get("active_count"),
+            "tenancy_active_request_count": health["tenancy"].get(
+                "active_request_count"
+            ),
             "audit_degraded": health["evidence_lifecycle"]["audit_degraded"],
             "evidence_disposition_degraded": health["evidence_lifecycle"][
                 "disposition_degraded"

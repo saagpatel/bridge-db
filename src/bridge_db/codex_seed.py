@@ -14,11 +14,10 @@ from typing import Any
 from bridge_db import clock, config
 from bridge_db.db import (
     fts_text_for_activity,
-    fts_text_for_snapshot,
-    gc_fts_orphans,
     open_db,
     upsert_fts_entry,
 )
+from bridge_db.snapshot_service import save_snapshot_record
 from bridge_db.tools.export import ContextExportSnapshot, build_markdown, export_bridge_file
 
 LEGACY_FINGERPRINT_VERSION = "snapshot-v1"
@@ -172,6 +171,10 @@ async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, A
         baseline_activity = manifest["baseline_activity"]
         snapshot_write = "skipped_identical"
         activity_write = "skipped_identical"
+        snapshot_result: dict[str, Any] | None = None
+
+        if not dry_run:
+            await db.execute("BEGIN IMMEDIATE")
 
         activity_state = await _baseline_activity_state(db, baseline_activity)
         if activity_state == "conflict":
@@ -191,30 +194,31 @@ async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, A
         ) != _fingerprint_snapshot(snapshot_payload):
             snapshot_write = "would_insert" if dry_run else "inserted"
             if not dry_run:
-                snapshot_json = json.dumps(snapshot_payload)
-                cursor = await db.execute(
-                    """
-                    INSERT INTO system_snapshots (system, snapshot_date, data)
-                    VALUES (?, ?, ?)
-                    """,
-                    ("codex", manifest["snapshot_date"], snapshot_json),
+                snapshot_result = await save_snapshot_record(
+                    db,
+                    caller="codex",
+                    system="codex",
+                    data=snapshot_payload,
+                    snapshot_date=manifest["snapshot_date"],
+                    source_trust="agent",
+                    retention_policy="preserve_existing",
                 )
-                snapshot_id = cursor.lastrowid
-                if snapshot_id is not None:
-                    await upsert_fts_entry(
-                        db, "snapshot", str(snapshot_id), fts_text_for_snapshot(snapshot_json)
-                    )
-                await db.execute(
-                    """
-                    DELETE FROM system_snapshots
-                    WHERE system = ? AND id NOT IN (
-                        SELECT id FROM system_snapshots WHERE system = ?
-                        ORDER BY created_at DESC, id DESC LIMIT ?
-                    )
-                    """,
-                    ("codex", "codex", config.SNAPSHOT_RETENTION_PER_SYSTEM),
-                )
-                await gc_fts_orphans(db, "snapshot")
+                if not snapshot_result["ok"]:
+                    await db.commit()
+                    return {
+                        "ok": False,
+                        "dry_run": dry_run,
+                        "snapshot_write": "refused_capacity",
+                        "activity_write": "blocked_snapshot_refusal",
+                        "refusal_id": snapshot_result["refusal_id"],
+                        "reason_code": snapshot_result["reason_code"],
+                        "acknowledgement_required": snapshot_result[
+                            "acknowledgement_required"
+                        ],
+                        "next_state": snapshot_result["next_state"],
+                        "fingerprint_compatibility": fingerprint_compatibility,
+                        "bridge_file": str(config.BRIDGE_FILE_PATH),
+                    }
 
         if activity_state == "missing":
             activity_write = "would_insert" if dry_run else "inserted"
@@ -267,6 +271,7 @@ async def apply_manifest(manifest: dict[str, Any], dry_run: bool) -> dict[str, A
             "dry_run": dry_run,
             "snapshot_write": snapshot_write,
             "activity_write": activity_write,
+            "snapshot_result": snapshot_result,
             "fingerprint_compatibility": fingerprint_compatibility,
             "bridge_file": str(config.BRIDGE_FILE_PATH),
         }
