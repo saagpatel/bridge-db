@@ -53,12 +53,13 @@ from dst.sim import (
 )
 from dst.test_claim_race import handoff_fns
 
-# Re-pinned twice on 2026-07-10, each a declared window change from a fix
-# shifting the RNG draw alignment (not lost determinism): 11 → 5 when the
+# Re-pinned on declared window changes as fixes shifted the RNG draw alignment
+# (not lost determinism): 11 → 5 when the
 # INV-2 fix removed the loser path's rollback op; 5 → 20 when the review
-# round made the stale_claim dedupe statement-atomic and the recovery arm
-# concurrent. Current sweep: 3/40 seeds land it (20, 21, 34).
-CRASHING_SEED = 20
+# round made stale-claim dedupe statement-atomic; 20 → 5 when TAR-03 added
+# capability issuance to the winner transaction. Current sweep: 8/40 seeds
+# land it (5, 8, 11, 12, 18, 28, 29, 34).
+CRASHING_SEED = 5
 SEED_SWEEP = range(0, 40)
 
 _WINDOW_LABEL = "fault_fired_in_receipt_window"

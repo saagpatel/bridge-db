@@ -1,9 +1,9 @@
-"""Claimant-only clear racing a legitimate pickup on one pending handoff.
+"""Same-role capability-less clear racing a legitimate pickup.
 
-Pending rows are no longer clearable through MCP. Across every schedule the
-clear is refused and the pickup is the sole possible state transition, leaving
-the row active and claimed by codex. This corpus case proves the denial is
-stable under concurrency instead of depending on SELECT/UPDATE ordering.
+Across every schedule the capability-less Codex session is refused and the
+claiming Codex session is the sole possible state transition, leaving the row
+active. This proves same-role denial is stable under concurrency instead of
+depending on SELECT/UPDATE ordering.
 """
 
 import asyncio
@@ -125,7 +125,7 @@ async def run_clear_race(base: Path, seed: int) -> dict[str, Any]:
         handoff_id = created["handoff_id"]
         writers = {
             "clear": _clear_writer(
-                db_path, sim_clock, rng, trace, scheduler, project, "cc"
+                db_path, sim_clock, rng, trace, scheduler, project, "codex"
             ),
             "claim": _claim_writer(
                 db_path, sim_clock, rng, trace, scheduler, handoff_id, "codex"
@@ -169,7 +169,7 @@ async def test_pending_clear_refused_rederived(tmp_path: Path) -> None:
     outcome = await run_clear_race(tmp_path, CLEAR_REFUSED_SEED)
     assert outcome["clear"] == "clear_refused"
     assert outcome["claim"] == "claim_won"
-    assert sometimes_counts().get("clear_refused_foreign_claim")
+    assert sometimes_counts().get("clear_refused_session_capability")
 
 
 async def test_pending_clear_denial_is_schedule_independent(tmp_path: Path) -> None:

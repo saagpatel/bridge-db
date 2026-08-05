@@ -64,6 +64,11 @@ HANDOFF_OPEN_QUOTA: int = 100
 HANDOFF_TOTAL_ROWS_QUOTA: int = 10_000
 HANDOFF_PAGE_DEFAULT: int = 100
 HANDOFF_PAGE_MAX: int = 200
+# Completion capabilities are deliberately shorter-lived than the 72-hour
+# active-handoff freshness threshold. A normal work session can finish without
+# renewal, while an abandoned bearer secret ages out before orphan recovery.
+HANDOFF_CAPABILITY_TTL_HOURS: int = 24
+HANDOFF_CAPABILITY_MAX_BYTES: int = 512
 
 SNAPSHOT_JSON_MAX_BYTES: int = 256 * 1024
 SNAPSHOT_JSON_MAX_DEPTH: int = 32

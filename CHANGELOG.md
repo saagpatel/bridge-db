@@ -2,6 +2,23 @@
 
 All notable changes to bridge-db are documented here.
 
+## [Unreleased] — 2026-08-05
+
+### Added — same-role handoff ownership
+
+- **Schema v23**: adds hash-only, one-time handoff session capabilities and
+  append-only orphan-recovery receipts. Existing active rows migrate without a
+  fabricated capability and use the audited legacy recovery path.
+- **Pickup/completion contract**: `pick_up_handoff` mints a 24-hour capability
+  bound to the handoff, claimant session, role, and `clear` transition;
+  `clear_handoff` requires and atomically consumes the exact capability while
+  preserving channel-bound role authorization.
+- **Fail-closed outcomes**: same-role calls without the claiming session's
+  bearer value, wrong project/handoff, expiry, replay, recovered state, and
+  malformed tokens return explicit reason codes without clearing work.
+- **Operator recovery**: `--recover-orphaned-handoff` uses an exact-row TTY
+  ceremony for expired or legacy active claims and writes a durable receipt.
+
 ## [Unreleased] — 2026-06-20
 
 ### Added — CAS and provenance hardening
