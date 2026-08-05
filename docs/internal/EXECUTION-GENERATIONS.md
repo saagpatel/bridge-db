@@ -146,8 +146,9 @@ rollback from overwriting a concurrent edit.
 
 The source-owned `config/bridge-db-mcp-immutable` is the reviewed Codex wrapper
 input. Its installed target is `/Users/d/.codex/bin/bridge-db-mcp-immutable`.
-It parses (never sources) only `BRIDGE_DB_PRINCIPAL_TOKEN` and
-`BRIDGE_DB_AUTH_MODE` from owner-only mode-`0600`
+It parses (never sources) `BRIDGE_DB_PRINCIPAL_TOKEN`,
+`BRIDGE_DB_AUTH_MODE`, and the optional reviewed
+`BRIDGE_DB_TRANSPORT_MODE=direct|shared` key from owner-only mode-`0600`
 `/Users/d/.codex/secrets/bridge-db.env`, or from one explicit absolute
 `BRIDGE_DB_ENV_FILE`, then execs the stable launcher. Unknown or duplicate keys
 fail closed without printing values. The source-owned
@@ -196,6 +197,48 @@ reach zero, then cancels its own server task so lifespan cleanup closes the DB
 and moves the lease to append-only history. No lifecycle command enumerates or
 signals another process. Exact-target application and deterministic retirement
 receipts prevent an apply operation from partially mutating multiple leases.
+
+### Shared runtime upgrade
+
+The direct stdio runtime remains the default and rollback. When the reviewed
+binding selects `BRIDGE_DB_TRANSPORT_MODE=shared`, a no-argument wrapper launch
+registers the shell relay's PID/start identity, then ensures one broker for the
+exact credential and complete non-secret launch contract: normalized auth mode,
+generation/manifest, interpreter/runtime source, database, bridge, principal,
+audit/evidence, registry, tenancy, logging, and idle-policy inputs. A private
+random selector key derives the group name, so neither the credential nor a
+reusable credential digest appears in argv, output, socket names, or receipts.
+Each relay also receives a distinct random capability through an owner-only
+mode-`0400` curl header file. Every broker request validates its lease and
+capability hash plus the relay's current PID/start identity, then strips the
+header before MCP dispatch; lifecycle scans retain the same identity gate.
+The capability value never enters argv, logs, socket names, leases, history, or
+broker receipts. The broker binds only an owner-only Unix socket, uses stateful
+Streamable HTTP behind the stdio relay, and serializes tool calls so independent
+MCP session connections cannot interleave database work.
+
+Client lease history is preserved. Missing or PID-reused relay records are
+retired after identity readback; unknown process state keeps the broker alive.
+The broker exits cooperatively after 300 seconds with no live relay references,
+and startup fails closed after 10 seconds. It has no process-signaling primitive
+and does not close existing direct clients. CLI arguments always use the direct
+launcher so checkpoint and recovery operations do not depend on the relay.
+Returning the binding to `direct` is the exact rollback for future spawns.
+
+`BridgeMcpTenancyInventoryV2` reports live process identity separately from the
+on-disk lease population. `active_count`, owners, generations, request count,
+oldest age, and RSS describe live identity-matched processes; `lease_count`,
+stale/unknown counts, lease owner/generation maps, and
+`lease_last_observed_rss_total_bytes` preserve the evidence needed to review
+stale records without presenting them as live memory pressure.
+`BridgeSharedRuntimeInventoryV1`, available in `health`, `status`, and
+`python -m bridge_db --shared-runtime-status`, separately reports broker/socket
+reachability, live/stale/unknown relay identities, and capability-file counts
+without returning group selectors or capability values.
+`BridgeSharedRuntimeReadinessV1` is the narrower health/status gate: it derives
+the current group without creating state or exposing its selector, then requires
+the exact broker PID/start identity, receipt, and socket. Aggregate activity in
+another group therefore cannot render selected shared transport green.
 
 ## Database rollback compatibility
 

@@ -46,6 +46,7 @@ DEFAULT_CONTRACT_PATHS = (
     "src/bridge_db/execution_generation.py",
     "src/bridge_db/secure_binding.py",
     "src/bridge_db/server.py",
+    "src/bridge_db/shared_runtime.py",
     "src/bridge_db/snapshot_service.py",
     "src/bridge_db/tenancy.py",
     "src/bridge_db/tools/__init__.py",

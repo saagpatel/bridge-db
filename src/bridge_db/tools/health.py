@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,10 @@ from bridge_db.evidence import (
 from bridge_db.execution_generation import runtime_generation_identity
 from bridge_db.recovery import recovery_anchor_inventory
 from bridge_db.recovery_seal import recovery_seal_inventory
+from bridge_db.shared_runtime import (
+    shared_runtime_current_readiness,
+    shared_runtime_inventory,
+)
 from bridge_db.tenancy import tenancy_inventory
 from bridge_db.tools.context import parse_owned_sections
 
@@ -167,6 +172,36 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     """
     runtime_generation = runtime_generation_identity()
     tenancy = tenancy_inventory()
+    shared_runtime = shared_runtime_inventory()
+    selected_transport_mode = os.environ.get(
+        "BRIDGE_DB_TRANSPORT_MODE", "direct"
+    ).strip().lower()
+    shared_runtime_required = selected_transport_mode == "shared"
+    current_shared_runtime = (
+        shared_runtime_current_readiness()
+        if shared_runtime_required
+        else {
+            "schema": "BridgeSharedRuntimeReadinessV1",
+            "state": "not_required",
+            "ready": True,
+            "adoption_state": "not_required",
+        }
+    )
+    shared_runtime_ready = (
+        selected_transport_mode == "direct"
+        or (
+            shared_runtime_required
+            and current_shared_runtime["state"] == "observed"
+            and current_shared_runtime["ready"] is True
+        )
+    )
+    shared_runtime = {
+        **shared_runtime,
+        "current_group": current_shared_runtime,
+        "selected_transport_mode": selected_transport_mode,
+        "required_for_current_process": shared_runtime_required,
+        "ready_for_current_process": shared_runtime_ready,
+    }
     cursor = await db.execute("PRAGMA user_version")
     row = await cursor.fetchone()
     schema_version: int = row[0] if row else 0
@@ -411,6 +446,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         and not audit_degraded
         and not disposition_degraded
         and recovery_integrity_ok
+        and shared_runtime_ready
     )
     projection_health = claude_ai_section_drift["state"]
     if projection_health == "current" and not bridge_file_export_tracked:
@@ -455,6 +491,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         },
         "runtime_generation": runtime_generation,
         "tenancy": tenancy,
+        "shared_runtime": shared_runtime,
     }
 
 
@@ -837,6 +874,7 @@ async def collect_status_summary(
         "source_trust_breakdown": health["source_trust_breakdown"],
         "runtime_generation": health["runtime_generation"],
         "tenancy": health["tenancy"],
+        "shared_runtime": health["shared_runtime"],
         "pending_handoffs_by_trust": pending_handoffs_by_trust,
         "signals": {
             "pending_handoffs": pending_handoffs,
@@ -874,6 +912,19 @@ async def collect_status_summary(
             "tenancy_active_request_count": health["tenancy"].get(
                 "active_request_count"
             ),
+            "shared_runtime_state": health["shared_runtime"]["state"],
+            "shared_runtime_adoption_state": health["shared_runtime"][
+                "adoption_state"
+            ],
+            "shared_runtime_live_broker_count": health["shared_runtime"].get(
+                "live_broker_count"
+            ),
+            "shared_runtime_live_client_count": health["shared_runtime"].get(
+                "live_client_count"
+            ),
+            "shared_runtime_ready_for_current_process": health["shared_runtime"][
+                "ready_for_current_process"
+            ],
             "audit_degraded": health["evidence_lifecycle"]["audit_degraded"],
             "evidence_disposition_degraded": health["evidence_lifecycle"][
                 "disposition_degraded"

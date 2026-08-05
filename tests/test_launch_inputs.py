@@ -93,6 +93,247 @@ def test_codex_wrapper_parses_only_exact_private_keys_and_forwards_args(
     ]
 
 
+def test_codex_wrapper_defaults_no_argument_launch_to_direct_transport(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "output"
+    launcher = tmp_path / "launcher"
+    launcher.write_text(
+        "#!/bin/sh\nprintf '%s\\n%s\\n' \"$BRIDGE_DB_TRANSPORT_MODE\" \"$#\" > \"$FIXTURE_OUTPUT\"\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    wrapper = _executable_wrapper(tmp_path, launcher)
+    env_file = tmp_path / "bridge-db.env"
+    env_file.write_text(
+        "BRIDGE_DB_PRINCIPAL_TOKEN=fixture-wrapper-secret-abcdefghijklmnopqrstuvwxyz\n"
+        "BRIDGE_DB_AUTH_MODE=warn\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+
+    result = subprocess.run(
+        [str(wrapper)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "BRIDGE_DB_ENV_FILE": str(env_file),
+            "FIXTURE_OUTPUT": str(output),
+        },
+    )
+
+    assert result.returncode == 0
+    assert output.read_text(encoding="utf-8").splitlines() == ["direct", "0"]
+
+
+def test_codex_wrapper_forces_direct_transport_for_cli_maintenance_passthrough(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "output"
+    launcher = tmp_path / "launcher"
+    launcher.write_text(
+        "#!/bin/sh\nprintf '%s\\n%s\\n' \"$BRIDGE_DB_TRANSPORT_MODE\" \"$*\" > \"$FIXTURE_OUTPUT\"\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    wrapper = _executable_wrapper(tmp_path, launcher)
+    env_file = tmp_path / "bridge-db.env"
+    env_file.write_text(
+        "BRIDGE_DB_PRINCIPAL_TOKEN=fixture-wrapper-secret-abcdefghijklmnopqrstuvwxyz\n"
+        "BRIDGE_DB_AUTH_MODE=warn\n"
+        "BRIDGE_DB_TRANSPORT_MODE=shared\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+
+    result = subprocess.run(
+        [str(wrapper), "--checkpoint"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "BRIDGE_DB_ENV_FILE": str(env_file),
+            "FIXTURE_OUTPUT": str(output),
+        },
+    )
+
+    assert result.returncode == 0
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        "direct",
+        "--checkpoint",
+    ]
+
+
+@pytest.mark.parametrize(
+    "hidden_command",
+    ["--ensure-shared-broker", "--run-shared-broker", "--release-shared-client"],
+)
+def test_codex_wrapper_preserves_shared_transport_for_hidden_lifecycle_commands(
+    tmp_path: Path, hidden_command: str
+) -> None:
+    output = tmp_path / "output"
+    launcher = tmp_path / "launcher"
+    launcher.write_text(
+        "#!/bin/sh\nprintf '%s\\n%s\\n' \"$BRIDGE_DB_TRANSPORT_MODE\" \"$*\" > \"$FIXTURE_OUTPUT\"\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    wrapper = _executable_wrapper(tmp_path, launcher)
+    env_file = tmp_path / "bridge-db.env"
+    env_file.write_text(
+        "BRIDGE_DB_PRINCIPAL_TOKEN=fixture-wrapper-secret-abcdefghijklmnopqrstuvwxyz\n"
+        "BRIDGE_DB_AUTH_MODE=warn\n"
+        "BRIDGE_DB_TRANSPORT_MODE=shared\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    arguments = [hidden_command]
+    if hidden_command == "--release-shared-client":
+        arguments.append(str(tmp_path / "client.json"))
+
+    result = subprocess.run(
+        [str(wrapper), *arguments],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "BRIDGE_DB_ENV_FILE": str(env_file),
+            "FIXTURE_OUTPUT": str(output),
+        },
+    )
+
+    assert result.returncode == 0
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        "shared",
+        " ".join(arguments),
+    ]
+
+
+def test_codex_wrapper_rejects_malformed_stat_owner_without_launching(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "launcher-ran"
+    launcher = tmp_path / "launcher"
+    launcher.write_text(f"#!/bin/sh\ntouch {str(marker)!r}\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    wrapper = _executable_wrapper(tmp_path, launcher)
+    env_file = tmp_path / "bridge-db.env"
+    env_file.write_text(
+        "BRIDGE_DB_PRINCIPAL_TOKEN=fixture-wrapper-secret-abcdefghijklmnopqrstuvwxyz\n"
+        "BRIDGE_DB_AUTH_MODE=warn\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_stat = fake_bin / "stat"
+    fake_stat.write_text(
+        "#!/bin/sh\n"
+        "case \"$2\" in\n"
+        "    '%u') printf '%s\\n' not-a-uid ;;\n"
+        "    '%Lp'|'%a') printf '%s\\n' 600 ;;\n"
+        "    *) exit 64 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_stat.chmod(0o755)
+
+    result = subprocess.run(
+        [str(wrapper), "--checkpoint"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "BRIDGE_DB_ENV_FILE": str(env_file),
+            "PATH": os.pathsep.join((str(fake_bin), os.environ.get("PATH", ""))),
+        },
+    )
+
+    assert result.returncode == 78
+    assert result.stdout == ""
+    assert result.stderr.strip() == "bridge_db.wrapper_env_file_not_private"
+    assert not marker.exists()
+
+
+def test_codex_wrapper_rejects_malformed_capability_owner_before_relay(
+    tmp_path: Path,
+) -> None:
+    group = tmp_path / "runtime" / "group"
+    clients = group / "clients"
+    capabilities = group / "capabilities"
+    clients.mkdir(parents=True)
+    capabilities.mkdir()
+    broker_socket = group / "broker.sock"
+    client_lease = clients / "client.json"
+    capability_file = capabilities / "client.header"
+    capability_file.write_text(
+        "Authorization: Bearer fixture-capability\n", encoding="utf-8"
+    )
+    capability_file.chmod(0o400)
+    launcher = tmp_path / "launcher"
+    launcher.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = --ensure-shared-broker ]; then\n"
+        f"    printf '%s\\n' {str(broker_socket)!r} {str(client_lease)!r} "
+        f"{str(capability_file)!r} {str(launcher)!r}\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    wrapper = _executable_wrapper(tmp_path, launcher)
+    env_file = tmp_path / "bridge-db.env"
+    env_file.write_text(
+        "BRIDGE_DB_PRINCIPAL_TOKEN=fixture-wrapper-secret-abcdefghijklmnopqrstuvwxyz\n"
+        "BRIDGE_DB_AUTH_MODE=warn\n"
+        "BRIDGE_DB_TRANSPORT_MODE=shared\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_stat = fake_bin / "stat"
+    fake_stat.write_text(
+        "#!/bin/sh\n"
+        "case \"$3\" in\n"
+        "    */bridge-db.env) owner=$(id -u); mode=600 ;;\n"
+        "    */client.header) owner=not-a-uid; mode=400 ;;\n"
+        "    *) exit 64 ;;\n"
+        "esac\n"
+        "case \"$2\" in\n"
+        "    '%u') printf '%s\\n' \"$owner\" ;;\n"
+        "    '%Lp'|'%a') printf '%s\\n' \"$mode\" ;;\n"
+        "    *) exit 64 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_stat.chmod(0o755)
+
+    result = subprocess.run(
+        [str(wrapper)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "BRIDGE_DB_ENV_FILE": str(env_file),
+            "PATH": os.pathsep.join((str(fake_bin), os.environ.get("PATH", ""))),
+        },
+    )
+
+    assert result.returncode == 69
+    assert result.stdout == ""
+    assert (
+        result.stderr.strip()
+        == "bridge_db.shared_relay_capability_file_not_private"
+    )
+    assert not any(group.glob("relay-*"))
+
+
 @pytest.mark.parametrize(
     "bad_content",
     [
@@ -101,6 +342,8 @@ def test_codex_wrapper_parses_only_exact_private_keys_and_forwards_args(
         "BRIDGE_DB_PRINCIPAL_TOKEN=fixture-secret-abcdefghijklmnopqrstuvwxyz\n"
         "BRIDGE_DB_PRINCIPAL_TOKEN=duplicate-secret-abcdefghijklmnopqrstuvwxyz\n"
         "BRIDGE_DB_AUTH_MODE=warn\n",
+        "BRIDGE_DB_PRINCIPAL_TOKEN=fixture-secret-abcdefghijklmnopqrstuvwxyz\n"
+        "BRIDGE_DB_AUTH_MODE=warn\nBRIDGE_DB_TRANSPORT_MODE=surprise\n",
     ],
 )
 def test_codex_wrapper_refuses_unknown_or_duplicate_keys_without_secret_output(
@@ -140,7 +383,9 @@ def test_codex_wrapper_source_is_syntax_valid_and_immutable_path_bound() -> None
     )
 
     assert result.returncode == 0, result.stderr
-    assert f'exec {_STABLE_LAUNCHER} "$@"' in source
+    assert f"stable_launcher={_STABLE_LAUNCHER}" in source
     assert "/Users/d/Projects/bridge-db" not in source
     assert "source " not in source
     assert ". \"$env_file\"" not in source
+    assert '--header "@$capability_file"' in source
+    assert 'cat "$capability_file"' not in source

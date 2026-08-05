@@ -31,7 +31,7 @@ uv run pytest    # verify the install
 - Schema v23 adds one-time, 24-hour handoff completion capabilities and append-only orphan-recovery receipts. The database stores only capability hashes; the claiming session receives the sole bearer value.
 - The additive `BridgeSnapshotRefusalSchemaV1` extension over core v23 adds durable, owner-bound snapshot-capacity refusal receipts and explicit acknowledgement/next-state handling without advancing `user_version`. A refusal stores only a payload digest, never the rejected snapshot body.
 - FTS5 `content_index` mirrors all content tables; `health` and `status` verify source-row / FTS-row alignment.
-- `status` includes a native freshness block for owner-specific snapshot, activity, handoff, and shipped-event attention. Freshness attention is advisory: top-level `ok` / `overall` remain tied to DB, schema, fallback-file, and FTS health.
+- `status` includes a native freshness block for owner-specific snapshot, activity, handoff, and shipped-event attention. Freshness attention is advisory: top-level `ok` / `overall` remain tied to DB, schema, fallback-file, FTS, evidence, and any selected shared-runtime readiness.
 - 26 MCP tools across 10 modules (activity, handoffs, context, snapshots, cost, export, health, recall, audit, conflicts).
 
 ## Architecture
@@ -51,7 +51,11 @@ Codex      ──► MCP stdio ──► bridge-db process ──►  ~/.local/s
                                            memory/claude_ai_context.md
 ```
 
-No shared daemon. Each MCP client spawns its own `bridge-db` process via stdio. WAL mode + `PRAGMA busy_timeout=15000` handles concurrent writer waiting; logical stale-write protection comes from CAS on mutable context sections.
+Direct mode remains the default: each MCP client spawns its own `bridge-db`
+process via stdio. Opt-in shared mode replaces each full server with a thin stdio
+relay and an idle-bounded per-contract broker; it is not an always-on daemon.
+WAL mode + `PRAGMA busy_timeout=15000` handles concurrent writer waiting;
+logical stale-write protection comes from CAS on mutable context sections.
 
 ## Tools
 
@@ -215,9 +219,23 @@ drain, and the no-secret-output Codex binding path. `health`/`status` label a
 direct mutable checkout as operating attention; that is not proof of an
 installed generation.
 
-The source-owned `config/bridge-db-mcp-immutable` is the Codex install input; it
-parses only token/auth-mode keys from an owner-only env file and execs the stable
-launcher. `config/com.saagar.bridge-db-checkpoint.plist` preserves the existing
+The source-owned `config/bridge-db-mcp-immutable` is the Codex install input. It
+parses token/auth-mode plus an optional `BRIDGE_DB_TRANSPORT_MODE=direct|shared`
+from an owner-only env file. `direct` is the default rollback. `shared` retains
+stdio for the client while a thin shell relay uses one credential- and complete
+launch-contract-bound broker over a private Unix socket; command-line
+maintenance operations remain direct. Each relay gets a distinct capability in
+an owner-only mode-`0400` header file, and curl reads that file directly so the
+capability does not enter argv, logs, socket names, or receipts. Every request
+also requires the relay's current PID/start identity to match its lease. The broker has
+no TCP listener or LaunchAgent, serializes database access across MCP sessions,
+and exits after the final relay has been absent for its bounded idle window.
+`health` / `status` and `python -m bridge_db --shared-runtime-status` expose the
+no-secret `BridgeSharedRuntimeInventoryV1`. Health/status additionally expose
+`BridgeSharedRuntimeReadinessV1`, which requires the exact current launch group,
+broker PID/start identity, receipt, and socket; another active group cannot make
+selected shared transport report ready.
+`config/com.saagar.bridge-db-checkpoint.plist` preserves the existing
 30-minute receipt wrapper through the reviewed operator-script pointer while
 running that launcher with `--checkpoint`.
 `bridge_db.client_rebinding` performs exact Claude Code/Desktop JSON command
@@ -229,7 +247,7 @@ that a live client has reloaded them.
 
 - **DB**: `~/.local/share/bridge-db/bridge.db`
 - **Schema compatibility**: core `user_version=23` plus the additive backward-readable refusal extension, verified against exact previous merged generation `d7272d489873faa5ed84c81734636ffc8cecb095`. Activation and pointer rollback enforce the owning recovery lifecycle's current verified anchor/seal verdict after repairing any pending journal; source compatibility is not activation authority.
-- **MCP tenancy**: private per-process owner/principal/generation leases account for requests, PID ancestry, and RSS. Obsolete generations refuse new work and cooperatively close after active requests finish; lifecycle tooling cannot terminate another process.
+- **MCP tenancy**: Inventory V2 separates live identity-bound processes from stale lease files, preserves multiple leases that share a reused PID, and reports current RSS separately from lease-last-observed RSS. Direct servers and shared brokers account for requests, PID ancestry, and generation. `BridgeSharedRuntimeInventoryV1` separately reports broker reachability, relay capabilities, and stale/unknown client identities without exposing selector or capability values. Obsolete generations refuse new work and cooperatively close after active requests finish; lifecycle tooling cannot terminate another process.
 - **Bridge file**: `~/.claude/projects/<encoded-home>/memory/claude_ai_context.md`
   (Claude Code encodes your home dir path by replacing `/` with `-`; the default is derived
   automatically at runtime — override via `BRIDGE_FILE_PATH` if needed)

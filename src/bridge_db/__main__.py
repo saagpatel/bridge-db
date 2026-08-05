@@ -1,4 +1,4 @@
-"""Entry point: python -m bridge_db [--doctor|--status|--dogfood]"""
+"""Entry point: python -m bridge_db [--doctor|--status|--dogfood]."""
 
 import argparse
 import asyncio
@@ -1828,8 +1828,55 @@ def main() -> None:
         type=int,
         help="Restore one exact quarantined handoff recovery image (operator TTY only)",
     )
+    parser.add_argument(
+        "--shared-runtime-status",
+        action="store_true",
+        help="Print a read-only shared-runtime broker/client inventory as JSON",
+    )
+    parser.add_argument(
+        "--ensure-shared-broker",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--run-shared-broker",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--release-shared-client",
+        metavar="LEASE_PATH",
+        help=argparse.SUPPRESS,
+    )
     args, _ = parser.parse_known_args()
 
+    if args.shared_runtime_status:
+        from bridge_db.shared_runtime import shared_runtime_inventory
+
+        inventory = shared_runtime_inventory()
+        print(json.dumps(inventory, indent=2, sort_keys=True))
+        sys.exit(0 if inventory["state"] in ("observed", "missing") else 1)
+    if args.ensure_shared_broker:
+        from bridge_db.shared_runtime import ensure_shared_broker
+
+        binding = ensure_shared_broker()
+        print(binding.socket)
+        print(binding.client_lease)
+        print(binding.capability_file)
+        print(binding.release_launcher)
+        return
+    if args.run_shared_broker:
+        from bridge_db.shared_runtime import run_shared_broker
+
+        run_shared_broker()
+        return
+    if args.release_shared_client:
+        from pathlib import Path
+
+        from bridge_db.shared_runtime import release_shared_client
+
+        release_shared_client(Path(args.release_shared_client))
+        return
     if args.doctor:
         ok = asyncio.run(_run_doctor())
         sys.exit(0 if ok else 1)

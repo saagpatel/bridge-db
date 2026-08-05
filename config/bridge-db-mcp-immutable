@@ -14,23 +14,34 @@ if [ ! -f "$env_file" ] || [ -L "$env_file" ]; then
     exit 78
 fi
 
-env_owner=$(stat -f '%u' "$env_file" 2>/dev/null || stat -c '%u' "$env_file" 2>/dev/null) || {
+env_owner=$(stat -f '%u' "$env_file" 2>/dev/null) || \
+    env_owner=$(stat -c '%u' "$env_file" 2>/dev/null) || {
     echo "bridge_db.wrapper_env_stat_failed" >&2
     exit 78
 }
-env_mode=$(stat -f '%Lp' "$env_file" 2>/dev/null || stat -c '%a' "$env_file" 2>/dev/null) || {
+env_mode=$(stat -f '%Lp' "$env_file" 2>/dev/null) || \
+    env_mode=$(stat -c '%a' "$env_file" 2>/dev/null) || {
     echo "bridge_db.wrapper_env_stat_failed" >&2
     exit 78
 }
-if [ "$env_owner" -ne "$(id -u)" ] || [ "$env_mode" != "600" ]; then
-    echo "bridge_db.wrapper_env_file_not_private" >&2
+expected_owner=$(id -u) || {
+    echo "bridge_db.wrapper_env_stat_failed" >&2
     exit 78
-fi
+}
+case "$env_owner:$env_mode" in
+    "$expected_owner:600") ;;
+    *)
+        echo "bridge_db.wrapper_env_file_not_private" >&2
+        exit 78
+        ;;
+esac
 
 token_seen=0
 auth_seen=0
+transport_seen=0
 bridge_token=
 bridge_auth_mode=
+bridge_transport_mode=direct
 while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
         ''|'#'*) ;;
@@ -50,6 +61,14 @@ while IFS= read -r line || [ -n "$line" ]; do
             auth_seen=1
             bridge_auth_mode=${line#BRIDGE_DB_AUTH_MODE=}
             ;;
+        BRIDGE_DB_TRANSPORT_MODE=*)
+            if [ "$transport_seen" -ne 0 ]; then
+                echo "bridge_db.wrapper_env_duplicate_key" >&2
+                exit 78
+            fi
+            transport_seen=1
+            bridge_transport_mode=${line#BRIDGE_DB_TRANSPORT_MODE=}
+            ;;
         *)
             echo "bridge_db.wrapper_env_unknown_key" >&2
             exit 78
@@ -68,9 +87,188 @@ case "$bridge_auth_mode" in
         exit 78
         ;;
 esac
+case "$bridge_transport_mode" in
+    direct|shared) ;;
+    *)
+        echo "bridge_db.wrapper_transport_mode_invalid" >&2
+        exit 78
+        ;;
+esac
 
 BRIDGE_DB_PRINCIPAL_TOKEN=$bridge_token
 BRIDGE_DB_AUTH_MODE=$bridge_auth_mode
-export BRIDGE_DB_PRINCIPAL_TOKEN BRIDGE_DB_AUTH_MODE
+BRIDGE_DB_TRANSPORT_MODE=$bridge_transport_mode
+export BRIDGE_DB_PRINCIPAL_TOKEN BRIDGE_DB_AUTH_MODE BRIDGE_DB_TRANSPORT_MODE
 unset BRIDGE_DB_ENV_FILE bridge_token bridge_auth_mode line env_owner env_mode
-exec /Users/d/.local/state/bridge-db/current/bin/bridge-db-mcp "$@"
+
+stable_launcher=/Users/d/.local/state/bridge-db/current/bin/bridge-db-mcp
+if [ "$#" -ne 0 ]; then
+    case "$1" in
+        --ensure-shared-broker|--run-shared-broker|--release-shared-client) ;;
+        *)
+            BRIDGE_DB_TRANSPORT_MODE=direct
+            export BRIDGE_DB_TRANSPORT_MODE
+            ;;
+    esac
+    exec "$stable_launcher" "$@"
+fi
+if [ "$bridge_transport_mode" = direct ]; then
+    exec "$stable_launcher" "$@"
+fi
+
+command -v curl >/dev/null 2>&1 || {
+    echo "bridge_db.shared_relay_curl_missing" >&2
+    exit 69
+}
+
+binding=$("$stable_launcher" --ensure-shared-broker) || {
+    echo "bridge_db.shared_relay_broker_unavailable" >&2
+    exit 69
+}
+broker_socket=$(printf '%s\n' "$binding" | sed -n '1p')
+client_lease=$(printf '%s\n' "$binding" | sed -n '2p')
+capability_file=$(printf '%s\n' "$binding" | sed -n '3p')
+release_launcher=$(printf '%s\n' "$binding" | sed -n '4p')
+binding_lines=$(printf '%s\n' "$binding" | wc -l | tr -d '[:space:]')
+case "$broker_socket:$client_lease:$capability_file:$release_launcher" in
+    /*:/*:/*:/*) ;;
+    *)
+        echo "bridge_db.shared_relay_binding_invalid" >&2
+        exit 69
+        ;;
+esac
+[ "$binding_lines" = 4 ] || {
+    echo "bridge_db.shared_relay_binding_invalid" >&2
+    exit 69
+}
+unset binding
+unset BRIDGE_DB_PRINCIPAL_TOKEN
+
+relay_dir=${broker_socket%/*}
+capability_dir=$relay_dir/capabilities
+case "$capability_file" in
+    "$capability_dir"/*.header) ;;
+    *)
+        echo "bridge_db.shared_relay_capability_path_invalid" >&2
+        exit 69
+        ;;
+esac
+if [ ! -f "$capability_file" ] || [ -L "$capability_file" ]; then
+    echo "bridge_db.shared_relay_capability_file_invalid" >&2
+    exit 69
+fi
+capability_owner=$(stat -f '%u' "$capability_file" 2>/dev/null) || \
+    capability_owner=$(stat -c '%u' "$capability_file" 2>/dev/null) || {
+    echo "bridge_db.shared_relay_capability_stat_failed" >&2
+    exit 69
+}
+capability_mode=$(stat -f '%Lp' "$capability_file" 2>/dev/null) || \
+    capability_mode=$(stat -c '%a' "$capability_file" 2>/dev/null) || {
+    echo "bridge_db.shared_relay_capability_stat_failed" >&2
+    exit 69
+}
+case "$capability_owner:$capability_mode" in
+    "$expected_owner:400") ;;
+    *)
+        echo "bridge_db.shared_relay_capability_file_not_private" >&2
+        exit 69
+        ;;
+esac
+unset capability_owner capability_mode binding_lines
+header_file=$(mktemp "$relay_dir/relay-headers.XXXXXX") || exit 69
+body_file=$(mktemp "$relay_dir/relay-body.XXXXXX") || {
+    rm -f -- "$header_file"
+    exit 69
+}
+chmod 600 "$header_file" "$body_file"
+session_id=
+protocol_version=
+
+cleanup_relay() {
+    relay_status=$?
+    trap - EXIT HUP INT TERM
+    if [ -n "$session_id" ]; then
+        curl --silent --show-error --unix-socket "$broker_socket" \
+            --request DELETE \
+            --header "@$capability_file" \
+            --header "Mcp-Session-Id: $session_id" \
+            --output /dev/null \
+            http://localhost/mcp >/dev/null 2>&1 || true
+    fi
+    "$release_launcher" --release-shared-client "$client_lease" \
+        >/dev/null 2>&1 || true
+    rm -f -- "$header_file" "$body_file"
+    exit "$relay_status"
+}
+trap cleanup_relay EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+while IFS= read -r message || [ -n "$message" ]; do
+    : > "$header_file"
+    : > "$body_file"
+    if [ -n "$session_id" ] && [ -n "$protocol_version" ]; then
+        http_status=$(printf '%s' "$message" | curl --silent --show-error \
+            --unix-socket "$broker_socket" \
+            --dump-header "$header_file" \
+            --output "$body_file" \
+            --write-out '%{http_code}' \
+            --header "@$capability_file" \
+            --header 'Accept: application/json, text/event-stream' \
+            --header 'Content-Type: application/json' \
+            --header "Mcp-Session-Id: $session_id" \
+            --header "Mcp-Protocol-Version: $protocol_version" \
+            --data-binary @- \
+            http://localhost/mcp) || exit 69
+    elif [ -n "$session_id" ]; then
+        http_status=$(printf '%s' "$message" | curl --silent --show-error \
+            --unix-socket "$broker_socket" \
+            --dump-header "$header_file" \
+            --output "$body_file" \
+            --write-out '%{http_code}' \
+            --header "@$capability_file" \
+            --header 'Accept: application/json, text/event-stream' \
+            --header 'Content-Type: application/json' \
+            --header "Mcp-Session-Id: $session_id" \
+            --data-binary @- \
+            http://localhost/mcp) || exit 69
+    else
+        http_status=$(printf '%s' "$message" | curl --silent --show-error \
+            --unix-socket "$broker_socket" \
+            --dump-header "$header_file" \
+            --output "$body_file" \
+            --write-out '%{http_code}' \
+            --header "@$capability_file" \
+            --header 'Accept: application/json, text/event-stream' \
+            --header 'Content-Type: application/json' \
+            --data-binary @- \
+            http://localhost/mcp) || exit 69
+    fi
+
+    case "$http_status" in
+        200)
+            if [ -z "$session_id" ]; then
+                session_id=$(awk '
+                    tolower($1) == "mcp-session-id:" {
+                        gsub("\\r", "", $2); value=$2
+                    }
+                    END { print value }
+                ' "$header_file")
+            fi
+            if [ -z "$protocol_version" ]; then
+                protocol_version=$(sed -n \
+                    's/.*"protocolVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+                    "$body_file" | sed -n '1p')
+            fi
+            body=$(tr -d '\n' < "$body_file")
+            [ -n "$body" ] || exit 69
+            printf '%s\n' "$body"
+            ;;
+        202) ;;
+        *)
+            echo "bridge_db.shared_relay_http_$http_status" >&2
+            exit 69
+            ;;
+    esac
+done
