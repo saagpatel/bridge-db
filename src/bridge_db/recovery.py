@@ -807,6 +807,44 @@ def _superseded_anchor_path(
     )
 
 
+def _verify_rotation_evidence(
+    anchor_path: Path,
+    *,
+    expected_schema_version: int,
+) -> dict[str, Any]:
+    """Verify current or older-schema evidence before an upward rotation.
+
+    A successful schema migration necessarily makes the pre-migration anchor
+    incompatible with the live schema.  That incompatibility alone must not
+    make otherwise valid rollback evidence impossible to preserve.  Derive the
+    prior version from the disposable SQLite readback, then verify the complete
+    bundle against that version.  Any additional verification error, a
+    same-version manifest mismatch, or a future-schema anchor still fails
+    closed.
+    """
+    current_schema_check = verify_recovery_anchor(
+        anchor_path,
+        expected_schema_version=expected_schema_version,
+    )
+    if current_schema_check["ready"]:
+        return current_schema_check
+
+    prior_schema_version = current_schema_check.get("schema_version")
+    if (
+        current_schema_check.get("errors") != ["schema_incompatible"]
+        or not isinstance(prior_schema_version, int)
+        or isinstance(prior_schema_version, bool)
+        or prior_schema_version < 0
+        or prior_schema_version >= expected_schema_version
+    ):
+        return current_schema_check
+
+    return verify_recovery_anchor(
+        anchor_path,
+        expected_schema_version=prior_schema_version,
+    )
+
+
 def rotate_recovery_anchor(
     db_path: Path,
     *,
@@ -853,7 +891,7 @@ def rotate_recovery_anchor(
             finally:
                 preservation_guard.close()
 
-    previous = verify_recovery_anchor(
+    previous = _verify_rotation_evidence(
         anchor_path,
         expected_schema_version=expected_schema_version,
     )
@@ -863,6 +901,7 @@ def rotate_recovery_anchor(
             + ",".join(previous["errors"])
         )
     previous_digest = cast(str, previous["sha256"])
+    previous_schema_version = cast(int, previous["schema_version"])
     previous_root_signature = _stable_stat_signature(anchor_path.lstat())
     superseded_path = _superseded_anchor_path(
         anchor_path,
@@ -914,13 +953,14 @@ def rotate_recovery_anchor(
                 "staged recovery anchor is no longer current: "
                 + ",".join(staged["errors"])
             )
-        previous_recheck = verify_recovery_anchor(
+        previous_recheck = _verify_rotation_evidence(
             anchor_path,
             expected_schema_version=expected_schema_version,
         )
         if (
             not previous_recheck["ready"]
             or previous_recheck.get("sha256") != previous_digest
+            or previous_recheck.get("schema_version") != previous_schema_version
             or _stable_stat_signature(anchor_path.lstat())
             != previous_root_signature
         ):
@@ -941,7 +981,7 @@ def rotate_recovery_anchor(
             )
         superseded = verify_recovery_anchor(
             superseded_path,
-            expected_schema_version=expected_schema_version,
+            expected_schema_version=previous_schema_version,
         )
         if (
             not superseded["ready"]
