@@ -1,18 +1,22 @@
 """Tests for handoff queue tools."""
 
-from datetime import UTC, datetime
+import asyncio
+from datetime import UTC, datetime, timedelta
+import hashlib
 import inspect
 import json
 from pathlib import Path
-from typing import Any
+import sqlite3
+from typing import Any, cast
 
 import aiosqlite
 import pytest
 from conftest import CaptureMCP, make_ctx
 from mcp.server.fastmcp.exceptions import ToolError
 
-from bridge_db import config
+from bridge_db import clock, config
 from bridge_db.__main__ import run_promote_handoff
+from bridge_db.db import open_db
 from bridge_db.invariants import sometimes_counts
 from bridge_db.tools import handoffs as mod
 from bridge_db.tools.health import collect_status_summary
@@ -92,9 +96,7 @@ async def _create_handoff(
     )
 
 
-async def _promote_handoff_for_test(
-    db: aiosqlite.Connection, handoff_id: int
-) -> None:
+async def _promote_handoff_for_test(db: aiosqlite.Connection, handoff_id: int) -> None:
     """Seed the post-ceremony state for tests not concerned with the CLI ceremony."""
     await db.execute(
         "UPDATE pending_handoffs SET source_trust = 'operator' "
@@ -284,9 +286,7 @@ async def test_pick_up_cc_non_operator_requires_independent_promotion(
     handoff_id = created["handoff_id"]
 
     with pytest.raises(ToolError, match="promote.*operator"):
-        await fns["pick_up_handoff"](
-            caller="cc", handoff_id=handoff_id, ctx=ctx
-        )
+        await fns["pick_up_handoff"](caller="cc", handoff_id=handoff_id, ctx=ctx)
 
     cursor = await db.execute(
         "SELECT status, picked_up_at FROM pending_handoffs WHERE id = ?",
@@ -440,11 +440,17 @@ async def test_clear_handoff_by_project_name(
         caller="claude_ai", project_name="MyProject", ctx=ctx
     )
     await _promote_handoff_for_test(db, created["handoff_id"])
-    await fns["pick_up_handoff"](
+    picked = await fns["pick_up_handoff"](
         caller="cc", handoff_id=created["handoff_id"], ctx=ctx
     )
 
-    result = await fns["clear_handoff"](caller="cc", project_name="MyProject", ctx=ctx)
+    result = await fns["clear_handoff"](
+        caller="cc",
+        project_name="MyProject",
+        handoff_id=created["handoff_id"],
+        completion_capability=picked["completion_capability"],
+        ctx=ctx,
+    )
     assert result["ok"] is True
     assert result["cleared"] is True
     assert result["cleared_count"] == 1
@@ -484,11 +490,17 @@ async def test_clear_handoff_clears_all_matching_rows(
         caller="claude_ai", project_name="MyProject", ctx=ctx
     )
     await _promote_handoff_for_test(db, second["handoff_id"])
-    await fns["pick_up_handoff"](
+    picked = await fns["pick_up_handoff"](
         caller="cc", handoff_id=second["handoff_id"], ctx=ctx
     )
 
-    result = await fns["clear_handoff"](caller="cc", project_name="MyProject", ctx=ctx)
+    result = await fns["clear_handoff"](
+        caller="cc",
+        project_name="MyProject",
+        handoff_id=second["handoff_id"],
+        completion_capability=picked["completion_capability"],
+        ctx=ctx,
+    )
 
     assert result["ok"] is True
     assert result["cleared"] is True
@@ -602,7 +614,11 @@ async def test_handoff_lifecycle_across_pending_pickup_and_clear(
     ]
 
     cleared = await fns["clear_handoff"](
-        caller="codex", project_name="BridgeStatus", ctx=ctx
+        caller="codex",
+        project_name="BridgeStatus",
+        handoff_id=first["handoff_id"],
+        completion_capability=picked_up["completion_capability"],
+        ctx=ctx,
     )
     assert cleared["ok"] is True
     assert cleared["cleared_count"] == 1
@@ -644,12 +660,16 @@ async def test_clear_refuses_other_roles_active_claim(
         ctx=ctx,
     )
     await _promote_handoff_for_test(db, created["handoff_id"])
-    await fns["pick_up_handoff"](
+    picked = await fns["pick_up_handoff"](
         caller="codex", handoff_id=created["handoff_id"], ctx=ctx
     )
 
     result = await fns["clear_handoff"](
-        caller="cc", project_name="ForeignClaim", ctx=ctx
+        caller="cc",
+        project_name="ForeignClaim",
+        handoff_id=created["handoff_id"],
+        completion_capability=picked["completion_capability"],
+        ctx=ctx,
     )
     assert result["ok"] is True
     assert result["cleared"] is False
@@ -679,12 +699,16 @@ async def test_clear_allows_own_active_claim(
         ctx=ctx,
     )
     await _promote_handoff_for_test(db, created["handoff_id"])
-    await fns["pick_up_handoff"](
+    picked = await fns["pick_up_handoff"](
         caller="codex", handoff_id=created["handoff_id"], ctx=ctx
     )
 
     result = await fns["clear_handoff"](
-        caller="codex", project_name="OwnClaim", ctx=ctx
+        caller="codex",
+        project_name="OwnClaim",
+        handoff_id=created["handoff_id"],
+        completion_capability=picked["completion_capability"],
+        ctx=ctx,
     )
     assert result["cleared"] is True
     assert result["cleared_count"] == 1
@@ -712,7 +736,7 @@ async def test_clear_refuses_unclaimed_pending(
     )
     assert result["cleared"] is False
     assert result["refused_count"] == 1
-    assert result["reason"] == "Matched handoffs require claimant-owned active state"
+    assert result["reason_code"] == "session_capability_required"
     cursor = await db.execute(
         "SELECT status FROM pending_handoffs WHERE project_name = 'NeverClaimed'"
     )
@@ -884,14 +908,18 @@ async def test_clear_handoff_matches_canonical_alias(
         caller="claude_ai", project_name="IncidentMgmt", ctx=ctx
     )
     await _promote_handoff_for_test(db, created["handoff_id"])
-    await fns["pick_up_handoff"](
+    picked = await fns["pick_up_handoff"](
         caller="cc", handoff_id=created["handoff_id"], ctx=ctx
     )
 
     # 'IncidentManagement' != the stored project_name, so this clears ONLY via the
     # shared canonical key — proving canonical matching, not string matching.
     result = await fns["clear_handoff"](
-        caller="cc", project_name="IncidentManagement", ctx=ctx
+        caller="cc",
+        project_name="IncidentManagement",
+        handoff_id=created["handoff_id"],
+        completion_capability=picked["completion_capability"],
+        ctx=ctx,
     )
     assert result["cleared"] is True
     assert result["cleared_count"] == 1
@@ -1046,12 +1074,16 @@ async def test_clear_handoff_canonical_does_not_overmatch_other_projects(
         caller="claude_ai", project_name="IncidentMgmt", ctx=ctx
     )
     await _promote_handoff_for_test(db, incident["handoff_id"])
-    await fns["pick_up_handoff"](
+    picked = await fns["pick_up_handoff"](
         caller="cc", handoff_id=incident["handoff_id"], ctx=ctx
     )
 
     result = await fns["clear_handoff"](
-        caller="cc", project_name="IncidentManagement", ctx=ctx
+        caller="cc",
+        project_name="IncidentManagement",
+        handoff_id=incident["handoff_id"],
+        completion_capability=picked["completion_capability"],
+        ctx=ctx,
     )
     assert result["cleared_count"] == 1
 
@@ -1061,6 +1093,252 @@ async def test_clear_handoff_canonical_does_not_overmatch_other_projects(
     row = await cursor.fetchone()
     assert row is not None
     assert row["status"] == "pending"
+
+
+async def test_claiming_session_capability_completes_exact_handoff(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    created = await _create_handoff(fns, db, project_name="SessionOwned")
+    await _promote_handoff_for_test(db, created["handoff_id"])
+    picked = await fns["pick_up_handoff"](
+        caller="codex",
+        handoff_id=created["handoff_id"],
+        ctx=make_ctx(db, principal="codex"),
+    )
+
+    assert picked["claim_session_id"]
+    assert picked["completion_capability"].startswith("hcap1.")
+    assert picked["allowed_transition"] == "clear"
+    assert picked["capability_expires_at"]
+    stored = await (
+        await db.execute(
+            "SELECT token_sha256 FROM handoff_session_capabilities "
+            "WHERE handoff_id = ?",
+            (created["handoff_id"],),
+        )
+    ).fetchone()
+    assert stored is not None
+    assert (
+        stored["token_sha256"]
+        == hashlib.sha256(picked["completion_capability"].encode("utf-8")).hexdigest()
+    )
+    audit_text = config.AUDIT_LOG_PATH.read_text(encoding="utf-8")
+    assert picked["completion_capability"] not in audit_text
+
+    cleared = await fns["clear_handoff"](
+        caller="codex",
+        project_name="SessionOwned",
+        handoff_id=created["handoff_id"],
+        completion_capability=picked["completion_capability"],
+        ctx=make_ctx(db, principal="codex"),
+    )
+    assert cleared["cleared"] is True
+    assert cleared["handoff_id"] == created["handoff_id"]
+    assert cleared["claim_session_id"] == picked["claim_session_id"]
+
+
+async def test_same_role_other_session_without_capability_is_denied(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    created = await _create_handoff(fns, db, project_name="SameRole")
+    await _promote_handoff_for_test(db, created["handoff_id"])
+    await fns["pick_up_handoff"](
+        caller="codex",
+        handoff_id=created["handoff_id"],
+        ctx=make_ctx(db, principal="codex"),
+    )
+
+    refused = await fns["clear_handoff"](
+        caller="codex",
+        project_name="SameRole",
+        handoff_id=created["handoff_id"],
+        ctx=make_ctx(db, principal="codex"),
+    )
+    assert refused["cleared"] is False
+    assert refused["reason_code"] == "session_capability_required"
+
+
+async def test_session_capability_refuses_wrong_handoff_and_wrong_project(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    first = await _create_handoff(fns, db, project_name="FirstProject")
+    second = await _create_handoff(fns, db, project_name="SecondProject")
+    for created in (first, second):
+        await _promote_handoff_for_test(db, created["handoff_id"])
+    first_pick = await fns["pick_up_handoff"](
+        caller="cc",
+        handoff_id=first["handoff_id"],
+        ctx=make_ctx(db, principal="cc"),
+    )
+    second_pick = await fns["pick_up_handoff"](
+        caller="cc",
+        handoff_id=second["handoff_id"],
+        ctx=make_ctx(db, principal="cc"),
+    )
+
+    wrong_handoff = await fns["clear_handoff"](
+        caller="cc",
+        project_name="FirstProject",
+        handoff_id=second["handoff_id"],
+        completion_capability=first_pick["completion_capability"],
+        ctx=make_ctx(db, principal="cc"),
+    )
+    assert wrong_handoff["reason_code"] == "wrong_handoff"
+
+    wrong_project = await fns["clear_handoff"](
+        caller="cc",
+        project_name="FirstProject",
+        handoff_id=second["handoff_id"],
+        completion_capability=second_pick["completion_capability"],
+        ctx=make_ctx(db, principal="cc"),
+    )
+    assert wrong_project["reason_code"] == "wrong_project"
+
+
+async def test_session_capability_expiry_and_replay_fail_closed(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 5, 0, 0, tzinfo=UTC)
+    monkeypatch.setattr(clock, "_provider", lambda: now)
+    expired = await _create_handoff(fns, db, project_name="ExpiredCapability")
+    await _promote_handoff_for_test(db, expired["handoff_id"])
+    expired_pick = await fns["pick_up_handoff"](
+        caller="codex",
+        handoff_id=expired["handoff_id"],
+        ctx=make_ctx(db, principal="codex"),
+    )
+
+    monkeypatch.setattr(
+        clock,
+        "_provider",
+        lambda: now + timedelta(hours=config.HANDOFF_CAPABILITY_TTL_HOURS, seconds=1),
+    )
+    expired_result = await fns["clear_handoff"](
+        caller="codex",
+        project_name="ExpiredCapability",
+        handoff_id=expired["handoff_id"],
+        completion_capability=expired_pick["completion_capability"],
+        ctx=make_ctx(db, principal="codex"),
+    )
+    assert expired_result["reason_code"] == "expired_session_capability"
+
+    monkeypatch.setattr(clock, "_provider", lambda: now)
+    replayed = await _create_handoff(fns, db, project_name="ReplayCapability")
+    await _promote_handoff_for_test(db, replayed["handoff_id"])
+    replay_pick = await fns["pick_up_handoff"](
+        caller="codex",
+        handoff_id=replayed["handoff_id"],
+        ctx=make_ctx(db, principal="codex"),
+    )
+    clear_kwargs = {
+        "caller": "codex",
+        "project_name": "ReplayCapability",
+        "handoff_id": replayed["handoff_id"],
+        "completion_capability": replay_pick["completion_capability"],
+        "ctx": make_ctx(db, principal="codex"),
+    }
+    assert (await fns["clear_handoff"](**clear_kwargs))["cleared"] is True
+    replay = await fns["clear_handoff"](**clear_kwargs)
+    assert replay["cleared"] is False
+    assert replay["reason_code"] == "replayed_session_capability"
+
+
+async def test_concurrent_capability_replay_has_exactly_one_winner(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
+) -> None:
+    created = await _create_handoff(fns, db, project_name="ConcurrentReplay")
+    await _promote_handoff_for_test(db, created["handoff_id"])
+    picked = await fns["pick_up_handoff"](
+        caller="codex",
+        handoff_id=created["handoff_id"],
+        ctx=make_ctx(db, principal="codex"),
+    )
+
+    second_db = await open_db(tmp_path / "test.db")
+    cap = CaptureMCP()
+    mod.register(cap)
+    kwargs = {
+        "caller": "codex",
+        "project_name": "ConcurrentReplay",
+        "handoff_id": created["handoff_id"],
+        "completion_capability": picked["completion_capability"],
+    }
+    try:
+        first, second = cast(
+            tuple[dict[str, Any], dict[str, Any]],
+            await asyncio.gather(
+                cap.fns["clear_handoff"](**kwargs, ctx=make_ctx(db, principal="codex")),
+                cap.fns["clear_handoff"](
+                    **kwargs, ctx=make_ctx(second_db, principal="codex")
+                ),
+            ),
+        )
+    finally:
+        await second_db.close()
+
+    results = (first, second)
+    assert sum(result["cleared"] is True for result in results) == 1
+    refusal = next(result for result in results if result["cleared"] is False)
+    assert refusal["reason_code"] in {
+        "capability_state_changed",
+        "replayed_session_capability",
+    }
+    receipts = await (
+        await db.execute(
+            "SELECT COUNT(*) FROM handoff_lifecycle_receipts WHERE handoff_id = ?",
+            (created["handoff_id"],),
+        )
+    ).fetchone()
+    assert receipts is not None and receipts[0] == 1
+
+
+async def test_session_capability_clear_rolls_back_if_receipt_insert_fails(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    created = await _create_handoff(fns, db, project_name="ReceiptFailure")
+    await _promote_handoff_for_test(db, created["handoff_id"])
+    picked = await fns["pick_up_handoff"](
+        caller="codex",
+        handoff_id=created["handoff_id"],
+        ctx=make_ctx(db, principal="codex"),
+    )
+    await db.execute(
+        """
+        CREATE TRIGGER fail_capability_clear_receipt
+        BEFORE INSERT ON handoff_lifecycle_receipts
+        BEGIN
+            SELECT RAISE(FAIL, 'injected receipt failure');
+        END
+        """
+    )
+    await db.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected receipt failure"):
+        await fns["clear_handoff"](
+            caller="codex",
+            project_name="ReceiptFailure",
+            handoff_id=created["handoff_id"],
+            completion_capability=picked["completion_capability"],
+            ctx=make_ctx(db, principal="codex"),
+        )
+
+    assert db.in_transaction is False
+    state = await (
+        await db.execute(
+            """
+            SELECT h.status, c.consumed_at
+            FROM pending_handoffs AS h
+            JOIN handoff_session_capabilities AS c ON c.handoff_id = h.id
+            WHERE h.id = ?
+            """,
+            (created["handoff_id"],),
+        )
+    ).fetchone()
+    assert state is not None
+    assert state["status"] == "active"
+    assert state["consumed_at"] is None
 
 
 async def test_create_handoff_clamps_operator_label(

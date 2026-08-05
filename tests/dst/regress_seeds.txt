@@ -2,17 +2,15 @@
 # behavior-pinning seed is committed here and replays forever.
 # Format: <scenario> <seed>  — loader: tests/dst/test_regress_seeds.py
 claim-race 0
-# clear-race: WC-2 — the INV-3/INV-13 clear boundary. cc-clear races
-# codex-pickup on a pending handoff; at this seed the claim commits between
-# the clear's SELECT and its guarded UPDATE, so the post-update recheck
-# refuses the clear (clear_refused_race). 9/30 sweep seeds hit the race
-# branch; 12/30 refuse overall. First corpus scenario to drive clear_handoff.
+# clear-race: TAR-03 same-role ownership boundary. One Codex session's
+# capability-less clear races another Codex session's pickup; every schedule
+# refuses the clear and admits only the claim.
 clear-race 0
 # receipt-crash: WC-6 — Phase-3 INV-2 fix pin (crash still lands; TWO
 # concurrent retries converge the ledger to one durable stale_claim
-# receipt via the statement-atomic dedupe). Re-pinned 11 → 5 → 20 across
-# the fix rounds (declared window changes as loser-path ops shifted).
-receipt-crash 20
+# receipt via the statement-atomic dedupe). Re-pinned 11 → 5 → 20 → 5 across
+# declared window changes as loser/winner transaction operations shifted.
+receipt-crash 5
 # cas-pingpong: RC-3 — the warn/enforce canary was cut 2026-07-12; missing_cas
 # is now unconditional (blind-vs-cas holds on any seed, pinned at 0).
 # stale-cas pins the still-live two-honest-CAS-writer race that replaces the

@@ -17,7 +17,7 @@ from bridge_db import clock, config
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 # A migration post-hook runs after its DDL, before the version bump+commit
 # (e.g. FTS repopulation). Its return value is ignored.
@@ -148,6 +148,38 @@ CREATE TABLE IF NOT EXISTS handoff_trust_quarantine (
     quarantined_by TEXT NOT NULL CHECK(quarantined_by = 'operator-cli'),
     quarantined_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     restored_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS handoff_session_capabilities (
+    handoff_id INTEGER PRIMARY KEY REFERENCES pending_handoffs(id),
+    session_id TEXT NOT NULL UNIQUE,
+    token_sha256 TEXT NOT NULL UNIQUE CHECK(length(token_sha256) = 64),
+    claimed_caller TEXT NOT NULL CHECK(claimed_caller IN ('cc', 'codex')),
+    allowed_transition TEXT NOT NULL CHECK(allowed_transition = 'clear'),
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    recovered_at TEXT,
+    CHECK(consumed_at IS NULL OR recovered_at IS NULL)
+);
+
+CREATE INDEX IF NOT EXISTS idx_handoff_capability_expiry
+    ON handoff_session_capabilities(expires_at)
+    WHERE consumed_at IS NULL AND recovered_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS handoff_orphan_recovery_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    handoff_id INTEGER NOT NULL UNIQUE,
+    reason TEXT NOT NULL CHECK(length(trim(reason)) > 0),
+    recovery_basis TEXT NOT NULL
+        CHECK(recovery_basis IN ('legacy_without_capability', 'expired_capability')),
+    previous_status TEXT NOT NULL CHECK(previous_status = 'active'),
+    previous_claimant TEXT NOT NULL,
+    claim_session_id TEXT,
+    capability_expires_at TEXT,
+    reviewed_row_sha256 TEXT NOT NULL,
+    recovered_by TEXT NOT NULL CHECK(recovered_by = 'operator-cli'),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
 CREATE TABLE IF NOT EXISTS write_conflicts (
@@ -673,6 +705,40 @@ CREATE TABLE IF NOT EXISTS handoff_trust_quarantine (
 );
 """
 
+_MIGRATION_V22_TO_V23 = """
+CREATE TABLE IF NOT EXISTS handoff_session_capabilities (
+    handoff_id INTEGER PRIMARY KEY REFERENCES pending_handoffs(id),
+    session_id TEXT NOT NULL UNIQUE,
+    token_sha256 TEXT NOT NULL UNIQUE CHECK(length(token_sha256) = 64),
+    claimed_caller TEXT NOT NULL CHECK(claimed_caller IN ('cc', 'codex')),
+    allowed_transition TEXT NOT NULL CHECK(allowed_transition = 'clear'),
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    recovered_at TEXT,
+    CHECK(consumed_at IS NULL OR recovered_at IS NULL)
+);
+
+CREATE INDEX IF NOT EXISTS idx_handoff_capability_expiry
+    ON handoff_session_capabilities(expires_at)
+    WHERE consumed_at IS NULL AND recovered_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS handoff_orphan_recovery_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    handoff_id INTEGER NOT NULL UNIQUE,
+    reason TEXT NOT NULL CHECK(length(trim(reason)) > 0),
+    recovery_basis TEXT NOT NULL
+        CHECK(recovery_basis IN ('legacy_without_capability', 'expired_capability')),
+    previous_status TEXT NOT NULL CHECK(previous_status = 'active'),
+    previous_claimant TEXT NOT NULL,
+    claim_session_id TEXT,
+    capability_expires_at TEXT,
+    reviewed_row_sha256 TEXT NOT NULL,
+    recovered_by TEXT NOT NULL CHECK(recovered_by = 'operator-cli'),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+"""
+
 # Column definitions for the v14 ADD COLUMN step. Kept character-identical to the
 # activity_log block in _SCHEMA_DDL so a fresh install and a migrated DB converge
 # (see tests/test_schema_convergence_concurrency.py). NOTE: the synced/policy
@@ -1053,6 +1119,7 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         (20, _MIGRATION_V19_TO_V20, None),
         (21, _MIGRATION_V20_TO_V21, _migrate_conflict_aggregation),
         (22, _MIGRATION_V21_TO_V22, None),
+        (23, _MIGRATION_V22_TO_V23, None),
     ]
     for target, ddl, post_hook in migrations:
         if current_version >= target:

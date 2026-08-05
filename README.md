@@ -28,6 +28,7 @@ uv run pytest    # verify the install
 - Schema v14: collapses the shipped-sync trio (`shipped_sync_receipts` + `shipped_event_dispositions`) into `activity_log` `sync_*` disposition columns and drops the two child tables. A shipped event's terminal sync state (a `synced` downstream receipt or a policy disposition) now lives on the activity row itself, written by the single `record_disposition` verb. Because the state is the row, BD-INV-1's guarantee is structural — no FK-CASCADE can orphan a receipt.
 - Schema v21: adds non-destructive write-conflict identity aggregation. Exact repeat conflicts increment `occurrence_count`; distinct identity growth is capped at 10,000 and then rolls into an explicit per-surface overflow aggregate. Legacy receipts remain unchanged and are labeled `aggregation_state="legacy"`.
 - Schema v22 adds append-only handoff cancellation receipts and exact-row trust quarantine images. Legacy cleared operator rows can be relabeled `ingested` without deletion and restored only while the captured row still matches.
+- Schema v23 adds one-time, 24-hour handoff completion capabilities and append-only orphan-recovery receipts. The database stores only capability hashes; the claiming session receives the sole bearer value.
 - FTS5 `content_index` mirrors all content tables; `health` and `status` verify source-row / FTS-row alignment.
 - `status` includes a native freshness block for owner-specific snapshot, activity, handoff, and shipped-event attention. Freshness attention is advisory: top-level `ok` / `overall` remain tied to DB, schema, fallback-file, and FTS health.
 - 26 MCP tools across 10 modules (activity, handoffs, context, snapshots, cost, export, health, recall, audit, conflicts).
@@ -84,10 +85,28 @@ Instruction-bearing rows carry a `source_trust` label — `operator`, `agent`, o
 
 > MCP clients cannot mint operator provenance. An operator-directed handoff is created as `agent`, reviewed in an interactive terminal, and promoted with `uv run python -m bridge_db --promote-handoff <id>`. The promotion rechecks the exact reviewed row under a write lock and refuses changed or non-pending handoffs.
 
-`clear_handoff` is claimant-only: a caller may clear only an `active` row whose
-`claimed_by` equals its channel principal. Pending and legacy claimant-less
-active rows require the exact-ID `--cancel-handoff <id> --cancel-reason <reason>`
-operator ceremony, which records a durable cancellation receipt.
+`pick_up_handoff` now returns `claim_session_id`, `completion_capability`,
+`capability_expires_at`, and `allowed_transition="clear"`. The client must retain
+the capability only in the claiming session and pass it, with the exact
+`handoff_id`, to `clear_handoff`. Do not put the bearer value in logs, bridge
+markdown, handoff files, or durable memory. `get_pending_handoffs(status="active")`
+surfaces the non-secret session ID and expiry for operator diagnosis.
+
+`clear_handoff` retains the channel-bound `cc` / `codex` role check, then binds
+completion to the exact handoff, project (including canonical aliases), claiming
+session, and `clear` transition. It atomically consumes the capability; missing,
+malformed, wrong-target, expired, recovered, and replayed values fail closed with
+explicit `reason_code` values and no lifecycle mutation. The new arguments are
+optional at the MCP schema boundary so old clients still connect, but a live
+claim cannot complete without them.
+
+Pending and legacy claimant-less active rows still require the exact-ID
+`--cancel-handoff <id> --cancel-reason <reason>` operator ceremony. A claimed
+legacy row without a capability, or a capability-backed claim after expiry, can
+be retired only with the TTY-gated
+`--recover-orphaned-handoff <id> --recovery-reason <reason>` ceremony. Recovery
+rechecks the exact reviewed row under a write lock, retires any expired bearer
+state, and records a durable `handoff_orphan_recovery_receipts` row.
 
 ## CAS & Conflict Receipts
 
@@ -149,6 +168,7 @@ uv run python -m bridge_db --log-session-boundary bridge-db  # FTS-safe CC hook 
 uv run python -m bridge_db --upgrade-principals-v2  # preserve v1 hashes; add 90-day scoped grants
 uv run python -m bridge_db --promote-handoff 42  # review/promote one pending handoff (TTY only)
 uv run python -m bridge_db --cancel-handoff 42 --cancel-reason "superseded"  # exact unclaimed cancellation
+uv run python -m bridge_db --recover-orphaned-handoff 42 --recovery-reason "claiming session vanished"  # expired/legacy active claim
 uv run python -m bridge_db --quarantine-cleared-operator-handoffs  # recoverable legacy relabel
 uv run python -m bridge_db --restore-handoff-trust 42  # exact-row recovery
 uv run python -m bridge_db          # start MCP server (stdio)

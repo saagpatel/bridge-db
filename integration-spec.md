@@ -142,6 +142,15 @@ Claude Code's `/start` skill already reads `mcp__bridge_db__get_pending_handoffs
 it now runs `mcp__bridge_db__sync_from_file()` first, then reads pending handoffs.
 The handoff appears immediately in the next CC session.
 
+After operator promotion, `pick_up_handoff` returns the exact `handoff_id` plus a
+one-time `completion_capability` and non-secret `claim_session_id` / expiry. The
+claiming session keeps the bearer value in context and passes it back to
+`clear_handoff`; it must not serialize it into the fallback file, `HANDOFF.md`,
+logs, or durable memory. A different same-role session sees the active claim and
+expiry but cannot complete it. Missing or wrong capability evidence fails closed.
+After expiry, an operator can retire a genuinely orphaned claim only through the
+TTY-gated `--recover-orphaned-handoff` ceremony, which records a durable receipt.
+
 ### weekly-review (updated workflow)
 
 **Fallback (file-based):**

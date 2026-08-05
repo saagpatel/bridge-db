@@ -1115,6 +1115,238 @@ async def test_cancel_handoff_refuses_claimed_active_work(
 
 
 @pytest.mark.asyncio
+async def test_recover_orphaned_handoff_requires_expiry_and_records_receipt(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bridge_db.__main__ import run_recover_orphaned_handoff
+
+    cursor = await db.execute(
+        "INSERT INTO pending_handoffs "
+        "(project_name, status, claimed_by, source_trust) "
+        "VALUES (?, 'active', 'codex', 'operator')",
+        ("OrphanedWork",),
+    )
+    handoff_id = cursor.lastrowid
+    assert handoff_id is not None
+    await db.execute(
+        """
+        INSERT INTO handoff_session_capabilities (
+            handoff_id, session_id, token_sha256, claimed_caller,
+            allowed_transition, issued_at, expires_at
+        ) VALUES (?, 'session-orphan', ?, 'codex', 'clear',
+                  '2026-08-01T00:00:00Z', '2026-08-02T00:00:00Z')
+        """,
+        (handoff_id, "a" * 64),
+    )
+    await db.commit()
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(
+        "bridge_db.clock._provider", lambda: datetime(2026, 8, 5, tzinfo=UTC)
+    )
+
+    def confirm_recover(_prompt: str) -> str:
+        return "recover"
+
+    monkeypatch.setattr("builtins.input", confirm_recover)
+
+    assert (
+        await run_recover_orphaned_handoff(handoff_id, "claiming session vanished")
+        is True
+    )
+    row = await (
+        await db.execute(
+            "SELECT status FROM pending_handoffs WHERE id = ?", (handoff_id,)
+        )
+    ).fetchone()
+    assert row is not None and row["status"] == "cleared"
+    capability = await (
+        await db.execute(
+            "SELECT recovered_at, consumed_at FROM handoff_session_capabilities "
+            "WHERE handoff_id = ?",
+            (handoff_id,),
+        )
+    ).fetchone()
+    assert capability is not None
+    assert capability["recovered_at"] is not None
+    assert capability["consumed_at"] is None
+    receipt = await (
+        await db.execute(
+            "SELECT reason, recovery_basis, previous_claimant, claim_session_id "
+            "FROM handoff_orphan_recovery_receipts WHERE handoff_id = ?",
+            (handoff_id,),
+        )
+    ).fetchone()
+    assert receipt is not None
+    assert receipt["reason"] == "claiming session vanished"
+    assert receipt["recovery_basis"] == "expired_capability"
+    assert receipt["previous_claimant"] == "codex"
+    assert receipt["claim_session_id"] == "session-orphan"
+
+
+@pytest.mark.asyncio
+async def test_recover_orphaned_handoff_refuses_live_capability(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bridge_db.__main__ import run_recover_orphaned_handoff
+
+    cursor = await db.execute(
+        "INSERT INTO pending_handoffs "
+        "(project_name, status, claimed_by, source_trust) "
+        "VALUES (?, 'active', 'cc', 'operator')",
+        ("LiveWork",),
+    )
+    handoff_id = cursor.lastrowid
+    assert handoff_id is not None
+    await db.execute(
+        """
+        INSERT INTO handoff_session_capabilities (
+            handoff_id, session_id, token_sha256, claimed_caller,
+            allowed_transition, issued_at, expires_at
+        ) VALUES (?, 'session-live', ?, 'cc', 'clear',
+                  '2026-08-01T00:00:00Z', '2026-08-10T00:00:00Z')
+        """,
+        (handoff_id, "b" * 64),
+    )
+    await db.commit()
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(
+        "bridge_db.clock._provider", lambda: datetime(2026, 8, 5, tzinfo=UTC)
+    )
+
+    assert await run_recover_orphaned_handoff(handoff_id, "too soon") is False
+    row = await (
+        await db.execute(
+            "SELECT status FROM pending_handoffs WHERE id = ?", (handoff_id,)
+        )
+    ).fetchone()
+    assert row is not None and row["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_recover_orphaned_handoff_rechecks_expiry_under_lock(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bridge_db.__main__ import run_recover_orphaned_handoff
+
+    cursor = await db.execute(
+        "INSERT INTO pending_handoffs "
+        "(project_name, status, claimed_by, source_trust) "
+        "VALUES (?, 'active', 'codex', 'operator')",
+        ("ClockCorrectedWork",),
+    )
+    handoff_id = cursor.lastrowid
+    assert handoff_id is not None
+    await db.execute(
+        """
+        INSERT INTO handoff_session_capabilities (
+            handoff_id, session_id, token_sha256, claimed_caller,
+            allowed_transition, issued_at, expires_at
+        ) VALUES (?, 'session-clock-corrected', ?, 'codex', 'clear',
+                  '2026-08-01T00:00:00Z', '2026-08-02T00:00:00Z')
+        """,
+        (handoff_id, "c" * 64),
+    )
+    await db.commit()
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    observed_times = iter(
+        [
+            datetime(2026, 8, 5, tzinfo=UTC),
+            datetime(2026, 8, 1, tzinfo=UTC),
+        ]
+    )
+    monkeypatch.setattr("bridge_db.clock._provider", lambda: next(observed_times))
+
+    def confirm_recover(_prompt: str) -> str:
+        return "recover"
+
+    monkeypatch.setattr("builtins.input", confirm_recover)
+
+    assert await run_recover_orphaned_handoff(handoff_id, "clock corrected") is False
+    row = await (
+        await db.execute(
+            "SELECT status FROM pending_handoffs WHERE id = ?", (handoff_id,)
+        )
+    ).fetchone()
+    assert row is not None and row["status"] == "active"
+    capability = await (
+        await db.execute(
+            "SELECT recovered_at FROM handoff_session_capabilities "
+            "WHERE handoff_id = ?",
+            (handoff_id,),
+        )
+    ).fetchone()
+    assert capability is not None and capability["recovered_at"] is None
+    receipt = await (
+        await db.execute(
+            "SELECT 1 FROM handoff_orphan_recovery_receipts WHERE handoff_id = ?",
+            (handoff_id,),
+        )
+    ).fetchone()
+    assert receipt is None
+
+
+@pytest.mark.asyncio
+async def test_recover_orphaned_handoff_binds_full_capability_row(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bridge_db.__main__ import run_recover_orphaned_handoff
+
+    cursor = await db.execute(
+        "INSERT INTO pending_handoffs "
+        "(project_name, status, claimed_by, source_trust) "
+        "VALUES (?, 'active', 'codex', 'operator')",
+        ("CapabilityChangedWork",),
+    )
+    handoff_id = cursor.lastrowid
+    assert handoff_id is not None
+    await db.execute(
+        """
+        INSERT INTO handoff_session_capabilities (
+            handoff_id, session_id, token_sha256, claimed_caller,
+            allowed_transition, issued_at, expires_at
+        ) VALUES (?, 'session-capability-changed', ?, 'codex', 'clear',
+                  '2026-08-01T00:00:00Z', '2026-08-02T00:00:00Z')
+        """,
+        (handoff_id, "d" * 64),
+    )
+    await db.commit()
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(
+        "bridge_db.clock._provider", lambda: datetime(2026, 8, 5, tzinfo=UTC)
+    )
+
+    def mutate_then_confirm(_prompt: str) -> str:
+        with sqlite3.connect(tmp_path / "test.db") as concurrent:
+            concurrent.execute(
+                "UPDATE handoff_session_capabilities SET token_sha256 = ? "
+                "WHERE handoff_id = ?",
+                ("e" * 64, handoff_id),
+            )
+        return "recover"
+
+    monkeypatch.setattr("builtins.input", mutate_then_confirm)
+
+    assert await run_recover_orphaned_handoff(handoff_id, "capability changed") is False
+    row = await (
+        await db.execute(
+            "SELECT status FROM pending_handoffs WHERE id = ?", (handoff_id,)
+        )
+    ).fetchone()
+    assert row is not None and row["status"] == "active"
+    receipt = await (
+        await db.execute(
+            "SELECT 1 FROM handoff_orphan_recovery_receipts WHERE handoff_id = ?",
+            (handoff_id,),
+        )
+    ).fetchone()
+    assert receipt is None
+
+
+@pytest.mark.asyncio
 async def test_quarantine_and_exact_restore_preserve_recovery_evidence(
     db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

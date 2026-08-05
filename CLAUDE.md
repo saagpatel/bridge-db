@@ -26,13 +26,14 @@ uv run python -m bridge_db --revoke-principal cc  # revoke a principal (TTY only
 uv run python -m bridge_db --promote-section career  # operator label promotion (TTY only)
 uv run python -m bridge_db --promote-handoff 42      # reviewed handoff promotion (TTY only)
 uv run python -m bridge_db --cancel-handoff 42 --cancel-reason "superseded"  # unclaimed only
+uv run python -m bridge_db --recover-orphaned-handoff 42 --recovery-reason "session vanished"  # expired/legacy active claim
 uv run python -m bridge_db --quarantine-cleared-operator-handoffs  # recoverable legacy relabel
 uv run python -m bridge_db --restore-handoff-trust 42  # exact recovery image
 ```
 
 ## Architecture
 
-- **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=15000`). Schema at v22. v21 adds non-destructive exact conflict aggregation and explicit overflow counters; v22 adds non-destructive handoff cancellation/quarantine recovery tables. Auth state lives in `principals.json` v2 (not the DB): grants expire after 90 days, carry a generation, and are limited to a caller-specific tool scope.
+- **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=15000`). Schema at v23. v21 adds non-destructive exact conflict aggregation and explicit overflow counters; v22 adds non-destructive handoff cancellation/quarantine recovery tables; v23 adds hash-only session capabilities and orphan-recovery receipts. Auth state lives in `principals.json` v2 (not the DB): grants expire after 90 days, carry a generation, and are limited to a caller-specific tool scope.
 - **MCP transport**: stdio (stdout = JSON-RPC, all logging → stderr)
 - **MCP tools**: verify the current count with `rg '@mcp\.tool' src/bridge_db -c`. As of the 2026-07-12 v14 collapse there are 24 tools across 10 modules: activity, handoffs, context, snapshots, cost, export, health, recall (FTS5 lexical search; Phase −1 of the semantic memory layer), audit (read-side observability over the JSONL audit + recall query logs), and conflicts (`get_write_conflicts`). The shipped-sync trio (`confirm_shipped_sync` / `record_shipped_event_disposition` / `mark_shipped_processed`) collapsed into the single `record_disposition` verb (net −2 tools). `get_recent_activity` is the raw row-level feed; `get_activity_signal` is the operator-facing feed that compresses lifecycle `session-boundary` telemetry. `health` / `status` include signals for pending handoffs, raw and actionable unprocessed shipped events, receiptless processed shipped events, FTS index drift, WAL size, and bridge-file freshness.
 - **Context access**: `get_db(ctx)` helper casts lifespan context to `aiosqlite.Connection`
@@ -85,9 +86,13 @@ uv run python -m bridge_db --restore-handoff-trust 42  # exact recovery image
   Version-1 registries fail closed in the new runtime; use
   `--upgrade-principals-v2` first to preserve deployed token hashes while adding
   issued/expiry timestamps, generation 1, and the closed caller scope.
-- **Handoff completion**: `clear_handoff` accepts only claimant-owned `active`
-  rows. Pending, foreign-claimed, and legacy NULL-claimant rows are denied.
-  Only the exact-ID operator cancellation ceremony may clear an unclaimed row.
+- **Handoff completion**: role identity is necessary but no longer treated as
+  session identity. `pick_up_handoff` returns a one-time 24-hour completion
+  capability; only its hash is stored. `clear_handoff` requires the exact ID and
+  bearer value, binds them to project/session/role/transition, and consumes the
+  capability atomically. Never persist the bearer value. Pending and
+  claimant-less rows use cancellation; expired or legacy claimed rows use the
+  exact-row `--recover-orphaned-handoff` ceremony and durable receipt.
 
 ## Gotchas
 
@@ -105,7 +110,8 @@ uv run python -m bridge_db --restore-handoff-trust 42  # exact recovery image
   `status` carries the count in `signals`; `--status`/`--dogfood` print it.
   All soft signals — never folded into `ok` and never a dogfood gate.
   `get_pending_handoffs(status="active"|"all")` exposes live claims
-  (`claimed_by`, `picked_up_at`) — the default stays `pending`.
+  (`claimed_by`, `picked_up_at`, non-secret `claim_session_id`, and capability
+  expiry) — the default stays `pending`.
 - **Shipped-event sync**: one verb, `record_disposition(caller, activity_id, disposition, ...)`, writes a SHIPPED row's terminal sync state onto the `activity_log` `sync_*` columns (schema v14). Every terminal disposition is source-owned and requires an exact channel-bound caller matching the activity row's `source`. `disposition='synced'` additionally REQUIRES `downstream_system` + `downstream_ref` and adds `PROCESSED`. A policy `disposition` (`unsynced_by_policy` / `no_durable_target` / `superseded_without_receipt` / `declined_mapping`) REQUIRES a `reason`, records why the event is not receipt-backed, and does NOT add `PROCESSED`. Cross-source receipt verification or policy adjudication needs an explicit delegation contract and cannot borrow the source caller. A row that already carries `synced` proof cannot be downgraded to a policy disposition. `get_shipped_events(unprocessed_only=True)` excludes both `PROCESSED` rows and any row with a `sync_disposition`. This replaces the former `confirm_shipped_sync` / `record_shipped_event_disposition` / `mark_shipped_processed` trio; the legacy non-shipped `PROCESSED`-marking path is retired (`record_disposition` is SHIPPED-only). NOTE: `~/.claude/hooks/mcp-guard.sh` still carries a now-dead `mark_shipped_processed` pattern — operator handles that separately.
 - **Durable ledger (BD-INV-1)**: rows tagged `SHIPPED` or `LEDGER` (case-insensitive) are retention-exempt; `log_activity`'s docstring distinguishes them (`SHIPPED` = downstream sync obligation, `LEDGER` = durable operator catch-up entry). Every prune emits a `log_activity.prune` audit line naming the deleted ids and tags. `get_activity_signal` surfaces protected rows as `kind:"ledger"` entries, and `export_bridge_markdown` renders a `## Pinned Ledger` section. See `docs/internal/ACTIVITY-LEDGER-DISCOVERY-2026-07-09.md` for the discovery audit that motivated this.
 - **Capacity limits**: new activity, handoff, snapshot, and context writes use

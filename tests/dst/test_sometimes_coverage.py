@@ -15,7 +15,7 @@ Coverage roster (label → cheapest pinned firing run):
 - missing_cas_rejection         → blind-vs-cas @ MISSING_CAS_SEED (unconditional
   since the 2026-07-12 canary cut — no longer race-dependent)
 - wal_truncated                 → wal-starvation control @ PINNED_SEED
-- clear_refused_foreign_claim    → clear-race @ CLEAR_REFUSED_SEED
+- clear_refused_session_capability → clear-race @ CLEAR_REFUSED_SEED
 
 Known-unreachable by the current corpus (Phase 2+ scenario debt, NOT
 asserted here — listing them keeps the gap loud instead of silent):
@@ -46,7 +46,7 @@ EXPECTED_LABELS = frozenset(
         "stale_cas_rejection",
         "missing_cas_rejection",
         "wal_truncated",
-        "clear_refused_foreign_claim",
+        "clear_refused_session_capability",
     }
 )
 

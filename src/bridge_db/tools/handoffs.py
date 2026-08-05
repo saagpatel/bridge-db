@@ -1,13 +1,17 @@
 """Handoff queue tools: create_handoff, get_pending_handoffs, pick_up_handoff, clear_handoff."""
 
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+import hashlib
 import logging
+import secrets
 from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from bridge_db import config
+from bridge_db import clock, config
 from bridge_db.audit import log_audit
 from bridge_db.capacity import require_combined_bytes, require_utf8_bytes
 from bridge_db.auth import (
@@ -25,11 +29,67 @@ from bridge_db.db import (
     upsert_fts_entry,
 )
 from bridge_db.instruction_boundary import instruction_boundary
-from bridge_db.invariants import always, always_tx, sometimes
+from bridge_db.invariants import always_tx, sometimes
 from bridge_db.models import CallerID, SourceTrust
 from bridge_db.project_resolver import resolve as resolve_project
 
 logger = logging.getLogger("bridge_db.tools.handoffs")
+
+_CAPABILITY_VERSION = "hcap1"
+_CAPABILITY_TRANSITION = "clear"
+_capability_token_provider: Callable[[int], str] = secrets.token_urlsafe
+
+
+def _install_capability_token_provider(provider: Callable[[int], str]) -> None:
+    """Install a deterministic capability source for the DST harness only."""
+    global _capability_token_provider
+    _capability_token_provider = provider
+
+
+def _reset_capability_token_provider() -> None:
+    global _capability_token_provider
+    _capability_token_provider = secrets.token_urlsafe
+
+
+def _utc_text(value: datetime) -> str:
+    """Serialize a UTC-aware timestamp in the repository's canonical Z form."""
+    return value.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _parse_utc_text(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _mint_completion_capability() -> tuple[str, str, str]:
+    """Mint an opaque bearer capability and return session id, token, hash."""
+    session_id = _capability_token_provider(18)
+    secret = _capability_token_provider(32)
+    token = f"{_CAPABILITY_VERSION}.{session_id}.{secret}"
+    return session_id, token, hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _completion_capability_hash(value: str) -> str | None:
+    """Validate the public envelope before hashing; never log the bearer value."""
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    if (
+        not value.startswith(f"{_CAPABILITY_VERSION}.")
+        or value != value.strip()
+        or len(encoded) > config.HANDOFF_CAPABILITY_MAX_BYTES
+        or value.count(".") != 2
+    ):
+        return None
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _validate_handoff_payload(
@@ -242,20 +302,23 @@ def register(mcp: FastMCP) -> None:
         db = get_db(ctx)
         statuses = ("pending", "active") if status == "all" else (status,)
         placeholders = ", ".join("?" for _ in statuses)
-        before_sql = "AND id < ?" if before_id is not None else ""
+        before_sql = "AND h.id < ?" if before_id is not None else ""
         params: list[Any] = [*statuses]
         if before_id is not None:
             params.append(before_id)
         params.append(limit)
         cursor = await db.execute(
             f"""
-            SELECT id, project_name, project_path, roadmap_file, phase,
-                   dispatched_from, dispatched_at, picked_up_at, status,
-                   canonical_key, source_trust, claimed_by
-            FROM pending_handoffs
-            WHERE status IN ({placeholders})
+            SELECT h.id, h.project_name, h.project_path, h.roadmap_file, h.phase,
+                   h.dispatched_from, h.dispatched_at, h.picked_up_at, h.status,
+                   h.canonical_key, h.source_trust, h.claimed_by,
+                   c.session_id AS claim_session_id,
+                   c.expires_at AS capability_expires_at
+            FROM pending_handoffs AS h
+            LEFT JOIN handoff_session_capabilities AS c ON c.handoff_id = h.id
+            WHERE h.status IN ({placeholders})
             {before_sql}
-            ORDER BY id DESC
+            ORDER BY h.id DESC
             LIMIT ?
             """,  # noqa: S608 — placeholders count a closed literal tuple
             params,
@@ -275,6 +338,8 @@ def register(mcp: FastMCP) -> None:
                 "canonical_key": r["canonical_key"],
                 "source_trust": r["source_trust"],
                 "claimed_by": r["claimed_by"],
+                "claim_session_id": r["claim_session_id"],
+                "capability_expires_at": r["capability_expires_at"],
                 "instruction_boundary": instruction_boundary(r["source_trust"]),
             }
             for r in rows
@@ -386,6 +451,14 @@ def register(mcp: FastMCP) -> None:
         # mid-window trust change (no tool writes one today; this is armor
         # for the day an ingest/sync/admin path does) makes the CAS miss and
         # the claim is refused instead of landing under stale trust.
+        claim_session_id, completion_capability, capability_sha256 = (
+            _mint_completion_capability()
+        )
+        issued_at = clock.now()
+        expires_at = issued_at + timedelta(hours=config.HANDOFF_CAPABILITY_TTL_HOURS)
+        issued_at_text = _utc_text(issued_at)
+        expires_at_text = _utc_text(expires_at)
+
         cursor = await db.execute(
             """
             UPDATE pending_handoffs
@@ -451,7 +524,28 @@ def register(mcp: FastMCP) -> None:
                 "pickup completed; re-check get_pending_handoffs and retry if still needed. "
                 f"Conflict receipt: {receipt_id}."
             )
-        await db.commit()
+        try:
+            await db.execute(
+                """
+                INSERT INTO handoff_session_capabilities (
+                    handoff_id, session_id, token_sha256, claimed_caller,
+                    allowed_transition, issued_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    handoff_id,
+                    claim_session_id,
+                    capability_sha256,
+                    caller,
+                    _CAPABILITY_TRANSITION,
+                    issued_at_text,
+                    expires_at_text,
+                ),
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
         log_audit(
             "pick_up_handoff",
             caller,
@@ -473,6 +567,10 @@ def register(mcp: FastMCP) -> None:
             "source_trust": trust,
             "status": "active",
             "claimed_by": gate_identity,
+            "claim_session_id": claim_session_id,
+            "completion_capability": completion_capability,
+            "capability_expires_at": expires_at_text,
+            "allowed_transition": _CAPABILITY_TRANSITION,
         }
 
     @mcp.tool()
@@ -484,19 +582,27 @@ def register(mcp: FastMCP) -> None:
         project_name: Annotated[
             str, Field(description="Project name to match and clear")
         ],
+        handoff_id: Annotated[
+            int | None,
+            Field(description="Exact handoff ID returned by pick_up_handoff", ge=1),
+        ] = None,
+        completion_capability: Annotated[
+            str | None,
+            Field(
+                description="Short-lived completion capability returned only to "
+                "the session that claimed this handoff"
+            ),
+        ] = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
-        """Clear a handoff by project name (mark as done). Called by /end after completing project work.
+        """Complete one exact handoff using its claiming-session capability.
 
-        Identity gate: the claimed caller must exactly match the channel-bound
-        principal in every rollout mode. Claimant gate: only an active handoff
-        whose claimed_by value equals that verified identity may transition to
-        cleared. Pending and legacy active rows without a claimant require the
-        exact-ID operator cancellation ceremony. Refusals are reported, not
-        raised: ok stays True and the response carries refused_ids/refused_count.
-
-        Scope honesty: all cc windows share one principal, so the claimant gate
-        protects cross-role clears (cc <-> codex), not same-role session ownership.
+        Role authorization remains mandatory, but role identity is not treated
+        as session identity. ``pick_up_handoff`` returns the only copy of a
+        short-lived bearer secret; this transition binds its hash to the exact
+        handoff, claimant role, and ``clear`` action and consumes it atomically.
+        The optional parameter defaults preserve old client schemas, but a live
+        claimed handoff fails closed until both new fields are supplied.
         """
         require_caller(ctx, caller, tool="clear_handoff")
         require_bound_caller(ctx, caller, tool="clear_handoff")
@@ -506,11 +612,6 @@ def register(mcp: FastMCP) -> None:
             )
 
         db = get_db(ctx)
-        # Match by exact project_name OR — when the incoming name resolves through
-        # the canonical registry — by shared canonical_key, so a handoff dispatched
-        # as "IncidentMgmt" still clears when /end passes "IncidentManagement" (both
-        # resolve to the same canonical key). The exact-name path is always present,
-        # preserving today's behavior for rows with no canonical_key (F1).
         canonical = resolve_project(project_name).canonical_key
         if canonical is not None:
             match_sql = "(project_name = ? OR canonical_key = ?)"
@@ -519,134 +620,277 @@ def register(mcp: FastMCP) -> None:
             match_sql = "project_name = ?"
             match_params = (project_name,)
 
-        # Strict binding above makes the verified principal and claimed caller
-        # identical for every reachable mutation.
-        gate_identity = caller
-
-        cursor = await db.execute(
-            f"""
-            SELECT id, project_name, canonical_key, status, claimed_by
-            FROM pending_handoffs
-            WHERE {match_sql} AND status != 'cleared'
-            ORDER BY dispatched_at DESC, id DESC
-            """,
-            match_params,
-        )
-        rows = await cursor.fetchall()
-        rows_by_id = {int(row["id"]): row for row in rows}
-        if not rows:
-            # Not an error — handoff may not exist; /end calls this opportunistically
-            return {
-                "ok": True,
-                "cleared": False,
-                "reason": "No active handoff found for project",
-            }
-
-        clearable_ids: list[int] = []
-        refused_ids: list[int] = []
-        for row in rows:
-            always(
-                row["status"] in ("pending", "active"),
-                "INV-3: only pending|active handoffs may move toward cleared",
-                handoff_id=row["id"],
-                status=row["status"],
-            )
-            if row["status"] == "active" and row["claimed_by"] == gate_identity:
-                clearable_ids.append(row["id"])
-            else:
-                refused_ids.append(row["id"])
-
-        if clearable_ids:
-            id_placeholders = ", ".join("?" for _ in clearable_ids)
-            await db.execute(
-                f"""
-                UPDATE pending_handoffs
-                SET status = 'cleared', cleared_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-                WHERE id IN ({id_placeholders})
-                  AND status = 'active'
-                  AND claimed_by = ?
-                """,
-                [*clearable_ids, gate_identity],
-            )
-            cursor = await db.execute(
-                f"""
-                SELECT id FROM pending_handoffs
-                WHERE id IN ({id_placeholders}) AND status != 'cleared'
-                """,
-                clearable_ids,
-            )
-            race_refused_ids = [row["id"] for row in await cursor.fetchall()]
-            # The guarded UPDATE repeats the complete claimant predicate. Any
-            # out-of-band state change after the SELECT becomes a refusal.
-            sometimes("clear_refused_race", bool(race_refused_ids))
-            if race_refused_ids:
-                refused_ids.extend(race_refused_ids)
-                clearable_ids = [
-                    handoff_id
-                    for handoff_id in clearable_ids
-                    if handoff_id not in race_refused_ids
-                ]
-        if clearable_ids:
-            for handoff_id in clearable_ids:
-                row = rows_by_id[handoff_id]
-                await db.execute(
-                    """
-                    INSERT INTO handoff_lifecycle_receipts (
-                        handoff_id, event_type, principal, claimed_caller,
-                        requested_project_name, canonical_key, match_basis,
-                        previous_status, previous_claimant
-                    ) VALUES (?, 'cleared', ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        handoff_id,
-                        caller,
-                        caller,
-                        project_name,
-                        row["canonical_key"],
-                        "exact"
-                        if row["project_name"] == project_name
-                        else "canonical_alias",
-                        row["status"],
-                        row["claimed_by"],
-                    ),
-                )
-        await db.commit()
-        sometimes("clear_refused_foreign_claim", bool(refused_ids))
-
-        if refused_ids:
+        def refused(
+            reason_code: str,
+            reason: str,
+            *,
+            refused_handoff_id: int | None = handoff_id,
+            claim_session_id: str | None = None,
+            foreign_claim: bool = False,
+        ) -> dict[str, Any]:
+            sometimes("clear_refused_session_capability")
+            if foreign_claim:
+                sometimes("clear_refused_foreign_claim")
             log_audit(
-                "clear_handoff.refused_foreign_claim",
+                "clear_handoff.refused_session_capability",
                 caller,
                 project_name,
                 ok=False,
-                detail=f"refused_ids={refused_ids} gate_identity={gate_identity}",
+                detail=(
+                    f"reason_code={reason_code} handoff_id={refused_handoff_id} "
+                    f"claim_session_id={claim_session_id or 'unknown'}"
+                ),
             )
-
-        if not clearable_ids:
             return {
                 "ok": True,
                 "cleared": False,
-                "reason": "Matched handoffs require claimant-owned active state",
-                "refused_ids": refused_ids,
-                "refused_count": len(refused_ids),
+                "reason": reason,
+                "reason_code": reason_code,
+                "refused_ids": [refused_handoff_id]
+                if refused_handoff_id is not None
+                else [],
+                "refused_count": 1 if refused_handoff_id is not None else 0,
                 "project_name": project_name,
                 "canonical_key": canonical,
             }
 
-        logger.info(
-            "handoffs cleared: project=%s by %s count=%d",
-            project_name,
+        if handoff_id is None or completion_capability is None:
+            cursor = await db.execute(
+                f"""
+                SELECT id FROM pending_handoffs
+                WHERE {match_sql} AND status != 'cleared'
+                ORDER BY dispatched_at DESC, id DESC
+                """,
+                match_params,
+            )
+            open_ids = [int(row["id"]) for row in await cursor.fetchall()]
+            if not open_ids:
+                return {
+                    "ok": True,
+                    "cleared": False,
+                    "reason": "No active handoff found for project",
+                }
+            return refused(
+                "session_capability_required",
+                "Claiming-session handoff ID and completion capability are required",
+                refused_handoff_id=handoff_id or open_ids[0],
+            )
+
+        capability_sha256 = _completion_capability_hash(completion_capability)
+        if capability_sha256 is None:
+            return refused(
+                "invalid_session_capability",
+                "Completion capability is malformed or exceeds the size limit",
+            )
+
+        cursor = await db.execute(
+            """
+            SELECT c.handoff_id, c.session_id, c.claimed_caller,
+                   c.allowed_transition, c.expires_at, c.consumed_at, c.recovered_at,
+                   h.project_name, h.canonical_key, h.status, h.claimed_by
+            FROM handoff_session_capabilities AS c
+            JOIN pending_handoffs AS h ON h.id = c.handoff_id
+            WHERE c.token_sha256 = ?
+            """,
+            (capability_sha256,),
+        )
+        capability = await cursor.fetchone()
+        if capability is None:
+            return refused(
+                "invalid_session_capability",
+                "Completion capability is not recognized",
+            )
+
+        claim_session_id = str(capability["session_id"])
+        capability_handoff_id = int(capability["handoff_id"])
+        if capability_handoff_id != handoff_id:
+            return refused(
+                "wrong_handoff",
+                "Completion capability is bound to a different handoff",
+                claim_session_id=claim_session_id,
+            )
+        project_matches = capability["project_name"] == project_name or (
+            canonical is not None and capability["canonical_key"] == canonical
+        )
+        if not project_matches:
+            return refused(
+                "wrong_project",
+                "Completion capability is bound to a different project",
+                claim_session_id=claim_session_id,
+            )
+        if capability["claimed_caller"] != caller:
+            return refused(
+                "wrong_role",
+                "Completion capability belongs to a different authorized role",
+                claim_session_id=claim_session_id,
+                foreign_claim=True,
+            )
+        if capability["allowed_transition"] != _CAPABILITY_TRANSITION:
+            return refused(
+                "wrong_transition",
+                "Completion capability does not authorize this transition",
+                claim_session_id=claim_session_id,
+            )
+        if capability["recovered_at"] is not None:
+            return refused(
+                "recovered_session_capability",
+                "Completion capability was retired by audited orphan recovery",
+                claim_session_id=claim_session_id,
+            )
+        if capability["consumed_at"] is not None:
+            return refused(
+                "replayed_session_capability",
+                "Completion capability has already been consumed",
+                claim_session_id=claim_session_id,
+            )
+        expires_at = _parse_utc_text(capability["expires_at"])
+        if expires_at is None:
+            return refused(
+                "invalid_capability_state",
+                "Stored completion capability has an invalid expiry",
+                claim_session_id=claim_session_id,
+            )
+        if clock.now() >= expires_at:
+            return refused(
+                "expired_session_capability",
+                "Completion capability has expired; use audited orphan recovery",
+                claim_session_id=claim_session_id,
+            )
+        if capability["status"] != "active" or capability["claimed_by"] != caller:
+            return refused(
+                "claim_state_changed",
+                "Handoff is no longer an active claim owned by this role",
+                claim_session_id=claim_session_id,
+                foreign_claim=capability["claimed_by"] not in (None, caller),
+            )
+
+        consumed_at = _utc_text(clock.now())
+        async with rollback_on_error(db):
+            await db.execute("BEGIN IMMEDIATE")
+            current = await (
+                await db.execute(
+                    """
+                    SELECT c.expires_at, c.consumed_at, c.recovered_at,
+                           h.status, h.claimed_by
+                    FROM handoff_session_capabilities AS c
+                    JOIN pending_handoffs AS h ON h.id = c.handoff_id
+                    WHERE c.handoff_id = ? AND c.token_sha256 = ?
+                    """,
+                    (handoff_id, capability_sha256),
+                )
+            ).fetchone()
+            current_expiry = _parse_utc_text(current["expires_at"]) if current else None
+            if (
+                current is None
+                or current["consumed_at"] is not None
+                or current["recovered_at"] is not None
+                or current["status"] != "active"
+                or current["claimed_by"] != caller
+                or current_expiry is None
+                or clock.now() >= current_expiry
+            ):
+                await db.rollback()
+                sometimes("clear_refused_race")
+                return refused(
+                    "capability_state_changed",
+                    "Handoff capability state changed before completion",
+                    claim_session_id=claim_session_id,
+                )
+
+            cursor = await db.execute(
+                """
+                UPDATE pending_handoffs
+                SET status = 'cleared',
+                    cleared_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                WHERE id = ? AND status = 'active' AND claimed_by = ?
+                """,
+                (handoff_id, caller),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                sometimes("clear_refused_race")
+                return refused(
+                    "capability_state_changed",
+                    "Handoff claim changed before completion",
+                    claim_session_id=claim_session_id,
+                )
+            cursor = await db.execute(
+                """
+                UPDATE handoff_session_capabilities
+                SET consumed_at = ?
+                WHERE handoff_id = ? AND token_sha256 = ?
+                  AND consumed_at IS NULL AND recovered_at IS NULL
+                """,
+                (consumed_at, handoff_id, capability_sha256),
+            )
+            await always_tx(
+                db,
+                cursor.rowcount == 1,
+                "INV-14: one completion consumes exactly one session capability",
+                handoff_id=handoff_id,
+                claim_session_id=claim_session_id,
+                rowcount=cursor.rowcount,
+            )
+            await db.execute(
+                """
+                INSERT INTO handoff_lifecycle_receipts (
+                    handoff_id, event_type, principal, claimed_caller,
+                    requested_project_name, canonical_key, match_basis,
+                    previous_status, previous_claimant
+                ) VALUES (?, 'cleared', ?, ?, ?, ?, ?, 'active', ?)
+                """,
+                (
+                    handoff_id,
+                    caller,
+                    caller,
+                    project_name,
+                    capability["canonical_key"],
+                    "exact"
+                    if capability["project_name"] == project_name
+                    else "canonical_alias",
+                    caller,
+                ),
+            )
+            await db.commit()
+
+        cursor = await db.execute(
+            f"""
+            SELECT id FROM pending_handoffs
+            WHERE {match_sql} AND status != 'cleared' AND id != ?
+            ORDER BY dispatched_at DESC, id DESC
+            """,
+            (*match_params, handoff_id),
+        )
+        refused_ids = [int(row["id"]) for row in await cursor.fetchall()]
+        if refused_ids:
+            sometimes("clear_refused_foreign_claim")
+
+        log_audit(
+            "clear_handoff",
             caller,
-            len(clearable_ids),
+            project_name,
+            ok=True,
+            detail=(
+                f"handoff_id={handoff_id} claim_session_id={claim_session_id} "
+                f"decision=allowed"
+            ),
+        )
+        logger.info(
+            "handoff cleared: project=%s id=%d by %s session=%s",
+            project_name,
+            handoff_id,
+            caller,
+            claim_session_id,
         )
         return {
             "ok": True,
             "cleared": True,
-            "handoff_id": clearable_ids[0],
-            "handoff_ids": clearable_ids,
-            "cleared_count": len(clearable_ids),
+            "handoff_id": handoff_id,
+            "handoff_ids": [handoff_id],
+            "cleared_count": 1,
             "refused_ids": refused_ids,
             "refused_count": len(refused_ids),
             "project_name": project_name,
             "canonical_key": canonical,
+            "claim_session_id": claim_session_id,
         }

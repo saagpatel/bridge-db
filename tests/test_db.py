@@ -38,6 +38,8 @@ async def test_schema_creates_all_tables(db: aiosqlite.Connection) -> None:
         "cost_records",
         "handoff_cancellation_receipts",
         "handoff_lifecycle_receipts",
+        "handoff_orphan_recovery_receipts",
+        "handoff_session_capabilities",
         "handoff_trust_quarantine",
         "pending_handoffs",
         "session_classification",
@@ -56,6 +58,7 @@ async def test_schema_creates_indexes(db: aiosqlite.Connection) -> None:
     assert "idx_activity_timestamp" in indexes
     assert "idx_snapshot_system" in indexes
     assert "idx_handoff_status" in indexes
+    assert "idx_handoff_capability_expiry" in indexes
     assert "idx_sc_project" in indexes
     assert "idx_sc_started" in indexes
     assert "idx_scl_routing" in indexes
@@ -550,6 +553,33 @@ async def test_authority_recovery_tables_exist(db: aiosqlite.Connection) -> None
         "handoff_cancellation_receipts",
         "handoff_trust_quarantine",
     }
+
+
+async def test_v22_migration_adds_session_capability_ledgers(
+    tmp_path: Path,
+) -> None:
+    db = await open_db(tmp_path / "v22.db")
+    try:
+        await db.execute("DROP TABLE handoff_orphan_recovery_receipts")
+        await db.execute("DROP TABLE handoff_session_capabilities")
+        await db.execute("PRAGMA user_version = 22")
+        await db.commit()
+
+        await ensure_schema(db)
+
+        version = await (await db.execute("PRAGMA user_version")).fetchone()
+        assert version is not None and version[0] == SCHEMA_VERSION
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name IN "
+            "('handoff_session_capabilities', 'handoff_orphan_recovery_receipts')"
+        )
+        assert {row["name"] for row in await cursor.fetchall()} == {
+            "handoff_session_capabilities",
+            "handoff_orphan_recovery_receipts",
+        }
+    finally:
+        await db.close()
 
 
 # ── source_trust provenance (v6 → v7) ──────────────────────────────────────
