@@ -93,7 +93,17 @@ export BRIDGE_DB_PRINCIPAL_TOKEN BRIDGE_DB_AUTH_MODE BRIDGE_DB_TRANSPORT_MODE
 unset BRIDGE_DB_ENV_FILE bridge_token bridge_auth_mode line env_owner env_mode
 
 stable_launcher=/Users/d/.local/state/bridge-db/current/bin/bridge-db-mcp
-if [ "$bridge_transport_mode" = direct ] || [ "$#" -ne 0 ]; then
+if [ "$#" -ne 0 ]; then
+    case "$1" in
+        --ensure-shared-broker|--run-shared-broker|--release-shared-client) ;;
+        *)
+            BRIDGE_DB_TRANSPORT_MODE=direct
+            export BRIDGE_DB_TRANSPORT_MODE
+            ;;
+    esac
+    exec "$stable_launcher" "$@"
+fi
+if [ "$bridge_transport_mode" = direct ]; then
     exec "$stable_launcher" "$@"
 fi
 

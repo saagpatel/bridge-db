@@ -128,7 +128,7 @@ def test_codex_wrapper_defaults_no_argument_launch_to_direct_transport(
     assert output.read_text(encoding="utf-8").splitlines() == ["direct", "0"]
 
 
-def test_codex_wrapper_accepts_reviewed_shared_transport_key_for_cli_passthrough(
+def test_codex_wrapper_forces_direct_transport_for_cli_maintenance_passthrough(
     tmp_path: Path,
 ) -> None:
     output = tmp_path / "output"
@@ -162,8 +162,54 @@ def test_codex_wrapper_accepts_reviewed_shared_transport_key_for_cli_passthrough
 
     assert result.returncode == 0
     assert output.read_text(encoding="utf-8").splitlines() == [
-        "shared",
+        "direct",
         "--checkpoint",
+    ]
+
+
+@pytest.mark.parametrize(
+    "hidden_command",
+    ["--ensure-shared-broker", "--run-shared-broker", "--release-shared-client"],
+)
+def test_codex_wrapper_preserves_shared_transport_for_hidden_lifecycle_commands(
+    tmp_path: Path, hidden_command: str
+) -> None:
+    output = tmp_path / "output"
+    launcher = tmp_path / "launcher"
+    launcher.write_text(
+        "#!/bin/sh\nprintf '%s\\n%s\\n' \"$BRIDGE_DB_TRANSPORT_MODE\" \"$*\" > \"$FIXTURE_OUTPUT\"\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    wrapper = _executable_wrapper(tmp_path, launcher)
+    env_file = tmp_path / "bridge-db.env"
+    env_file.write_text(
+        "BRIDGE_DB_PRINCIPAL_TOKEN=fixture-wrapper-secret-abcdefghijklmnopqrstuvwxyz\n"
+        "BRIDGE_DB_AUTH_MODE=warn\n"
+        "BRIDGE_DB_TRANSPORT_MODE=shared\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    arguments = [hidden_command]
+    if hidden_command == "--release-shared-client":
+        arguments.append(str(tmp_path / "client.json"))
+
+    result = subprocess.run(
+        [str(wrapper), *arguments],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "BRIDGE_DB_ENV_FILE": str(env_file),
+            "FIXTURE_OUTPUT": str(output),
+        },
+    )
+
+    assert result.returncode == 0
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        "shared",
+        " ".join(arguments),
     ]
 
 
