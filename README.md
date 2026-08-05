@@ -226,7 +226,8 @@ stdio for the client while a thin shell relay uses one credential- and complete
 launch-contract-bound broker over a private Unix socket; command-line
 maintenance operations remain direct. Each relay gets a distinct capability in
 an owner-only mode-`0400` header file, and curl reads that file directly so the
-capability does not enter argv, logs, socket names, or receipts. The broker has
+capability does not enter argv, logs, socket names, or receipts. Every request
+also requires the relay's current PID/start identity to match its lease. The broker has
 no TCP listener or LaunchAgent, serializes database access across MCP sessions,
 and exits after the final relay has been absent for its bounded idle window.
 `health` / `status` and `python -m bridge_db --shared-runtime-status` expose the

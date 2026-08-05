@@ -757,6 +757,11 @@ def _relay_capability_authorized(paths: SharedRuntimePaths, raw_value: bytes) ->
             record,
             expected_contract_sha256=_launch_contract_sha256(),
         )
+        if (
+            probe_process(int(record["pid"]), str(record["process_identity"]))
+            != "same"
+        ):
+            return False
         capability_value = _read_capability_value(
             capability_path, expected_lease_id=lease_id
         )

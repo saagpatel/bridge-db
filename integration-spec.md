@@ -489,7 +489,8 @@ introduced.
 Relay references are private PID/start-identity leases. Every HTTP request also
 requires that relay's unique capability, delivered as an owner-only mode-`0400`
 header file so curl never places the value in argv; only the capability hash is
-retained. The broker preserves stale reference history, serializes tool calls
+retained, and authorization fails unless the current PID/start identity still
+matches the lease. The broker preserves stale reference history, serializes tool calls
 across session DB connections, and cooperatively exits 300 seconds after the
 last live relay disappears. It never signals another process. Broker startup
 fails closed after 10 seconds; setting the transport mode back to `direct` is

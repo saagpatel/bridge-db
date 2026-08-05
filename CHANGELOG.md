@@ -17,9 +17,10 @@ All notable changes to bridge-db are documented here.
   PID/start-identity receipt after startup, so orphan or foreign sockets cannot
   be adopted as a successful launch.
 - **Request isolation:** each relay receives a distinct mode-`0400` curl header
-  file; every broker request validates the exact lease and capability hash,
-  while lifecycle scans retain the PID/start-identity gate and the secret stays
-  out of argv, logs, leases, history, and receipts. Broker grouping binds the
+  file; every broker request validates the exact live PID/start identity, lease,
+  header bytes, and capability hash, while lifecycle scans retain the same
+  identity gate and the secret stays out of argv, logs, leases, history, and
+  receipts. Broker grouping binds the
   full effective launch contract, including
   auth mode and database/evidence targets, rather than token and generation
   alone.

@@ -374,6 +374,38 @@ def test_capability_file_bytes_remain_bound_to_the_exact_lease(
     assert inventory["reason_code"] == "shared_runtime.capability_file_invalid"
 
 
+def test_request_capability_requires_live_exact_relay_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRIDGE_DB_SHARED_RUNTIME_ROOT", str(tmp_path / "shared"))
+    monkeypatch.setenv(
+        "BRIDGE_DB_PRINCIPAL_TOKEN",
+        "fixture-shared-secret-abcdefghijklmnopqrstuvwxyz",
+    )
+    paths = shared_runtime_paths()
+    with shared_runtime_module._group_lifecycle_lock(  # pyright: ignore[reportPrivateUsage]
+        paths
+    ):
+        _lease, capability_file = shared_runtime_module._register_client(  # pyright: ignore[reportPrivateUsage]
+            paths
+        )
+    capability_value = capability_file.read_bytes().split(b": ", 1)[1].rstrip(b"\n")
+
+    def mismatched_process(_pid: int, _identity: str) -> str:
+        return "mismatch"
+
+    monkeypatch.setattr(
+        shared_runtime_module,
+        "probe_process",
+        mismatched_process,
+    )
+
+    assert not shared_runtime_module._relay_capability_authorized(  # pyright: ignore[reportPrivateUsage]
+        paths, capability_value
+    )
+
+
 @pytest.mark.asyncio
 async def test_monitor_failure_requests_shutdown_and_propagates() -> None:
     class _Server:

@@ -210,8 +210,8 @@ random selector key derives the group name, so neither the credential nor a
 reusable credential digest appears in argv, output, socket names, or receipts.
 Each relay also receives a distinct random capability through an owner-only
 mode-`0400` curl header file. Every broker request validates its lease and
-capability hash, then strips the header before MCP dispatch; lifecycle scans
-separately retain the relay's PID/start-identity gate.
+capability hash plus the relay's current PID/start identity, then strips the
+header before MCP dispatch; lifecycle scans retain the same identity gate.
 The capability value never enters argv, logs, socket names, leases, history, or
 broker receipts. The broker binds only an owner-only Unix socket, uses stateful
 Streamable HTTP behind the stdio relay, and serializes tool calls so independent
