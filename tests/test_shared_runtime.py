@@ -34,9 +34,21 @@ _STABLE_LAUNCHER = "/Users/d/.local/state/bridge-db/current/bin/bridge-db-mcp"
 
 @pytest.fixture
 def short_runtime_root() -> Iterator[Path]:
-    # Darwin limits AF_UNIX paths to roughly 104 bytes; pytest's nested tmp path
-    # is intentionally long, so the transport root gets its own private short path.
-    root = Path(tempfile.mkdtemp(prefix="bridge-shared-", dir="/private/tmp"))
+    # AF_UNIX paths are short on several platforms. Resolve both the platform
+    # temp directory and POSIX /tmp (when present), then use the shortest
+    # writable parent instead of hard-coding one operating system's target.
+    candidates = {Path(tempfile.gettempdir()).resolve()}
+    posix_tmp = Path("/tmp")
+    if posix_tmp.is_dir():
+        candidates.add(posix_tmp.resolve())
+    writable = [
+        path
+        for path in candidates
+        if path.is_dir() and os.access(path, os.W_OK | os.X_OK)
+    ]
+    assert writable
+    short_parent = min(writable, key=lambda path: len(str(path)))
+    root = Path(tempfile.mkdtemp(prefix="bridge-shared-", dir=short_parent))
     root.chmod(0o700)
     try:
         yield root
