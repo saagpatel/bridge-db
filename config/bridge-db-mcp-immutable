@@ -1,0 +1,121 @@
+#!/bin/sh
+set -eu
+
+env_file=${BRIDGE_DB_ENV_FILE:-/Users/d/.codex/secrets/bridge-db.env}
+case "$env_file" in
+    /*) ;;
+    *)
+        echo "bridge_db.wrapper_env_path_not_absolute" >&2
+        exit 78
+        ;;
+esac
+if [ ! -f "$env_file" ] || [ -L "$env_file" ]; then
+    echo "bridge_db.wrapper_env_file_invalid" >&2
+    exit 78
+fi
+
+env_owner=$(stat -f '%u' "$env_file" 2>/dev/null) || \
+    env_owner=$(stat -c '%u' "$env_file" 2>/dev/null) || {
+    echo "bridge_db.wrapper_env_stat_failed" >&2
+    exit 78
+}
+env_mode=$(stat -f '%Lp' "$env_file" 2>/dev/null) || \
+    env_mode=$(stat -c '%a' "$env_file" 2>/dev/null) || {
+    echo "bridge_db.wrapper_env_stat_failed" >&2
+    exit 78
+}
+expected_owner=$(id -u) || {
+    echo "bridge_db.wrapper_env_stat_failed" >&2
+    exit 78
+}
+case "$env_owner:$env_mode" in
+    "$expected_owner:600") ;;
+    *)
+        echo "bridge_db.wrapper_env_file_not_private" >&2
+        exit 78
+        ;;
+esac
+
+token_seen=0
+auth_seen=0
+transport_seen=0
+bridge_token=
+bridge_auth_mode=
+bridge_transport_mode=direct
+while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+        ''|'#'*) ;;
+        BRIDGE_DB_PRINCIPAL_TOKEN=*)
+            if [ "$token_seen" -ne 0 ]; then
+                echo "bridge_db.wrapper_env_duplicate_key" >&2
+                exit 78
+            fi
+            token_seen=1
+            bridge_token=${line#BRIDGE_DB_PRINCIPAL_TOKEN=}
+            ;;
+        BRIDGE_DB_AUTH_MODE=*)
+            if [ "$auth_seen" -ne 0 ]; then
+                echo "bridge_db.wrapper_env_duplicate_key" >&2
+                exit 78
+            fi
+            auth_seen=1
+            bridge_auth_mode=${line#BRIDGE_DB_AUTH_MODE=}
+            ;;
+        BRIDGE_DB_TRANSPORT_MODE=*)
+            if [ "$transport_seen" -ne 0 ]; then
+                echo "bridge_db.wrapper_env_duplicate_key" >&2
+                exit 78
+            fi
+            transport_seen=1
+            bridge_transport_mode=${line#BRIDGE_DB_TRANSPORT_MODE=}
+            ;;
+        *)
+            echo "bridge_db.wrapper_env_unknown_key" >&2
+            exit 78
+            ;;
+    esac
+done < "$env_file"
+
+if [ "$token_seen" -ne 1 ] || [ "${#bridge_token}" -lt 32 ]; then
+    echo "bridge_db.wrapper_token_invalid" >&2
+    exit 78
+fi
+case "$bridge_auth_mode" in
+    off|warn|enforce) ;;
+    *)
+        echo "bridge_db.wrapper_auth_mode_invalid" >&2
+        exit 78
+        ;;
+esac
+case "$bridge_transport_mode" in
+    direct|shared) ;;
+    *)
+        echo "bridge_db.wrapper_transport_mode_invalid" >&2
+        exit 78
+        ;;
+esac
+
+stable_launcher=/Users/d/.local/state/bridge-db/current/bin/bridge-db-mcp
+BRIDGE_DB_PRINCIPAL_TOKEN=$bridge_token
+BRIDGE_DB_AUTH_MODE=$bridge_auth_mode
+BRIDGE_DB_TRANSPORT_MODE=$bridge_transport_mode
+BRIDGE_DB_SHARED_RUNTIME_LAUNCHER=$stable_launcher
+export BRIDGE_DB_PRINCIPAL_TOKEN BRIDGE_DB_AUTH_MODE BRIDGE_DB_TRANSPORT_MODE
+export BRIDGE_DB_SHARED_RUNTIME_LAUNCHER
+unset BRIDGE_DB_ENV_FILE bridge_token bridge_auth_mode line env_owner env_mode
+
+if [ "$#" -ne 0 ]; then
+    case "$1" in
+        --ensure-shared-broker|--run-shared-broker|--run-shared-relay|--release-shared-client) ;;
+        *)
+            BRIDGE_DB_TRANSPORT_MODE=direct
+            export BRIDGE_DB_TRANSPORT_MODE
+            ;;
+    esac
+    exec "$stable_launcher" "$@"
+fi
+if [ "$bridge_transport_mode" = direct ]; then
+    exec "$stable_launcher" "$@"
+fi
+
+exec "$stable_launcher" --run-shared-relay

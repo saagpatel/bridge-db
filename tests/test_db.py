@@ -9,7 +9,7 @@ import pytest
 from conftest import CaptureMCP, make_ctx
 
 from bridge_db import config
-from bridge_db.db import SCHEMA_VERSION, ensure_schema, open_db
+from bridge_db.db import SCHEMA_VERSION, apply_pragmas, ensure_schema, open_db
 from bridge_db.tools import activity as activity_mod
 
 
@@ -38,10 +38,13 @@ async def test_schema_creates_all_tables(db: aiosqlite.Connection) -> None:
         "cost_records",
         "handoff_cancellation_receipts",
         "handoff_lifecycle_receipts",
+        "handoff_orphan_recovery_receipts",
+        "handoff_session_capabilities",
         "handoff_trust_quarantine",
         "pending_handoffs",
         "session_classification",
         "session_costs",
+        "snapshot_refusals",
         "system_snapshots",
         "write_conflicts",
     }
@@ -55,7 +58,9 @@ async def test_schema_creates_indexes(db: aiosqlite.Connection) -> None:
     assert "idx_activity_source" in indexes
     assert "idx_activity_timestamp" in indexes
     assert "idx_snapshot_system" in indexes
+    assert "idx_snapshot_refusals_owner_state" in indexes
     assert "idx_handoff_status" in indexes
+    assert "idx_handoff_capability_expiry" in indexes
     assert "idx_sc_project" in indexes
     assert "idx_sc_started" in indexes
     assert "idx_scl_routing" in indexes
@@ -93,6 +98,71 @@ async def test_ensure_schema_is_idempotent(tmp_path: Path) -> None:
     assert row is not None
     assert row[0] == SCHEMA_VERSION
     await db.close()
+
+
+async def test_snapshot_refusal_extension_remains_exact_v23_runtime_compatible(
+    tmp_path: Path,
+) -> None:
+    """The previous merged v23 opener can read/write core rows after extension use."""
+    path = tmp_path / "rollback-compatible.db"
+    current = await open_db(path)
+    await current.execute(
+        "INSERT INTO system_snapshots (system, snapshot_date, data) VALUES (?, ?, ?)",
+        ("codex", "2026-08-05", '{"state":"preserved"}'),
+    )
+    await current.execute(
+        """
+        INSERT INTO snapshot_refusals (
+            caller, system, snapshot_family, snapshot_date, reason_code,
+            retained_count, retention_limit, payload_sha256, next_state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "codex",
+            "codex",
+            "codex:2026-08-05",
+            "2026-08-05",
+            "snapshot.retention_would_prune",
+            10,
+            10,
+            "a" * 64,
+            "owner_acknowledgement_required",
+        ),
+    )
+    await current.commit()
+    await current.close()
+
+    # This is the exact schema gate used by merged generation
+    # d7272d489873faa5ed84c81734636ffc8cecb095 (SCHEMA_VERSION = 23).
+    previous = await aiosqlite.connect(path)
+    await apply_pragmas(previous)
+    version_row = await (await previous.execute("PRAGMA user_version")).fetchone()
+    assert version_row is not None and version_row[0] == 23
+    if version_row[0] > 23:
+        raise RuntimeError("previous merged v23 runtime would refuse this database")
+    snapshot = await (
+        await previous.execute(
+            "SELECT system, snapshot_date, data FROM system_snapshots"
+        )
+    ).fetchone()
+    assert snapshot == ("codex", "2026-08-05", '{"state":"preserved"}')
+    await previous.execute(
+        "INSERT INTO system_snapshots (system, snapshot_date, data) VALUES (?, ?, ?)",
+        ("cc", "2026-08-05", '{"state":"legacy-write"}'),
+    )
+    await previous.commit()
+    await previous.close()
+
+    readback = await open_db(path)
+    refusal_count = await (
+        await readback.execute("SELECT COUNT(*) FROM snapshot_refusals")
+    ).fetchone()
+    snapshot_count = await (
+        await readback.execute("SELECT COUNT(*) FROM system_snapshots")
+    ).fetchone()
+    assert refusal_count is not None and refusal_count[0] == 1
+    assert snapshot_count is not None and snapshot_count[0] == 2
+    await readback.close()
 
 
 async def test_open_db_creates_parent_dirs(tmp_path: Path) -> None:
@@ -550,6 +620,33 @@ async def test_authority_recovery_tables_exist(db: aiosqlite.Connection) -> None
         "handoff_cancellation_receipts",
         "handoff_trust_quarantine",
     }
+
+
+async def test_v22_migration_adds_session_capability_ledgers(
+    tmp_path: Path,
+) -> None:
+    db = await open_db(tmp_path / "v22.db")
+    try:
+        await db.execute("DROP TABLE handoff_orphan_recovery_receipts")
+        await db.execute("DROP TABLE handoff_session_capabilities")
+        await db.execute("PRAGMA user_version = 22")
+        await db.commit()
+
+        await ensure_schema(db)
+
+        version = await (await db.execute("PRAGMA user_version")).fetchone()
+        assert version is not None and version[0] == SCHEMA_VERSION
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name IN "
+            "('handoff_session_capabilities', 'handoff_orphan_recovery_receipts')"
+        )
+        assert {row["name"] for row in await cursor.fetchall()} == {
+            "handoff_session_capabilities",
+            "handoff_orphan_recovery_receipts",
+        }
+    finally:
+        await db.close()
 
 
 # ── source_trust provenance (v6 → v7) ──────────────────────────────────────
@@ -1069,9 +1166,10 @@ async def test_migration_v13_to_v14_collapses_shipped_tables_losslessly(
     manifest_path = tmp_path / "v13.db.pre-v14.bak.sha256"
     metadata_path = tmp_path / "v13.db.pre-v14.bak.meta.json"
     assert backup_path.exists()
-    assert manifest_path.read_text(encoding="utf-8").strip() == hashlib.sha256(
-        backup_path.read_bytes()
-    ).hexdigest()
+    assert (
+        manifest_path.read_text(encoding="utf-8").strip()
+        == hashlib.sha256(backup_path.read_bytes()).hexdigest()
+    )
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["schema"] == "MigrationBackupEvidenceV1"
     assert metadata["source_schema_version"] == 13

@@ -2,6 +2,52 @@
 
 All notable changes to bridge-db are documented here.
 
+## [Unreleased] — 2026-08-05
+
+### Added — bounded shared local runtime
+
+- **Opt-in broker:** `BRIDGE_DB_TRANSPORT_MODE=shared` keeps client-facing
+  stdio while thin shell relays share one credential- and generation-bound
+  broker over an owner-only Unix socket. Direct mode remains the default and
+  exact rollback; existing transports are never disconnected.
+- **Lifecycle controls:** private relay identity leases, generation isolation,
+  serialized cross-session database access, a 10-second startup ceiling, and a
+  300-second no-client idle ceiling bound broker residency without process
+  signaling or a LaunchAgent. The socket-owning broker publishes its own
+  PID/start-identity receipt after startup, so orphan or foreign sockets cannot
+  be adopted as a successful launch.
+- **Request isolation:** each relay receives a distinct mode-`0400` curl header
+  file; every broker request validates the exact live PID/start identity, lease,
+  header bytes, and capability hash, while lifecycle scans retain the same
+  identity gate and the secret stays out of argv, logs, leases, history, and
+  receipts. Broker grouping binds the
+  full effective launch contract, including
+  auth mode and database/evidence targets, rather than token and generation
+  alone.
+- **Residency truth:** `BridgeMcpTenancyInventoryV2` separates live
+  identity-matched processes and current RSS from stale lease files and their
+  last-observed RSS, preserves multiple leases sharing a reused PID, and
+  prevents historical lease values from presenting as current machine pressure.
+  `BridgeSharedRuntimeInventoryV1` adds no-secret broker/socket/client adoption
+  readback. `BridgeSharedRuntimeReadinessV1` separately binds shared-mode health
+  to the exact current launch group, broker PID/start identity, receipt, and
+  socket, so an unrelated active group cannot make readiness green.
+
+### Added — same-role handoff ownership
+
+- **Schema v23**: adds hash-only, one-time handoff session capabilities and
+  append-only orphan-recovery receipts. Existing active rows migrate without a
+  fabricated capability and use the audited legacy recovery path.
+- **Pickup/completion contract**: `pick_up_handoff` mints a 24-hour capability
+  bound to the handoff, claimant session, role, and `clear` transition;
+  `clear_handoff` requires and atomically consumes the exact capability while
+  preserving channel-bound role authorization.
+- **Fail-closed outcomes**: same-role calls without the claiming session's
+  bearer value, wrong project/handoff, expiry, replay, recovered state, and
+  malformed tokens return explicit reason codes without clearing work.
+- **Operator recovery**: `--recover-orphaned-handoff` uses an exact-row TTY
+  ceremony for expired or legacy active claims and writes a durable receipt.
+
 ## [Unreleased] — 2026-06-20
 
 ### Added — CAS and provenance hardening

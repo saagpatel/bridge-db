@@ -2,22 +2,16 @@
 
 import json
 import logging
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from bridge_db import clock, config
+from bridge_db import clock
 from bridge_db.audit import log_audit
 from bridge_db.auth import clamp_source_trust, require_bound_caller, require_caller
-from bridge_db.capacity import encode_bounded_json
-from bridge_db.db import (
-    fts_text_for_snapshot,
-    gc_fts_orphans,
-    get_db,
-    upsert_fts_entry,
-)
+from bridge_db.db import get_db
 from bridge_db.instruction_boundary import instruction_boundary
 from bridge_db.models import (
     SNAPSHOT_SYSTEM_MAP,
@@ -25,85 +19,19 @@ from bridge_db.models import (
     SourceTrust,
     snapshot_ownership_error,
 )
+from bridge_db.snapshot_service import (
+    SnapshotRefusalDecision,
+    SnapshotRetentionPolicy,
+    acknowledge_snapshot_refusal_record,
+    save_snapshot_record,
+    snapshot_capacity,
+    snapshot_family,
+)
 
 logger = logging.getLogger("bridge_db.tools.snapshots")
 
-SnapshotRetentionPolicy = Literal["preserve_existing", "prune_oldest"]
-
-
 def _utc_snapshot_date() -> str:
     return clock.now().date().isoformat()
-
-
-def _snapshot_family(system: str, data: dict[str, Any]) -> str:
-    if system != "codex":
-        return "default"
-    if {"infrastructure", "automation_digest", "active_projects"}.issubset(data):
-        return "operating"
-    if "consulted_node" in data:
-        return "consulted_node"
-    return "other"
-
-
-def _decode_snapshot_data(raw_data: str) -> dict[str, Any]:
-    try:
-        parsed_data = cast(object, json.loads(raw_data))
-    except json.JSONDecodeError:
-        parsed_data = {}
-    if not isinstance(parsed_data, dict):
-        return {}
-    return {
-        str(key): value for key, value in cast(dict[object, Any], parsed_data).items()
-    }
-
-
-async def _snapshot_family_count(db: Any, *, system: str, family: str) -> int:
-    cursor = await db.execute(
-        "SELECT data FROM system_snapshots WHERE system = ?",
-        (system,),
-    )
-    rows = await cursor.fetchall()
-    return sum(
-        1
-        for row in rows
-        if _snapshot_family(system, _decode_snapshot_data(row["data"])) == family
-    )
-
-
-async def _prune_snapshots(db: Any, *, system: str) -> list[tuple[int, str]]:
-    """Delete over-retention snapshots; return (id, family) of each pruned row.
-
-    Returned so save_snapshot can emit a prune audit line — snapshots are
-    instruction-bearing rows, and BD-INV-1's philosophy is that no prune is
-    silent (activity prunes have audited since the durable-ledger work).
-    """
-    cursor = await db.execute(
-        """
-        SELECT id, data
-        FROM system_snapshots
-        WHERE system = ?
-        ORDER BY created_at DESC, id DESC
-        """,
-        (system,),
-    )
-    rows = await cursor.fetchall()
-
-    seen_by_family: dict[str, int] = {}
-    pruned: list[tuple[int, str]] = []
-    for row in rows:
-        data = _decode_snapshot_data(row["data"])
-        family = _snapshot_family(system, data)
-        seen_by_family[family] = seen_by_family.get(family, 0) + 1
-        if seen_by_family[family] > config.SNAPSHOT_RETENTION_PER_SYSTEM:
-            pruned.append((row["id"], family))
-
-    if pruned:
-        placeholders = ",".join("?" for _ in pruned)
-        await db.execute(
-            f"DELETE FROM system_snapshots WHERE id IN ({placeholders})",
-            [row_id for row_id, _ in pruned],
-        )
-    return pruned
 
 
 def register(mcp: FastMCP) -> None:
@@ -165,125 +93,125 @@ def register(mcp: FastMCP) -> None:
                 "'preserve_existing' or 'prune_oldest'"
             )
 
-        snapshot_json = encode_bounded_json(
-            data,
-            maximum_bytes=config.SNAPSHOT_JSON_MAX_BYTES,
-            maximum_depth=config.SNAPSHOT_JSON_MAX_DEPTH,
-            maximum_nodes=config.SNAPSHOT_JSON_MAX_NODES,
-            code_prefix="snapshot",
-        )
         db = get_db(ctx)
         snap_date = snapshot_date or _utc_snapshot_date()
-        family = _snapshot_family(system, data)
-        retention_limit = config.SNAPSHOT_RETENTION_PER_SYSTEM
-        preserve_existing = retention_policy == "preserve_existing"
-
         try:
-            if preserve_existing:
-                await db.execute("BEGIN IMMEDIATE")
-                family_count = await _snapshot_family_count(
-                    db, system=system, family=family
-                )
-                if family_count >= retention_limit:
-                    await db.rollback()
-                    # BD-INV-1's philosophy is that no prune is silent. A refusal
-                    # to write is the same class of event: it changes what the
-                    # ledger will contain. Without this line a saturated family
-                    # is invisible in the audit log, so a caller that does not
-                    # inspect `ok` cannot be distinguished after the fact from a
-                    # caller that never wrote at all.
-                    log_audit(
-                        "save_snapshot.refused",
-                        caller,
-                        None,
-                        ok=False,
-                        detail=(
-                            f"reason=snapshot.retention_would_prune system={system} "
-                            f"family={family} retained={family_count} "
-                            f"limit={retention_limit} date={snap_date}"
-                        ),
-                    )
-                    logger.warning(
-                        "snapshot refused: system=%s family=%s retained=%d limit=%d "
-                        "(no write performed; caller must check ok)",
-                        system,
-                        family,
-                        family_count,
-                        retention_limit,
-                    )
-                    return {
-                        "ok": False,
-                        "reason_code": "snapshot.retention_would_prune",
-                        "mutation_performed": False,
-                        "snapshot_id": None,
-                        "system": system,
-                        "snapshot_family": family,
-                        "snapshot_date": snap_date,
-                        "source_trust": source_trust,
-                        "source_trust_clamped": source_trust_clamped,
-                        "retention_policy": retention_policy,
-                        "retention_limit": retention_limit,
-                        "retained_count": family_count,
-                        "would_prune_count": family_count + 1 - retention_limit,
-                        "pruned_count": 0,
-                    }
-
-            cursor = await db.execute(
-                """
-                INSERT INTO system_snapshots (system, snapshot_date, data, source_trust)
-                VALUES (?, ?, ?, ?)
-                """,
-                (system, snap_date, snapshot_json, source_trust),
+            result = await save_snapshot_record(
+                db,
+                caller=caller,
+                system=system,
+                data=data,
+                snapshot_date=snap_date,
+                source_trust=source_trust,
+                retention_policy=retention_policy,
             )
-            snapshot_id = cursor.lastrowid
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
 
-            if snapshot_id is not None:
-                await upsert_fts_entry(
-                    db,
-                    "snapshot",
-                    str(snapshot_id),
-                    fts_text_for_snapshot(snapshot_json),
-                )
+        result["source_trust_clamped"] = source_trust_clamped
+        if not result["ok"]:
+            log_audit(
+                "save_snapshot.refused",
+                caller,
+                None,
+                ok=False,
+                detail=(
+                    f"reason={result['reason_code']} refusal_id={result['refusal_id']} "
+                    f"system={system} family={result['snapshot_family']} "
+                    f"retained={result['retained_count']} "
+                    f"limit={result['retention_limit']} date={snap_date} "
+                    f"next_state={result['next_state']}"
+                ),
+            )
+            logger.warning(
+                "snapshot refused: system=%s family=%s refusal_id=%s next_state=%s",
+                system,
+                result["snapshot_family"],
+                result["refusal_id"],
+                result["next_state"],
+            )
+            return result
 
-            if preserve_existing:
-                pruned: list[tuple[int, str]] = []
-            else:
-                pruned = await _prune_snapshots(db, system=system)
-                await gc_fts_orphans(db, "snapshot")
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
-
-        if pruned:
-            pruned_ids = [row_id for row_id, _ in pruned]
-            pruned_families = sorted({family for _, family in pruned})
+        if result["pruned_count"]:
             log_audit(
                 "save_snapshot.prune",
                 caller,
                 None,
                 ok=True,
                 detail=(
-                    f"pruned={len(pruned)} ids={pruned_ids} "
-                    f"families={pruned_families} system={system}"
+                    f"pruned={result['pruned_count']} ids={result['pruned_ids']} "
+                    f"families={result['pruned_families']} system={system}"
                 ),
             )
         logger.info(
-            "snapshot saved: system=%s id=%d date=%s", system, snapshot_id, snap_date
+            "snapshot saved: system=%s id=%s date=%s",
+            system,
+            result["snapshot_id"],
+            snap_date,
         )
+        return result
+
+    @mcp.tool()
+    async def get_snapshot_capacity(
+        caller: Annotated[CallerID, Field(description="Must be 'cc' or 'codex'")],
+        data: Annotated[
+            dict[str, Any],
+            Field(description="Prospective snapshot object used to select its family"),
+        ],
+        ctx: Context = None,  # type: ignore[assignment]
+    ) -> dict[str, Any]:
+        """Return owner/family capacity before a snapshot write is attempted."""
+        require_bound_caller(ctx, caller, tool="get_snapshot_capacity")
+        system = SNAPSHOT_SYSTEM_MAP.get(caller)
+        if system is None:
+            raise ToolError(snapshot_ownership_error(caller))
+        family = snapshot_family(system, data)
+        capacity = await snapshot_capacity(get_db(ctx), system=system, family=family)
         return {
             "ok": True,
-            "snapshot_id": snapshot_id,
-            "system": system,
-            "snapshot_date": snap_date,
-            "source_trust": source_trust,
-            "source_trust_clamped": source_trust_clamped,
-            "snapshot_family": family,
-            "mutation_performed": True,
-            "retention_policy": retention_policy,
-            "retention_limit": retention_limit,
-            "pruned_count": len(pruned),
+            "caller": caller,
+            **capacity.to_dict(),
+            "mutation_performed": False,
         }
+
+    @mcp.tool()
+    async def acknowledge_snapshot_refusal(
+        caller: Annotated[CallerID, Field(description="Must own the refusal")],
+        refusal_id: Annotated[int, Field(ge=1, description="Exact durable refusal ID")],
+        decision: Annotated[
+            SnapshotRefusalDecision,
+            Field(
+                description=(
+                    "Owner decision: preserve_history, retry_after_owner_action, "
+                    "or superseded. No decision grants deletion authority."
+                )
+            ),
+        ],
+        ctx: Context = None,  # type: ignore[assignment]
+    ) -> dict[str, Any]:
+        """Acknowledge an exact refusal and publish its next state."""
+        require_caller(ctx, caller, tool="acknowledge_snapshot_refusal")
+        require_bound_caller(ctx, caller, tool="acknowledge_snapshot_refusal")
+        try:
+            result = await acknowledge_snapshot_refusal_record(
+                get_db(ctx),
+                caller=caller,
+                refusal_id=refusal_id,
+                decision=decision,
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        log_audit(
+            "acknowledge_snapshot_refusal",
+            caller,
+            None,
+            ok=bool(result["ok"]),
+            detail=(
+                f"refusal_id={refusal_id} decision={decision} "
+                f"reason={result.get('reason_code')} next_state={result.get('next_state')}"
+            ),
+        )
+        return result
 
     @mcp.tool()
     async def get_latest_snapshot(

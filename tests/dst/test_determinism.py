@@ -38,6 +38,7 @@ async def _run_scenario(db_path: Path, seed: int) -> tuple[str, bytes]:
     """
     sim_clock = SimClock()
     rng = Random(seed)
+    capability_rng = Random(seed ^ 0x4843415031)
     trace: list[dict[str, Any]] = []
     sim = await open_sim_db(db_path, sim_clock, rng, trace)
     db = cast(aiosqlite.Connection, sim)
@@ -45,6 +46,9 @@ async def _run_scenario(db_path: Path, seed: int) -> tuple[str, bytes]:
     ctx = make_ctx(db, principal="claude_ai")
 
     clock.install(sim_clock.now)
+    handoffs_mod._install_capability_token_provider(  # pyright: ignore[reportPrivateUsage]
+        lambda size: capability_rng.randbytes(size).hex()
+    )
     try:
         created = await fns["create_handoff"](
             caller="claude_ai",
@@ -99,10 +103,15 @@ async def _run_scenario(db_path: Path, seed: int) -> tuple[str, bytes]:
         )
         assert picked["ok"] is True
         cleared = await fns["clear_handoff"](
-            caller="cc", project_name="SimProj", ctx=make_ctx(db, principal="cc")
+            caller="cc",
+            project_name="SimProj",
+            handoff_id=created["handoff_id"],
+            completion_capability=picked["completion_capability"],
+            ctx=make_ctx(db, principal="cc"),
         )
         assert cleared["cleared"] is True
     finally:
+        handoffs_mod._reset_capability_token_provider()  # pyright: ignore[reportPrivateUsage]
         clock.reset()
 
     await sim.execute("PRAGMA wal_checkpoint(TRUNCATE)")

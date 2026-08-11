@@ -163,6 +163,8 @@ async def test_active_filter_exposes_claimant(
     assert active[0]["project_name"] == "ClaimedProj"
     assert active[0]["claimed_by"] == "cc"
     assert active[0]["picked_up_at"] is not None
+    assert active[0]["claim_session_id"] == picked["claim_session_id"]
+    assert active[0]["capability_expires_at"] == picked["capability_expires_at"]
 
     both = await handoff_fns["get_pending_handoffs"](status="all", ctx=ctx)
     assert {r["project_name"] for r in both} == {"ClaimedProj", "StillPendingProj"}
@@ -180,13 +182,17 @@ async def test_cleared_rows_stay_excluded_from_all(
         (created["handoff_id"],),
     )
     await db.commit()
-    await handoff_fns["pick_up_handoff"](
+    picked = await handoff_fns["pick_up_handoff"](
         caller="cc",
         handoff_id=created["handoff_id"],
         ctx=make_ctx(db, principal="cc"),
     )
     cleared = await handoff_fns["clear_handoff"](
-        caller="cc", project_name="DoneProj", ctx=make_ctx(db, principal="cc")
+        caller="cc",
+        project_name="DoneProj",
+        handoff_id=created["handoff_id"],
+        completion_capability=picked["completion_capability"],
+        ctx=make_ctx(db, principal="cc"),
     )
     assert cleared["cleared"] is True
     both = await handoff_fns["get_pending_handoffs"](status="all", ctx=ctx)

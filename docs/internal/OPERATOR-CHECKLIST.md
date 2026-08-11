@@ -217,7 +217,11 @@ that motivated it):
   The default `save_snapshot(..., retention_policy="preserve_existing")` path
   serializes the family-capacity check and insert, accepts only when no prune
   is required, and otherwise returns
-  `snapshot.retention_would_prune` with `mutation_performed=false`. Do not retry
+  `snapshot.retention_would_prune` with `mutation_performed=false`, a durable
+  `refusal_id`, and an explicit next state. Inspect capacity first with
+  `get_snapshot_capacity`, then acknowledge the exact refusal through the same
+  owner channel with `acknowledge_snapshot_refusal`. Acknowledgement does not
+  authorize deletion. Do not retry
   with `retention_policy="prune_oldest"` unless snapshot deletion has been
   separately authorized.
 - A shipped event's downstream proof and policy dispositions now live on the

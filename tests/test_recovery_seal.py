@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -96,6 +98,47 @@ async def test_successful_seal_rotates_once_and_publishes_verified_receipt(
     assert inventory["unsealed_count"] == 0
     assert inventory["open_count"] == 0
     assert inventory["latest"]["batch_id"] == "codex-20260730-001"
+
+
+async def test_successful_seal_replaces_verified_older_schema_anchor(
+    tmp_path: Path,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    anchor = recovery.recovery_anchor_path(db_path)
+    database = anchor / recovery.RECOVERY_DATABASE_NAME
+    prior_schema_version = SCHEMA_VERSION - 1
+    with sqlite3.connect(database) as changed:
+        changed.execute(f"PRAGMA user_version = {prior_schema_version}")
+    manifest_path = anchor / recovery.RECOVERY_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_schema_version"] = prior_schema_version
+    manifest["backup_bytes"] = database.stat().st_size
+    manifest["sha256"] = hashlib.sha256(database.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = recovery_seal.seal_recovery_batch(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+        batch_id="schema-transition-001",
+        owner="codex",
+    )
+
+    assert result["outcome"] == "recovery_sealed"
+    assert result["reason_code"] == "verified_current_anchor"
+    assert result["rotated"] is True
+    assert result["ready"] is True
+    assert result["source_current"] is True
+    assert result["superseded_sha256"] == manifest["sha256"]
+    inventory = recovery_seal.recovery_seal_inventory(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    assert inventory["state"] == "verified"
+    assert inventory["ready"] is True
 
 
 async def test_repeated_seal_replays_one_terminal_receipt(

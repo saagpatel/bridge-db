@@ -17,7 +17,8 @@ from bridge_db import clock, config
 logger = logging.getLogger("bridge_db.db")
 
 # Schema version — increment when adding migrations
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
+SNAPSHOT_REFUSAL_EXTENSION_SCHEMA = "BridgeSnapshotRefusalSchemaV1"
 
 # A migration post-hook runs after its DDL, before the version bump+commit
 # (e.g. FTS repopulation). Its return value is ignored.
@@ -150,6 +151,38 @@ CREATE TABLE IF NOT EXISTS handoff_trust_quarantine (
     restored_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS handoff_session_capabilities (
+    handoff_id INTEGER PRIMARY KEY REFERENCES pending_handoffs(id),
+    session_id TEXT NOT NULL UNIQUE,
+    token_sha256 TEXT NOT NULL UNIQUE CHECK(length(token_sha256) = 64),
+    claimed_caller TEXT NOT NULL CHECK(claimed_caller IN ('cc', 'codex')),
+    allowed_transition TEXT NOT NULL CHECK(allowed_transition = 'clear'),
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    recovered_at TEXT,
+    CHECK(consumed_at IS NULL OR recovered_at IS NULL)
+);
+
+CREATE INDEX IF NOT EXISTS idx_handoff_capability_expiry
+    ON handoff_session_capabilities(expires_at)
+    WHERE consumed_at IS NULL AND recovered_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS handoff_orphan_recovery_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    handoff_id INTEGER NOT NULL UNIQUE,
+    reason TEXT NOT NULL CHECK(length(trim(reason)) > 0),
+    recovery_basis TEXT NOT NULL
+        CHECK(recovery_basis IN ('legacy_without_capability', 'expired_capability')),
+    previous_status TEXT NOT NULL CHECK(previous_status = 'active'),
+    previous_claimant TEXT NOT NULL,
+    claim_session_id TEXT,
+    capability_expires_at TEXT,
+    reviewed_row_sha256 TEXT NOT NULL,
+    recovered_by TEXT NOT NULL CHECK(recovered_by = 'operator-cli'),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
 CREATE TABLE IF NOT EXISTS write_conflicts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     surface TEXT NOT NULL CHECK(surface IN ('context_section', 'markdown_sync', 'handoff')),
@@ -218,6 +251,26 @@ CREATE TABLE IF NOT EXISTS system_snapshots (
 );
 
 CREATE INDEX IF NOT EXISTS idx_snapshot_system ON system_snapshots(system, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS snapshot_refusals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    caller TEXT NOT NULL CHECK(caller IN ('cc', 'codex')),
+    system TEXT NOT NULL CHECK(system IN ('cc', 'codex')),
+    snapshot_family TEXT NOT NULL,
+    snapshot_date TEXT NOT NULL,
+    reason_code TEXT NOT NULL CHECK(reason_code = 'snapshot.retention_would_prune'),
+    retained_count INTEGER NOT NULL CHECK(retained_count >= 0),
+    retention_limit INTEGER NOT NULL CHECK(retention_limit >= 1),
+    payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256) = 64),
+    acknowledgement_state TEXT CHECK(acknowledgement_state IS NULL OR acknowledgement_state IN ('preserve_history', 'retry_after_owner_action', 'superseded')),
+    acknowledged_by TEXT CHECK(acknowledged_by IS NULL OR acknowledged_by IN ('cc', 'codex')),
+    next_state TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    acknowledged_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_snapshot_refusals_owner_state
+    ON snapshot_refusals(caller, acknowledgement_state, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS pending_handoffs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -673,6 +726,66 @@ CREATE TABLE IF NOT EXISTS handoff_trust_quarantine (
 );
 """
 
+_MIGRATION_V22_TO_V23 = """
+CREATE TABLE IF NOT EXISTS handoff_session_capabilities (
+    handoff_id INTEGER PRIMARY KEY REFERENCES pending_handoffs(id),
+    session_id TEXT NOT NULL UNIQUE,
+    token_sha256 TEXT NOT NULL UNIQUE CHECK(length(token_sha256) = 64),
+    claimed_caller TEXT NOT NULL CHECK(claimed_caller IN ('cc', 'codex')),
+    allowed_transition TEXT NOT NULL CHECK(allowed_transition = 'clear'),
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    recovered_at TEXT,
+    CHECK(consumed_at IS NULL OR recovered_at IS NULL)
+);
+
+CREATE INDEX IF NOT EXISTS idx_handoff_capability_expiry
+    ON handoff_session_capabilities(expires_at)
+    WHERE consumed_at IS NULL AND recovered_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS handoff_orphan_recovery_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    handoff_id INTEGER NOT NULL UNIQUE,
+    reason TEXT NOT NULL CHECK(length(trim(reason)) > 0),
+    recovery_basis TEXT NOT NULL
+        CHECK(recovery_basis IN ('legacy_without_capability', 'expired_capability')),
+    previous_status TEXT NOT NULL CHECK(previous_status = 'active'),
+    previous_claimant TEXT NOT NULL,
+    claim_session_id TEXT,
+    capability_expires_at TEXT,
+    reviewed_row_sha256 TEXT NOT NULL,
+    recovered_by TEXT NOT NULL CHECK(recovered_by = 'operator-cli'),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+"""
+
+# BridgeSnapshotRefusalSchemaV1 is deliberately additive over the core schema.
+# Existing v23 databases from the exact previous merged generation receive this
+# table without advancing user_version, so pointer rollback keeps its core upper
+# bound while preserving refusal rows for roll-forward.
+_SNAPSHOT_REFUSAL_EXTENSION_DDL = """
+CREATE TABLE IF NOT EXISTS snapshot_refusals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    caller TEXT NOT NULL CHECK(caller IN ('cc', 'codex')),
+    system TEXT NOT NULL CHECK(system IN ('cc', 'codex')),
+    snapshot_family TEXT NOT NULL,
+    snapshot_date TEXT NOT NULL,
+    reason_code TEXT NOT NULL CHECK(reason_code = 'snapshot.retention_would_prune'),
+    retained_count INTEGER NOT NULL CHECK(retained_count >= 0),
+    retention_limit INTEGER NOT NULL CHECK(retention_limit >= 1),
+    payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256) = 64),
+    acknowledgement_state TEXT CHECK(acknowledgement_state IS NULL OR acknowledgement_state IN ('preserve_history', 'retry_after_owner_action', 'superseded')),
+    acknowledged_by TEXT CHECK(acknowledged_by IS NULL OR acknowledged_by IN ('cc', 'codex')),
+    next_state TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    acknowledged_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_snapshot_refusals_owner_state
+    ON snapshot_refusals(caller, acknowledgement_state, created_at DESC);
+"""
+
 # Column definitions for the v14 ADD COLUMN step. Kept character-identical to the
 # activity_log block in _SCHEMA_DDL so a fresh install and a migrated DB converge
 # (see tests/test_schema_convergence_concurrency.py). NOTE: the synced/policy
@@ -776,7 +889,11 @@ async def _backup_db_file(db: aiosqlite.Connection, label: str) -> None:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as check:
             integrity = check.execute("PRAGMA integrity_check").fetchone()
             backup_version = int(check.execute("PRAGMA user_version").fetchone()[0])
-        if integrity is None or integrity[0] != "ok" or backup_version != expected_version:
+        if (
+            integrity is None
+            or integrity[0] != "ok"
+            or backup_version != expected_version
+        ):
             raise RuntimeError(
                 f"migration backup {path} failed SQLite/version verification; "
                 "refusing destructive migration"
@@ -1053,6 +1170,7 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         (20, _MIGRATION_V19_TO_V20, None),
         (21, _MIGRATION_V20_TO_V21, _migrate_conflict_aggregation),
         (22, _MIGRATION_V21_TO_V22, None),
+        (23, _MIGRATION_V22_TO_V23, None),
     ]
     for target, ddl, post_hook in migrations:
         if current_version >= target:
@@ -1070,6 +1188,11 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         raise RuntimeError(
             f"Migration ladder ended at v{current_version}, expected v{SCHEMA_VERSION}"
         )
+    # Snapshot refusals are an additive v1 extension over the v23 core schema.
+    # Exact previous merged generation d7272d4 safely ignores and preserves it.
+    if not await _table_exists(db, "snapshot_refusals"):
+        await db.executescript(_SNAPSHOT_REFUSAL_EXTENSION_DDL)
+        await db.commit()
     logger.debug("Schema at v%d", current_version)
 
 

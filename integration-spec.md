@@ -107,6 +107,70 @@ observability tools `recall_stats`, `audit_tail`, and `get_write_conflicts`.
 This exact `uv`-based stdio launch path is the documented local target and has been
 validated in the current setup.
 
+The convergence target is the immutable launcher at
+`<private-runtime-root>/current/bin/bridge-db-mcp`. Each client must use that
+same pointer after controlled activation; a mutable checkout remains supported
+for development but `health`/`status` label it `mutable_direct_path`, not a
+verified installed generation. Staging, rollback, drain, and no-secret-output
+Codex binding are specified in
+`docs/internal/EXECUTION-GENERATIONS.md`.
+
+Generation verification is exact-tree and fail-closed: unexpected bytes,
+owner/mode drift, interpreter drift, source-copy races, and generation-ID
+mismatch are non-green. The external interpreter executable is digest-bound, and
+shared broker readiness requires current `BridgeRuntimeDependencyEvidenceV1` for
+the declared project runtime dependency closure. That evidence binds installed
+distribution files for `aiosqlite`, `mcp`, `pydantic`, `uvicorn`, and their
+relevant transitive packages by path, identity metadata, mtime/ctime, and
+SHA-256. The collector holds no-follow descriptors open through digesting and
+revalidates every configured and resolved path against the still-open complete
+file set before accepting evidence. Packages outside the authenticated set, the
+standard library, shared libraries, and OS runtime remain outside the claim;
+lockfile binding is not a managed environment-convergence claim.
+
+Each direct MCP process and each shared broker publishes a private
+owner/principal/generation lease with request timing, lifecycle reason, PID
+ancestry, and RSS. Inventory V2 distinguishes live identity-bound processes,
+stale lease records, unknown process state, current RSS, and the historical RSS
+last persisted in each lease. Health/status expose a separate readiness claim
+for that inventory and fail closed for missing, unverified, stale, or unknown
+tenancy evidence before reporting top-level green health. Obsolete generations
+refuse new requests, finish active requests, and cooperatively cancel their own
+server task. Lifecycle apply is exact-target and cannot terminate another
+process. Forward activation requires a private
+`BridgeMcpTenancyActivationEvidenceV1` bundle, recomputes the policy from its
+exact replay rows, and requires the documented client and lifecycle-scenario
+coverage for the exact requested generation before any pointer write. Rollback
+remains the safety path and does not require new replay evidence. Snapshot
+refusal storage stays an additive extension over core SQLite
+`user_version=23`, preserving open/read compatibility with exact previous
+merged generation `d7272d489873faa5ed84c81734636ffc8cecb095`; rollback loses
+the refusal API until roll-forward but does not discard its rows. Activation or
+rollback calls the owning recovery lifecycle verification and requires current
+verified anchor/seal evidence after any pending-journal recovery. Missing,
+stale, invalid, or unsealed evidence prevents a new pointer mutation.
+
+Claude Code `/Users/d/.claude.json` and Claude Desktop
+`/Users/d/Library/Application Support/Claude/claude_desktop_config.json` converge
+through `bridge_db.client_rebinding`: only the exact legacy `bridge-db`
+command/args are changed, environment values are preserved without output, and
+each target gets a private exact-byte backup plus digest-bound restore. Codex
+uses the source-owned `config/bridge-db-mcp-immutable` install input, which
+parses the two required credential keys plus the optional reviewed
+`BRIDGE_DB_TRANSPORT_MODE=direct|shared` key. `direct` is the default and exact
+rollback. In `shared` mode, no-argument MCP launches remain stdio to the client
+but exec a Python relay to one credential- and complete-launch-contract-bound
+broker over an owner-only Unix socket. The wrapper pins broker launches to the
+stable launcher path. Broker receipts carry a credential-bound HMAC and the
+published socket identity. Each relay renews a short-lived one-use request
+capability in process memory, verifies the connected socket identity against
+the authenticated receipt, and omits the value from argv, durable header files,
+logs, socket names, leases, and receipts. CLI operations such as `--checkpoint`
+always bypass the relay and execute directly.
+The checkpoint LaunchAgent input invokes that same launcher with `--checkpoint`
+through the existing receipt wrapper. Live installation and reconnect/reload
+remain separate governed effects.
+
 ### vibe-code-handoff (updated workflow)
 
 **Fallback (file-based):**
@@ -142,6 +206,15 @@ Claude Code's `/start` skill already reads `mcp__bridge_db__get_pending_handoffs
 it now runs `mcp__bridge_db__sync_from_file()` first, then reads pending handoffs.
 The handoff appears immediately in the next CC session.
 
+After operator promotion, `pick_up_handoff` returns the exact `handoff_id` plus a
+one-time `completion_capability` and non-secret `claim_session_id` / expiry. The
+claiming session keeps the bearer value in context and passes it back to
+`clear_handoff`; it must not serialize it into the fallback file, `HANDOFF.md`,
+logs, or durable memory. A different same-role session sees the active claim and
+expiry but cannot complete it. Missing or wrong capability evidence fails closed.
+After expiry, an operator can retire a genuinely orphaned claim only through the
+TTY-gated `--recover-orphaned-handoff` ceremony, which records a durable receipt.
+
 ### weekly-review (updated workflow)
 
 **Fallback (file-based):**
@@ -169,6 +242,16 @@ under-limit write returns `retention_policy="preserve_existing"` and
 `mutation_performed=false` without inserting, pruning, or garbage-collecting
 snapshot FTS rows. The caller must not retry without a separate decision that
 explicitly permits `retention_policy="prune_oldest"`.
+
+Snapshot owners should call `get_snapshot_capacity(caller=..., data=...)`
+before assembling a write. A preserve-mode capacity refusal returns a durable
+`refusal_id`, `acknowledgement_required=true`, and an explicit `next_state`.
+The same bound owner must call `acknowledge_snapshot_refusal` with its decision;
+foreign principals cannot acknowledge it, and no acknowledgement authorizes
+history deletion. Unacknowledged refusals remain visible in `health` and
+`status`. The private Codex seed and one-time empty-system markdown migration
+use this same admission service, so there is no repository-owned direct writer
+that can silently prune snapshot history.
 
 `get_pending_handoffs` is a bounded paged read. It returns at most 100 rows by
 default (maximum 200); pass the last returned `id` as `before_id` to fetch the
@@ -359,8 +442,8 @@ cleanup, clears degradation, or rewrites historical records.
 
 | Principal | Write capabilities | Boundaries |
 |---|---|---|
-| `codex` | `log_activity(caller="codex")`, `save_snapshot(caller="codex")`, `record_cost(caller="codex")`, source-owned `record_disposition(caller="codex")`, `pick_up_handoff`/`clear_handoff` where their gates allow it, and scoped CLI `--seal-recovery-batch` | Owns Codex truth and verification; a recovery seal proves the complete current image but does not authorize writing or refreshing `cc` snapshots or Claude.ai sections |
-| `cc` | `log_activity(caller="cc")`, `save_snapshot(caller="cc")`, `record_cost(caller="cc")`, source-owned `record_disposition(caller="cc")`, `pick_up_handoff`/`clear_handoff` where their gates allow it, and scoped CLI `--seal-recovery-batch` | Owns Claude Code state and session telemetry; a recovery seal proves the complete current image but does not authorize writing Codex snapshots or Claude.ai sections |
+| `codex` | `log_activity(caller="codex")`, `get_snapshot_capacity` / `save_snapshot` / owner-bound `acknowledge_snapshot_refusal`, `record_cost(caller="codex")`, source-owned `record_disposition(caller="codex")`, `pick_up_handoff`/`clear_handoff` where their gates allow it, and scoped CLI `--seal-recovery-batch` | Owns Codex truth and verification; a recovery seal proves the complete current image but does not authorize writing or refreshing `cc` snapshots or Claude.ai sections |
+| `cc` | `log_activity(caller="cc")`, `get_snapshot_capacity` / `save_snapshot` / owner-bound `acknowledge_snapshot_refusal`, `record_cost(caller="cc")`, source-owned `record_disposition(caller="cc")`, `pick_up_handoff`/`clear_handoff` where their gates allow it, and scoped CLI `--seal-recovery-batch` | Owns Claude Code state and session telemetry; a recovery seal proves the complete current image but does not authorize writing Codex snapshots or Claude.ai sections |
 | `claude_ai` | `update_section` for `career`, `speaking`, `research`, and `capabilities`; channel-bound `create_handoff(caller="claude_ai")`; compatibility file edits to those four sections followed by `sync_from_file` | Advisory and dispatch surface; MCP handoffs cannot mint operator trust and must not act as local execution proof |
 | `notion_os` | `log_activity(caller="notion_os")`, `record_cost(caller="notion_os")`, `record_disposition(caller="notion_os")` | Owns Notion-side receipts/activity it actually verified; must not infer project mappings beyond `notion_sync` |
 | `personal_ops` | `log_activity(caller="personal_ops")`, `record_cost(caller="personal_ops")`, `record_disposition(caller="personal_ops")` | Owns operator-facing coordination receipts; must not replace repo-local or bridge-db verification |
@@ -408,14 +491,37 @@ seal directory.
 
 ---
 
-## No Daemon Needed
+## Direct and shared local runtimes
 
-Each MCP client (CC, Codex, Claude Desktop) launches its own `bridge-db` process via
-stdio. All processes share the same SQLite file at `~/.local/share/bridge-db/bridge.db`
-with WAL mode + `PRAGMA busy_timeout=15000` for concurrent writer waiting. Logical
-lost-update protection is handled by context-section CAS and handoff claim guards,
-not by WAL alone.
+The client-facing contract is always stdio. `BRIDGE_DB_TRANSPORT_MODE=direct`
+keeps one full `bridge-db` process per client. The opt-in `shared` mode keeps a
+small stdio relay per client and multiplexes requests through Streamable HTTP
+over a private Unix domain socket to one broker per credential and complete
+launch contract. The grouping contract binds the database, normalized auth
+mode, immutable generation/runtime source, principal registry, projection and
+audit/evidence paths, tenancy owner/root, logging, and idle policy. No TCP
+listener, LaunchAgent, secret in argv, or cross-principal/config broker is
+introduced.
 
-There is no shared bridge-db daemon, no HTTP transport, and no need for a LaunchAgent.
-The stdio model is client-managed: the server process lives exactly as long as the
-client session that spawned it.
+Relay references are private PID/start-identity leases. Every HTTP request also
+requires that relay's unique capability, minted in process memory and stored
+only as a lease hash. Authorization fails unless the current PID/start identity
+still matches the lease. The relay opens the Unix socket itself and verifies the
+connected path identity against the credential-authenticated broker receipt
+before sending the request, so a later pathname replacement cannot supply the
+response. The broker preserves stale reference history, serializes tool calls
+across session DB connections, and cooperatively exits 300 seconds after the
+last live relay disappears. It never signals another process. Broker startup
+fails closed after 10 seconds; setting the transport mode back to `direct` is
+the exact rollback and affects only future client spawns. Existing transports
+are never disconnected by this path. `BridgeSharedRuntimeInventoryV1` is
+available from health/status and `--shared-runtime-status` for aggregate
+no-secret readback. `BridgeSharedRuntimeReadinessV1` separately gates
+health/status on the exact current launch group, broker PID/start identity,
+credential-authenticated receipt, and connected socket identity, so unrelated
+group activity cannot make shared mode green.
+
+Both modes use the same SQLite file at `~/.local/share/bridge-db/bridge.db` with
+WAL mode + `PRAGMA busy_timeout=15000`. Logical lost-update protection remains
+the responsibility of context-section CAS and handoff claim guards, not WAL
+alone.
