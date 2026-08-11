@@ -179,7 +179,7 @@ uv run python -m bridge_db --restore-handoff-trust 42  # exact-row recovery
 python -m bridge_db.execution_generation readback --root <private-runtime-root>
 python -m bridge_db.tenancy derive-activation-evidence --observations <private-replay-observations.json> --generation-id <generation-id>
 python -m bridge_db.secure_binding --caller codex --secret-fd 3 --principals-path <path> --binding-path <path>
-python -m bridge_db.client_rebinding rebind --client claude-code --config-path /Users/d/.claude.json --backup-root <private-backup-root>
+python -m bridge_db.client_rebinding rebind --client claude-code --config-path ~/.claude.json --backup-root <private-backup-root>
 python -m bridge_db.tenancy status --root <private-tenancy-root>
 uv run python -m bridge_db          # start MCP server (stdio)
 uv run python -m bridge_db.migration  # migrate from bridge markdown
