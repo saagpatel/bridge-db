@@ -5,7 +5,7 @@ import logging
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
@@ -24,7 +24,10 @@ from bridge_db.evidence import (
     legacy_raw_query_inventory,
     migration_backup_inventory,
 )
-from bridge_db.execution_generation import runtime_generation_identity
+from bridge_db.execution_generation import (
+    RUNTIME_DEPENDENCY_STATE,
+    runtime_generation_identity,
+)
 from bridge_db.recovery import recovery_anchor_inventory
 from bridge_db.recovery_seal import recovery_seal_inventory
 from bridge_db.shared_runtime import (
@@ -57,6 +60,135 @@ SNAPSHOT_STALE_AFTER_HOURS = 48.0
 ACTIVITY_QUIET_AFTER_HOURS = 72.0
 PENDING_HANDOFF_STALE_AFTER_HOURS = 168.0
 ACTIVE_HANDOFF_STALE_AFTER_HOURS = 72.0
+
+
+def _nonnegative_int(value: object) -> int | None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return None
+    return value
+
+
+def _tenancy_readiness(tenancy: dict[str, Any]) -> dict[str, Any]:
+    """Fail closed when operator-facing health lacks current tenancy evidence.
+
+    Stale lease files and unknown process probes carry different operational
+    meanings, but neither can back a green automation-facing health claim.
+    """
+    state = tenancy.get("state")
+    if state == "missing":
+        return {
+            "schema": "BridgeMcpTenancyReadinessV1",
+            "ready": False,
+            "state": "missing",
+            "reason_code": "tenancy.inventory_missing",
+        }
+    if state == "unverified":
+        return {
+            "schema": "BridgeMcpTenancyReadinessV1",
+            "ready": False,
+            "state": "unverified",
+            "reason_code": tenancy.get("reason_code", "tenancy.inventory_unverified"),
+        }
+    if state != "observed":
+        return {
+            "schema": "BridgeMcpTenancyReadinessV1",
+            "ready": False,
+            "state": "unknown",
+            "reason_code": "tenancy.inventory_state_unknown",
+        }
+
+    stale_lease_count = _nonnegative_int(tenancy.get("stale_lease_count"))
+    unknown_process_count = _nonnegative_int(tenancy.get("unknown_process_count"))
+    process_states_raw = tenancy.get("process_states")
+    if not isinstance(process_states_raw, dict):
+        return {
+            "schema": "BridgeMcpTenancyReadinessV1",
+            "ready": False,
+            "state": "unverified",
+            "reason_code": "tenancy.inventory_counters_invalid",
+        }
+    process_states = cast(dict[object, object], process_states_raw)
+    missing_process_count = _nonnegative_int(process_states.get("missing"))
+    mismatched_process_count = _nonnegative_int(process_states.get("mismatch"))
+    unknown_process_state_count = _nonnegative_int(process_states.get("unknown"))
+    if (
+        stale_lease_count is None
+        or unknown_process_count is None
+        or missing_process_count is None
+        or mismatched_process_count is None
+        or unknown_process_state_count is None
+        or stale_lease_count != missing_process_count + mismatched_process_count
+        or unknown_process_count != unknown_process_state_count
+    ):
+        return {
+            "schema": "BridgeMcpTenancyReadinessV1",
+            "ready": False,
+            "state": "unverified",
+            "reason_code": "tenancy.inventory_counters_invalid",
+        }
+    if unknown_process_count > 0:
+        return {
+            "schema": "BridgeMcpTenancyReadinessV1",
+            "ready": False,
+            "state": "unknown",
+            "reason_code": "tenancy.unknown_process_evidence",
+            "unknown_process_count": unknown_process_count,
+            "stale_lease_count": stale_lease_count,
+        }
+    if stale_lease_count > 0:
+        return {
+            "schema": "BridgeMcpTenancyReadinessV1",
+            "ready": False,
+            "state": "stale",
+            "reason_code": "tenancy.stale_lease_evidence",
+            "unknown_process_count": unknown_process_count,
+            "stale_lease_count": stale_lease_count,
+        }
+    return {
+        "schema": "BridgeMcpTenancyReadinessV1",
+        "ready": True,
+        "state": "verified",
+        "reason_code": None,
+        "unknown_process_count": unknown_process_count,
+        "stale_lease_count": stale_lease_count,
+    }
+
+
+def _runtime_dependency_readiness(
+    runtime_generation: dict[str, Any],
+) -> dict[str, Any]:
+    if runtime_generation.get("state") != "verified":
+        return {
+            "schema": "BridgeRuntimeDependencyReadinessV1",
+            "ready": False,
+            "state": "unverified",
+            "reason_code": runtime_generation.get(
+                "reason_code", "generation.runtime_dependency_generation_unverified"
+            ),
+        }
+    if runtime_generation.get("dependency_environment_state") != RUNTIME_DEPENDENCY_STATE:
+        return {
+            "schema": "BridgeRuntimeDependencyReadinessV1",
+            "ready": False,
+            "state": "unverified",
+            "reason_code": "generation.runtime_dependency_claim_invalid",
+        }
+    if (
+        runtime_generation.get("runtime_dependency_state") != "verified"
+        or not isinstance(runtime_generation.get("runtime_dependency_sha256"), str)
+    ):
+        return {
+            "schema": "BridgeRuntimeDependencyReadinessV1",
+            "ready": False,
+            "state": "unverified",
+            "reason_code": "generation.runtime_dependency_evidence_missing",
+        }
+    return {
+        "schema": "BridgeRuntimeDependencyReadinessV1",
+        "ready": True,
+        "state": "verified",
+        "reason_code": None,
+    }
 
 
 def _utc_now() -> datetime:
@@ -172,6 +304,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     """
     runtime_generation = runtime_generation_identity()
     tenancy = tenancy_inventory()
+    tenancy_readiness = _tenancy_readiness(tenancy)
     shared_runtime = shared_runtime_inventory()
     selected_transport_mode = os.environ.get(
         "BRIDGE_DB_TRANSPORT_MODE", "direct"
@@ -187,12 +320,23 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
             "adoption_state": "not_required",
         }
     )
+    runtime_dependency_readiness = (
+        _runtime_dependency_readiness(runtime_generation)
+        if shared_runtime_required
+        else {
+            "schema": "BridgeRuntimeDependencyReadinessV1",
+            "ready": True,
+            "state": "not_required",
+            "reason_code": None,
+        }
+    )
     shared_runtime_ready = (
         selected_transport_mode == "direct"
         or (
             shared_runtime_required
             and current_shared_runtime["state"] == "observed"
             and current_shared_runtime["ready"] is True
+            and runtime_dependency_readiness["ready"] is True
         )
     )
     shared_runtime = {
@@ -201,6 +345,12 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "selected_transport_mode": selected_transport_mode,
         "required_for_current_process": shared_runtime_required,
         "ready_for_current_process": shared_runtime_ready,
+        "runtime_dependency_readiness": runtime_dependency_readiness,
+        "runtime_dependency_required_for_current_process": shared_runtime_required,
+        "runtime_dependency_ready_for_current_process": (
+            not shared_runtime_required
+            or runtime_dependency_readiness["ready"] is True
+        ),
     }
     cursor = await db.execute("PRAGMA user_version")
     row = await cursor.fetchone()
@@ -446,6 +596,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         and not audit_degraded
         and not disposition_degraded
         and recovery_integrity_ok
+        and tenancy_readiness["ready"] is True
         and shared_runtime_ready
     )
     projection_health = claude_ai_section_drift["state"]
@@ -491,6 +642,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         },
         "runtime_generation": runtime_generation,
         "tenancy": tenancy,
+        "tenancy_readiness": tenancy_readiness,
         "shared_runtime": shared_runtime,
     }
 
@@ -734,6 +886,14 @@ def _freshness_next_actions(
                 "reason": "BridgeDB is not running from a verified immutable generation.",
             }
         )
+    if health["tenancy_readiness"]["ready"] is not True:
+        actions.append(
+            {
+                "action": "inspect_mcp_tenancy",
+                "owner": "operator",
+                "reason": "BridgeDB tenancy evidence is not verified for a green health claim.",
+            }
+        )
     return actions[:5]
 
 
@@ -874,6 +1034,7 @@ async def collect_status_summary(
         "source_trust_breakdown": health["source_trust_breakdown"],
         "runtime_generation": health["runtime_generation"],
         "tenancy": health["tenancy"],
+        "tenancy_readiness": health["tenancy_readiness"],
         "shared_runtime": health["shared_runtime"],
         "pending_handoffs_by_trust": pending_handoffs_by_trust,
         "signals": {
@@ -907,10 +1068,27 @@ async def collect_status_summary(
             "execution_generation_id": health["runtime_generation"].get(
                 "generation_id"
             ),
+            "execution_generation_runtime_dependency_state": health[
+                "runtime_generation"
+            ].get("runtime_dependency_state"),
+            "runtime_dependency_ready_for_current_process": health["shared_runtime"][
+                "runtime_dependency_ready_for_current_process"
+            ],
+            "runtime_dependency_readiness_state": health["shared_runtime"][
+                "runtime_dependency_readiness"
+            ]["state"],
+            "runtime_dependency_readiness_reason_code": health["shared_runtime"][
+                "runtime_dependency_readiness"
+            ].get("reason_code"),
             "tenancy_state": health["tenancy"]["state"],
             "tenancy_active_count": health["tenancy"].get("active_count"),
             "tenancy_active_request_count": health["tenancy"].get(
                 "active_request_count"
+            ),
+            "tenancy_ready": health["tenancy_readiness"]["ready"],
+            "tenancy_readiness_state": health["tenancy_readiness"]["state"],
+            "tenancy_readiness_reason_code": health["tenancy_readiness"].get(
+                "reason_code"
             ),
             "shared_runtime_state": health["shared_runtime"]["state"],
             "shared_runtime_adoption_state": health["shared_runtime"][

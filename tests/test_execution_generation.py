@@ -18,7 +18,11 @@ import bridge_db.execution_generation as execution_generation
 from bridge_db import config, recovery, recovery_seal
 from bridge_db.db import SCHEMA_VERSION, open_db
 from bridge_db.execution_generation import (
+    DEFAULT_RUNTIME_DEPENDENCY_DISTRIBUTIONS,
     GenerationContractError,
+    RUNTIME_DEPENDENCY_CLAIM_CEILING,
+    RUNTIME_DEPENDENCY_EVIDENCE_SCHEMA,
+    RUNTIME_DEPENDENCY_STATE,
     activate_generation,
     read_activation,
     rollback_generation,
@@ -237,9 +241,24 @@ def test_stage_is_content_addressed_immutable_and_idempotent(tmp_path: Path) -> 
     assert len(manifest["contract_sha256"]) == 64
     assert len(manifest["source_tree_sha256"]) == 64
     assert len(manifest["python_sha256"]) == 64
-    assert first["dependency_environment_state"] == "external_unmanaged_lockfiles_only"
+    assert len(manifest["runtime_dependency_sha256"]) == 64
+    runtime_evidence = manifest["runtime_dependency_evidence"]
+    assert runtime_evidence["schema"] == RUNTIME_DEPENDENCY_EVIDENCE_SCHEMA
+    assert runtime_evidence["sha256"] == manifest["runtime_dependency_sha256"]
+    assert [item["distribution"] for item in runtime_evidence["distributions"]] == [
+        *DEFAULT_RUNTIME_DEPENDENCY_DISTRIBUTIONS
+    ]
+    distribution_names = {
+        item["distribution"] for item in runtime_evidence["distributions"]
+    }
+    assert {"aiosqlite", "mcp", "pydantic", "uvicorn"} <= distribution_names
+    assert len(distribution_names) >= 30
+    assert first["runtime_dependency_sha256"] == manifest["runtime_dependency_sha256"]
+    assert first["runtime_dependency_state"] == "verified"
+    assert first["dependency_environment_state"] == RUNTIME_DEPENDENCY_STATE
+    assert first["claim_ceiling"] == RUNTIME_DEPENDENCY_CLAIM_CEILING
     assert first["claim_ceiling"] == (
-        "source_and_interpreter_bound_external_environment_unmanaged"
+        "source_interpreter_and_runtime_dependencies_bound_external_os_unmanaged"
     )
     assert first["database_rollback_contract"] == {
         "core_user_version": 23,
@@ -358,25 +377,233 @@ def test_verify_rejects_extra_files_and_metadata_drift(tmp_path: Path) -> None:
     assert unexpected.value.reason_code == "generation.release_extra_file"
 
 
-def test_verify_rejects_external_interpreter_drift(tmp_path: Path) -> None:
+def test_verify_rejects_external_interpreter_digest_drift(tmp_path: Path) -> None:
     source, sha = _source_repo(tmp_path)
     root = tmp_path / "runtime"
-    python_copy = tmp_path / "python-fixture"
-    python_copy.write_bytes(Path(sys.executable).resolve().read_bytes())
-    python_copy.chmod(0o755)
-    staged = stage_generation(
-        source=source,
-        root=root,
-        reviewed_sha=sha,
-        python_executable=python_copy,
-    )
+    staged = _stage(source, root, sha)
     generation_id = str(staged["generation_id"])
+    manifest_path = root / "releases" / generation_id / "generation-manifest.json"
+    manifest_path.chmod(0o644)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["python_sha256"] = "0" * 64
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    manifest_path.chmod(0o444)
 
-    python_copy.write_bytes(python_copy.read_bytes() + b"drift")
-    python_copy.chmod(0o755)
     with pytest.raises(GenerationContractError) as drift:
         verify_generation(root, generation_id)
     assert drift.value.reason_code == "generation.python_digest_mismatch"
+
+
+def test_verify_rejects_runtime_dependency_evidence_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    staged = _stage(source, root, sha)
+    generation_id = str(staged["generation_id"])
+    release = root / "releases" / generation_id
+    manifest = json.loads((release / "generation-manifest.json").read_text())
+    runtime_evidence = dict(manifest["runtime_dependency_evidence"])
+    runtime_evidence["sha256"] = "0" * 64
+
+    def drifted_runtime_dependency_evidence(_python: Path) -> dict[str, object]:
+        return runtime_evidence
+
+    monkeypatch.setattr(
+        execution_generation,
+        "_runtime_dependency_evidence",
+        drifted_runtime_dependency_evidence,
+    )
+
+    with pytest.raises(GenerationContractError) as drift:
+        verify_generation(root, generation_id)
+    assert drift.value.reason_code == "generation.runtime_dependency_digest_mismatch"
+
+
+def test_runtime_dependency_collector_rejects_path_swap_after_metadata(
+    tmp_path: Path,
+) -> None:
+    site = tmp_path / "site"
+    package = site / "codex_fake_dep"
+    dist_info = site / "codex_fake_dep-1.0.dist-info"
+    package.mkdir(parents=True)
+    dist_info.mkdir()
+    target = package / "__init__.py"
+    replacement = tmp_path / "replacement.py"
+    target.write_text("VALUE = 'original'\n", encoding="utf-8")
+    replacement.write_text("VALUE = 'replacement'\n", encoding="utf-8")
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: codex-fake-dep\nVersion: 1.0\n",
+        encoding="utf-8",
+    )
+    (dist_info / "RECORD").write_text(
+        "\n".join(
+            [
+                "codex_fake_dep/__init__.py,,",
+                "codex_fake_dep-1.0.dist-info/METADATA,,",
+                "codex_fake_dep-1.0.dist-info/RECORD,,",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (site / "sitecustomize.py").write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "import os",
+                "_original_lstat = Path.lstat",
+                "_swapped = False",
+                "def _patched_lstat(self, *args, **kwargs):",
+                "    global _swapped",
+                "    result = _original_lstat(self, *args, **kwargs)",
+                "    if not _swapped and os.environ.get('BRIDGE_TEST_SWAP_TARGET') == str(self):",
+                "        _swapped = True",
+                "        os.replace(",
+                "            os.environ['BRIDGE_TEST_SWAP_REPLACEMENT'],",
+                "            os.environ['BRIDGE_TEST_SWAP_TARGET'],",
+                "        )",
+                "    return result",
+                "Path.lstat = _patched_lstat",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    script = execution_generation._runtime_dependency_collector_script(  # pyright: ignore[reportPrivateUsage]
+        ("codex-fake-dep",)
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(site),
+            "BRIDGE_TEST_SWAP_TARGET": str(target),
+            "BRIDGE_TEST_SWAP_REPLACEMENT": str(replacement),
+        },
+    )
+
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert json.loads(completed.stdout) == {
+        "ok": False,
+        "reason_code": "generation.runtime_dependency_file_changed_during_scan",
+    }
+
+
+def test_runtime_dependency_collector_rejects_cross_distribution_swap(
+    tmp_path: Path,
+) -> None:
+    site = tmp_path / "site"
+    site.mkdir()
+
+    def write_distribution(import_name: str, distribution_name: str) -> Path:
+        package = site / import_name
+        dist_info = site / f"{import_name}-1.0.dist-info"
+        package.mkdir()
+        dist_info.mkdir()
+        target = package / "__init__.py"
+        target.write_text(f"NAME = {distribution_name!r}\n", encoding="utf-8")
+        (dist_info / "METADATA").write_text(
+            "\n".join(
+                [
+                    "Metadata-Version: 2.1",
+                    f"Name: {distribution_name}",
+                    "Version: 1.0",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (dist_info / "RECORD").write_text(
+            "\n".join(
+                [
+                    f"{import_name}/__init__.py,,",
+                    f"{import_name}-1.0.dist-info/METADATA,,",
+                    f"{import_name}-1.0.dist-info/RECORD,,",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return target
+
+    first_target = write_distribution("codex_fake_a", "codex-fake-a")
+    second_target = write_distribution("codex_fake_b", "codex-fake-b")
+    replacement = tmp_path / "replacement.py"
+    replacement.write_text("NAME = 'replacement'\n", encoding="utf-8")
+    (site / "sitecustomize.py").write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "import os",
+                "_original_lstat = Path.lstat",
+                "_swapped = False",
+                "def _patched_lstat(self, *args, **kwargs):",
+                "    global _swapped",
+                "    result = _original_lstat(self, *args, **kwargs)",
+                "    if not _swapped and os.environ.get('BRIDGE_TEST_SWAP_TRIGGER') == str(self):",
+                "        _swapped = True",
+                "        os.replace(",
+                "            os.environ['BRIDGE_TEST_SWAP_REPLACEMENT'],",
+                "            os.environ['BRIDGE_TEST_SWAP_TARGET'],",
+                "        )",
+                "    return result",
+                "Path.lstat = _patched_lstat",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    script = execution_generation._runtime_dependency_collector_script(  # pyright: ignore[reportPrivateUsage]
+        ("codex-fake-a", "codex-fake-b")
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(site),
+            "BRIDGE_TEST_SWAP_TARGET": str(first_target),
+            "BRIDGE_TEST_SWAP_TRIGGER": str(second_target),
+            "BRIDGE_TEST_SWAP_REPLACEMENT": str(replacement),
+        },
+    )
+
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert json.loads(completed.stdout) == {
+        "ok": False,
+        "reason_code": "generation.runtime_dependency_file_changed_during_scan",
+    }
+
+
+def test_verify_rejects_legacy_unmanaged_dependency_claim(tmp_path: Path) -> None:
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    staged = _stage(source, root, sha)
+    generation_id = str(staged["generation_id"])
+    manifest_path = root / "releases" / generation_id / "generation-manifest.json"
+    manifest_path.chmod(0o644)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["dependency_environment_state"] = "external_unmanaged_lockfiles_only"
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    manifest_path.chmod(0o444)
+
+    with pytest.raises(GenerationContractError) as legacy_claim:
+        verify_generation(root, generation_id)
+    assert legacy_claim.value.reason_code == "generation.dependency_claim_invalid"
 
 
 def test_generation_id_rejects_coherent_source_manifest_rewrite(tmp_path: Path) -> None:

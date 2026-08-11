@@ -9,6 +9,8 @@ a content-addressed release. Each release binds:
 - `pyproject.toml` and `uv.lock` dependency digests;
 - the MCP/auth/integration contract digest;
 - the exact Python interpreter digest;
+- `BridgeRuntimeDependencyEvidenceV1` for the declared project runtime
+  distribution closure needed by shared broker startup;
 - an immutable launcher and its digest.
 
 Verification walks the complete release tree. Extra files/directories,
@@ -111,13 +113,24 @@ a mutable direct checkout, missing manifest, layout mismatch, or digest mismatch
 is explicit operating attention rather than verified activation.
 
 The interpreter executable bytes are checked during staging, verification,
-activation readback, runtime identity readback, and launcher startup. This does
-not make its external environment immutable: installed packages, the standard
-library, shared libraries, and OS runtime remain outside the release. The
-precise claim is `source_and_interpreter_bound_external_environment_unmanaged`;
-`pyproject.toml` and `uv.lock` are bound lockfile evidence, not proof that the
-external environment matches them. A managed content-addressed environment is
-a separate future activation contract.
+activation readback, runtime identity readback, and launcher startup. Staging
+and verification also collect and re-read
+`BridgeRuntimeDependencyEvidenceV1` through the selected interpreter for the
+shared broker's declared project runtime dependency closure, including
+`aiosqlite`, `mcp`, `pydantic`, `uvicorn`, and their relevant installed
+transitive distributions. That evidence binds each distribution file's resolved
+path, device, inode, mode, size, mtime/ctime, and SHA-256, plus an aggregate
+dependency SHA-256. Collection opens every authenticated dependency file with
+no-follow descriptor semantics, holds the complete descriptor set open through
+collection and digesting, and revalidates each configured path and resolved path
+against the still-open descriptor identity before the evidence is emitted. This
+does not make the entire external environment immutable: packages outside the
+authenticated set, the standard library, shared libraries, and OS runtime remain
+outside the release. The precise claim is
+`source_interpreter_and_runtime_dependencies_bound_external_os_unmanaged`;
+`pyproject.toml` and `uv.lock` remain bound lockfile evidence, not proof of a
+managed content-addressed environment. A fully managed environment is a separate
+future activation contract.
 
 ## Secure Codex binding
 
@@ -232,6 +245,10 @@ lease; a plan with multiple actions requires `--lease-id <exact-id>`. Missing
 or PID-reused processes are rechecked and their exact lease is retired even if
 the crashed process left a stale active-request count. Live same-identity
 requests and changed/unknown ancestry are never drained.
+Health/status publish `BridgeMcpTenancyReadinessV1` and require current tenancy
+evidence for a green top-level health claim: missing inventory, unverified
+inventory, stale lease evidence, or unknown process identity is visible and
+non-green rather than flattened into `ok=true`.
 
 Obsolete live generations receive an exact cooperative marker. A server polls
 its own marker, refuses new requests, waits for its current request count to
@@ -244,17 +261,19 @@ receipts prevent an apply operation from partially mutating multiple leases.
 
 The direct stdio runtime remains the default and rollback. When the reviewed
 binding selects `BRIDGE_DB_TRANSPORT_MODE=shared`, a no-argument wrapper launch
-registers the shell relay's PID/start identity, then ensures one broker for the
-exact credential and complete non-secret launch contract: normalized auth mode,
-generation/manifest, interpreter/runtime source, database, bridge, principal,
-audit/evidence, registry, tenancy, logging, and idle-policy inputs. A private
-random selector key derives the group name, so neither the credential nor a
-reusable credential digest appears in argv, output, socket names, or receipts.
-Each relay also receives a distinct random capability through an owner-only
-mode-`0400` curl header file. Every broker request validates its lease and
-capability hash plus the relay's current PID/start identity, then strips the
-header before MCP dispatch; lifecycle scans retain the same identity gate.
-The capability value never enters argv, logs, socket names, leases, history, or
+execs a Python stdio relay, then ensures one broker for the exact credential and
+complete non-secret launch contract: normalized auth mode, generation/manifest,
+interpreter/runtime source, database, bridge, principal, audit/evidence,
+registry, tenancy, logging, and idle-policy inputs. A private random selector
+key derives the group name, so neither the credential nor a reusable credential
+digest appears in argv, output, socket names, or receipts. The wrapper pins
+broker launches to the reviewed stable launcher path. Broker receipts carry a
+credential-bound HMAC plus the published socket identity. Each relay renews a
+short-lived one-use request capability in process memory, verifies the connected
+socket identity against the authenticated receipt, and the broker consumes the
+matching lease hash before stripping the header and dispatching to MCP;
+lifecycle scans retain the same live-lease gate. The capability value never
+enters argv, durable header files, logs, socket names, leases, history, or
 broker receipts. The broker binds only an owner-only Unix socket, uses stateful
 Streamable HTTP behind the stdio relay, and serializes tool calls so independent
 MCP session connections cannot interleave database work.
@@ -279,8 +298,9 @@ reachability, live/stale/unknown relay identities, and capability-file counts
 without returning group selectors or capability values.
 `BridgeSharedRuntimeReadinessV1` is the narrower health/status gate: it derives
 the current group without creating state or exposing its selector, then requires
-the exact broker PID/start identity, receipt, and socket. Aggregate activity in
-another group therefore cannot render selected shared transport green.
+the exact broker PID/start identity, credential-authenticated receipt, and
+connected socket identity. Aggregate activity in another group therefore cannot
+render selected shared transport green.
 
 ## Database rollback compatibility
 

@@ -37,20 +37,24 @@ python -m bridge_db.tenancy status --root <private-tenancy-root>
 ```
 
 Immutable-generation verification binds the exact release file set, ownership,
-modes, reviewed source, launcher, and external interpreter bytes. Dependency
-lockfiles are bound, but the external installed environment remains explicitly
-unmanaged. Tenancy drain is cooperative: reject new work, finish active work,
-then close the obsolete server. After repairing any pending journal, activation
-and rollback fail closed unless the owning recovery lifecycle reports a current
-verified anchor and seal. Forward activation also requires an exact private
-replay-evidence bundle whose policy, client coverage, and lifecycle-scenario
-coverage recompute successfully; rollback remains the safety path without new
-replay evidence.
+modes, reviewed source, launcher, external interpreter bytes, and the declared
+project runtime dependency closure needed by shared broker startup. Dependency
+lockfiles remain source evidence; runtime dependency files are read through
+no-follow descriptors, held as one complete authenticated file set through
+digesting, and revalidated against their configured paths before acceptance,
+while the standard library, shared libraries, OS runtime, and packages outside
+the authenticated runtime dependency set remain outside the claim. Tenancy drain
+is cooperative: reject new work, finish active work, then close the obsolete
+server. After repairing any pending journal, activation and rollback fail closed
+unless the owning recovery lifecycle reports a current verified anchor and seal.
+Forward activation also requires an exact private replay-evidence bundle whose
+policy, client coverage, and lifecycle-scenario coverage recompute successfully;
+rollback remains the safety path without new replay evidence.
 
 ## Architecture
 
 - **DB**: `~/.local/share/bridge-db/bridge.db` (WAL mode, `PRAGMA busy_timeout=15000`). Core schema is v23: v21 adds non-destructive exact conflict aggregation and explicit overflow counters; v22 adds non-destructive handoff cancellation/quarantine recovery tables; v23 adds hash-only session capabilities and orphan-recovery receipts. Durable owner-bound snapshot refusals use the additive `BridgeSnapshotRefusalSchemaV1` extension without advancing `user_version`, preserving core compatibility with the exact previous merged v23 runtime. Auth state lives in `principals.json` v2 (not the DB): grants expire after 90 days, carry a generation, and are limited to a caller-specific tool scope.
-- **MCP transport**: client-facing stdio (stdout = JSON-RPC, all logging → stderr). Direct mode owns one server lease per client. Opt-in shared mode uses a thin shell relay and one credential/complete-launch-contract broker over a private Unix socket. Every HTTP request requires the relay's live PID/start identity plus a distinct capability read by curl from an owner-only mode-`0400` header file, never from argv; receipts retain only its hash. The broker serializes database access across sessions and exits after its bounded no-client window. `BridgeSharedRuntimeInventoryV1` supplies aggregate no-secret readback, while health/status use `BridgeSharedRuntimeReadinessV1` to require the exact current group, broker identity, receipt, and socket; an unrelated active group cannot make selected shared transport green. Obsolete generations refuse new work and cooperatively close only after active requests finish.
+- **MCP transport**: client-facing stdio (stdout = JSON-RPC, all logging -> stderr). Direct mode owns one server lease per client. Opt-in shared mode execs a Python stdio relay and one credential/complete-launch-contract broker over a private Unix socket. The wrapper pins broker launches to the stable launcher path; each HTTP request renews a short-lived one-use relay capability in process memory, verifies the connected socket identity against a credential-authenticated broker receipt, and the broker consumes the matching lease hash before forwarding. Receipts retain only hashes, socket identity, and lifecycle metadata. The broker serializes database access across sessions and exits after its bounded no-client window. `BridgeSharedRuntimeInventoryV1` supplies aggregate no-secret readback, while health/status use `BridgeSharedRuntimeReadinessV1` to require the exact current group, broker identity, credential-authenticated receipt, and connected socket identity; an unrelated active group cannot make selected shared transport green. Obsolete generations refuse new work and cooperatively close only after active requests finish.
 - **MCP tools**: verify the current count with `rg '@mcp\.tool' src/bridge_db -c`. There are 26 tools across 10 modules: activity, handoffs, context, snapshots, cost, export, health, recall (FTS5 lexical search; Phase −1 of the semantic memory layer), audit (read-side observability over the JSONL audit + recall query logs), and conflicts (`get_write_conflicts`). Snapshot callers can inspect family capacity before writing and durably acknowledge an exact refusal. `get_recent_activity` is the raw row-level feed; `get_activity_signal` is the operator-facing feed that compresses lifecycle `session-boundary` telemetry. `health` / `status` include signals for pending handoffs, snapshot refusals, raw and actionable unprocessed shipped events, receiptless processed shipped events, FTS index drift, WAL size, and bridge-file freshness.
 - **Context access**: `get_db(ctx)` helper casts lifespan context to `aiosqlite.Connection`
 - **Tool registration**: `CaptureMCP` pattern in tests — decorators capture raw async fns

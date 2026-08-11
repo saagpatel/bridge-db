@@ -117,24 +117,32 @@ Codex binding are specified in
 
 Generation verification is exact-tree and fail-closed: unexpected bytes,
 owner/mode drift, interpreter drift, source-copy races, and generation-ID
-mismatch are non-green. The external interpreter executable is digest-bound,
-but its installed package, standard-library, shared-library, and OS environment
-is explicitly unmanaged; lockfile binding is not an environment-convergence
-claim.
+mismatch are non-green. The external interpreter executable is digest-bound, and
+shared broker readiness requires current `BridgeRuntimeDependencyEvidenceV1` for
+the declared project runtime dependency closure. That evidence binds installed
+distribution files for `aiosqlite`, `mcp`, `pydantic`, `uvicorn`, and their
+relevant transitive packages by path, identity metadata, mtime/ctime, and
+SHA-256. The collector holds no-follow descriptors open through digesting and
+revalidates every configured and resolved path against the still-open complete
+file set before accepting evidence. Packages outside the authenticated set, the
+standard library, shared libraries, and OS runtime remain outside the claim;
+lockfile binding is not a managed environment-convergence claim.
 
 Each direct MCP process and each shared broker publishes a private
 owner/principal/generation lease with request timing, lifecycle reason, PID
 ancestry, and RSS. Inventory V2 distinguishes live identity-bound processes,
 stale lease records, unknown process state, current RSS, and the historical RSS
-last persisted in each lease. Obsolete generations refuse new requests, finish
-active requests, and cooperatively cancel their own server task. Lifecycle
-apply is exact-target and cannot terminate another process. Forward activation
-requires a private `BridgeMcpTenancyActivationEvidenceV1` bundle, recomputes the
-policy from its exact replay rows, and requires the documented client and
-lifecycle-scenario coverage for the exact requested generation before any
-pointer write. Rollback remains the safety path and does not require new replay
-evidence. Snapshot refusal storage
-stays an additive extension over core SQLite
+last persisted in each lease. Health/status expose a separate readiness claim
+for that inventory and fail closed for missing, unverified, stale, or unknown
+tenancy evidence before reporting top-level green health. Obsolete generations
+refuse new requests, finish active requests, and cooperatively cancel their own
+server task. Lifecycle apply is exact-target and cannot terminate another
+process. Forward activation requires a private
+`BridgeMcpTenancyActivationEvidenceV1` bundle, recomputes the policy from its
+exact replay rows, and requires the documented client and lifecycle-scenario
+coverage for the exact requested generation before any pointer write. Rollback
+remains the safety path and does not require new replay evidence. Snapshot
+refusal storage stays an additive extension over core SQLite
 `user_version=23`, preserving open/read compatibility with exact previous
 merged generation `d7272d489873faa5ed84c81734636ffc8cecb095`; rollback loses
 the refusal API until roll-forward but does not discard its rows. Activation or
@@ -151,9 +159,12 @@ uses the source-owned `config/bridge-db-mcp-immutable` install input, which
 parses the two required credential keys plus the optional reviewed
 `BRIDGE_DB_TRANSPORT_MODE=direct|shared` key. `direct` is the default and exact
 rollback. In `shared` mode, no-argument MCP launches remain stdio to the client
-but use a thin shell relay to one credential- and complete-launch-contract-bound
-broker over an owner-only Unix socket. Each relay uses its own request capability
-through a private mode-`0400` curl header file; the value is absent from argv,
+but exec a Python relay to one credential- and complete-launch-contract-bound
+broker over an owner-only Unix socket. The wrapper pins broker launches to the
+stable launcher path. Broker receipts carry a credential-bound HMAC and the
+published socket identity. Each relay renews a short-lived one-use request
+capability in process memory, verifies the connected socket identity against
+the authenticated receipt, and omits the value from argv, durable header files,
 logs, socket names, leases, and receipts. CLI operations such as `--checkpoint`
 always bypass the relay and execute directly.
 The checkpoint LaunchAgent input invokes that same launcher with `--checkpoint`
@@ -493,10 +504,12 @@ listener, LaunchAgent, secret in argv, or cross-principal/config broker is
 introduced.
 
 Relay references are private PID/start-identity leases. Every HTTP request also
-requires that relay's unique capability, delivered as an owner-only mode-`0400`
-header file so curl never places the value in argv; only the capability hash is
-retained, and authorization fails unless the current PID/start identity still
-matches the lease. The broker preserves stale reference history, serializes tool calls
+requires that relay's unique capability, minted in process memory and stored
+only as a lease hash. Authorization fails unless the current PID/start identity
+still matches the lease. The relay opens the Unix socket itself and verifies the
+connected path identity against the credential-authenticated broker receipt
+before sending the request, so a later pathname replacement cannot supply the
+response. The broker preserves stale reference history, serializes tool calls
 across session DB connections, and cooperatively exits 300 seconds after the
 last live relay disappears. It never signals another process. Broker startup
 fails closed after 10 seconds; setting the transport mode back to `direct` is
@@ -505,7 +518,8 @@ are never disconnected by this path. `BridgeSharedRuntimeInventoryV1` is
 available from health/status and `--shared-runtime-status` for aggregate
 no-secret readback. `BridgeSharedRuntimeReadinessV1` separately gates
 health/status on the exact current launch group, broker PID/start identity,
-receipt, and socket, so unrelated group activity cannot make shared mode green.
+credential-authenticated receipt, and connected socket identity, so unrelated
+group activity cannot make shared mode green.
 
 Both modes use the same SQLite file at `~/.local/share/bridge-db/bridge.db` with
 WAL mode + `PRAGMA busy_timeout=15000`. Logical lost-update protection remains
