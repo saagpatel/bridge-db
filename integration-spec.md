@@ -150,8 +150,8 @@ rollback calls the owning recovery lifecycle verification and requires current
 verified anchor/seal evidence after any pending-journal recovery. Missing,
 stale, invalid, or unsealed evidence prevents a new pointer mutation.
 
-Claude Code `/Users/d/.claude.json` and Claude Desktop
-`/Users/d/Library/Application Support/Claude/claude_desktop_config.json` converge
+Claude Code `~/.claude.json` and Claude Desktop
+`~/Library/Application Support/Claude/claude_desktop_config.json` converge
 through `bridge_db.client_rebinding`: only the exact legacy `bridge-db`
 command/args are changed, environment values are preserved without output, and
 each target gets a private exact-byte backup plus digest-bound restore. Codex

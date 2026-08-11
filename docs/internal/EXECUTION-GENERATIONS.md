@@ -177,9 +177,9 @@ Do not treat source availability as installed or live uptake.
 
 `bridge_db.client_rebinding` changes only the exact `mcpServers.bridge-db`
 legacy invocation found in the Claude Code and Claude Desktop JSON configs:
-`uv run --directory /Users/d/Projects/bridge-db python -m bridge_db`. It replaces
+`uv run --directory ~/Projects/bridge-db python -m bridge_db`. It replaces
 that command/argument pair with
-`/Users/d/.local/state/bridge-db/current/bin/bridge-db-mcp` and an empty argument
+`~/.local/state/bridge-db/current/bin/bridge-db-mcp` and an empty argument
 list. The existing two-key environment mapping is value-equivalent before and
 after readback, but no environment value is returned. Unexpected JSON shape,
 launcher arguments, permissions, owners, symlinks, or concurrent changes fail
@@ -188,13 +188,13 @@ closed.
 ```bash
 python -m bridge_db.client_rebinding rebind \
   --client claude-code \
-  --config-path /Users/d/.claude.json \
-  --backup-root /Users/d/.local/state/bridge-db/client-config-backups
+  --config-path ~/.claude.json \
+  --backup-root ~/.local/state/bridge-db/client-config-backups
 
 python -m bridge_db.client_rebinding rebind \
   --client claude-desktop \
-  --config-path "/Users/d/Library/Application Support/Claude/claude_desktop_config.json" \
-  --backup-root /Users/d/.local/state/bridge-db/client-config-backups
+  --config-path "~/Library/Application Support/Claude/claude_desktop_config.json" \
+  --backup-root ~/.local/state/bridge-db/client-config-backups
 ```
 
 Each change first preserves the exact original bytes in a private `0700` backup
@@ -204,16 +204,16 @@ requires the backup plus the expected current-config digest, preventing a stale
 rollback from overwriting a concurrent edit.
 
 The source-owned `config/bridge-db-mcp-immutable` is the reviewed Codex wrapper
-input. Its installed target is `/Users/d/.codex/bin/bridge-db-mcp-immutable`.
+input. Its installed target is `~/.codex/bin/bridge-db-mcp-immutable`.
 It parses (never sources) `BRIDGE_DB_PRINCIPAL_TOKEN`,
 `BRIDGE_DB_AUTH_MODE`, and the optional reviewed
 `BRIDGE_DB_TRANSPORT_MODE=direct|shared` key from owner-only mode-`0600`
-`/Users/d/.codex/secrets/bridge-db.env`, or from one explicit absolute
+`~/.codex/secrets/bridge-db.env`, or from one explicit absolute
 `BRIDGE_DB_ENV_FILE`, then execs the stable launcher. Unknown or duplicate keys
 fail closed without printing values. The source-owned
 `config/com.saagar.bridge-db-checkpoint.plist` preserves the 30-minute
 run-with-receipt contract through the reviewed operator-script pointer
-`/Users/d/.local/state/operator-scripts/current/run-with-receipt.sh`, while
+`~/.local/state/operator-scripts/current/run-with-receipt.sh`, while
 invoking the same stable launcher with `--checkpoint`. These are reviewed
 install inputs only; source presence is not proof of live installation or
 client reconnect.
