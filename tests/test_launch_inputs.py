@@ -169,7 +169,12 @@ def test_codex_wrapper_forces_direct_transport_for_cli_maintenance_passthrough(
 
 @pytest.mark.parametrize(
     "hidden_command",
-    ["--ensure-shared-broker", "--run-shared-broker", "--release-shared-client"],
+    [
+        "--ensure-shared-broker",
+        "--run-shared-broker",
+        "--run-shared-relay",
+        "--release-shared-client",
+    ],
 )
 def test_codex_wrapper_preserves_shared_transport_for_hidden_lifecycle_commands(
     tmp_path: Path, hidden_command: str
@@ -210,6 +215,51 @@ def test_codex_wrapper_preserves_shared_transport_for_hidden_lifecycle_commands(
     assert output.read_text(encoding="utf-8").splitlines() == [
         "shared",
         " ".join(arguments),
+    ]
+
+
+def test_codex_wrapper_pins_shared_runtime_launcher_over_inherited_override(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "output"
+    malicious_marker = tmp_path / "malicious-ran"
+    launcher = tmp_path / "launcher"
+    launcher.write_text(
+        "#!/bin/sh\nprintf '%s\\n%s\\n' \"$BRIDGE_DB_SHARED_RUNTIME_LAUNCHER\" \"$*\" > \"$FIXTURE_OUTPUT\"\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    malicious = tmp_path / "malicious-launcher"
+    malicious.write_text(f"#!/bin/sh\ntouch {str(malicious_marker)!r}\n", encoding="utf-8")
+    malicious.chmod(0o755)
+    wrapper = _executable_wrapper(tmp_path, launcher)
+    env_file = tmp_path / "bridge-db.env"
+    env_file.write_text(
+        "BRIDGE_DB_PRINCIPAL_TOKEN=fixture-wrapper-secret-abcdefghijklmnopqrstuvwxyz\n"
+        "BRIDGE_DB_AUTH_MODE=warn\n"
+        "BRIDGE_DB_TRANSPORT_MODE=shared\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+
+    result = subprocess.run(
+        [str(wrapper), "--checkpoint"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "BRIDGE_DB_ENV_FILE": str(env_file),
+            "BRIDGE_DB_SHARED_RUNTIME_LAUNCHER": str(malicious),
+            "FIXTURE_OUTPUT": str(output),
+        },
+    )
+
+    assert result.returncode == 0
+    assert not malicious_marker.exists()
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        str(launcher),
+        "--checkpoint",
     ]
 
 
@@ -260,28 +310,13 @@ def test_codex_wrapper_rejects_malformed_stat_owner_without_launching(
     assert not marker.exists()
 
 
-def test_codex_wrapper_rejects_malformed_capability_owner_before_relay(
+def test_codex_wrapper_delegates_shared_stdio_to_python_relay(
     tmp_path: Path,
 ) -> None:
-    group = tmp_path / "runtime" / "group"
-    clients = group / "clients"
-    capabilities = group / "capabilities"
-    clients.mkdir(parents=True)
-    capabilities.mkdir()
-    broker_socket = group / "broker.sock"
-    client_lease = clients / "client.json"
-    capability_file = capabilities / "client.header"
-    capability_file.write_text(
-        "Authorization: Bearer fixture-capability\n", encoding="utf-8"
-    )
-    capability_file.chmod(0o400)
+    output = tmp_path / "output"
     launcher = tmp_path / "launcher"
     launcher.write_text(
-        "#!/bin/sh\n"
-        "if [ \"$1\" = --ensure-shared-broker ]; then\n"
-        f"    printf '%s\\n' {str(broker_socket)!r} {str(client_lease)!r} "
-        f"{str(capability_file)!r} {str(launcher)!r}\n"
-        "fi\n",
+        "#!/bin/sh\nprintf '%s\\n%s\\n' \"$BRIDGE_DB_TRANSPORT_MODE\" \"$*\" > \"$FIXTURE_OUTPUT\"\n",
         encoding="utf-8",
     )
     launcher.chmod(0o755)
@@ -294,25 +329,6 @@ def test_codex_wrapper_rejects_malformed_capability_owner_before_relay(
         encoding="utf-8",
     )
     env_file.chmod(0o600)
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_stat = fake_bin / "stat"
-    fake_stat.write_text(
-        "#!/bin/sh\n"
-        "case \"$3\" in\n"
-        "    */bridge-db.env) owner=$(id -u); mode=600 ;;\n"
-        "    */client.header) owner=not-a-uid; mode=400 ;;\n"
-        "    *) exit 64 ;;\n"
-        "esac\n"
-        "case \"$2\" in\n"
-        "    '%u') printf '%s\\n' \"$owner\" ;;\n"
-        "    '%Lp'|'%a') printf '%s\\n' \"$mode\" ;;\n"
-        "    *) exit 64 ;;\n"
-        "esac\n",
-        encoding="utf-8",
-    )
-    fake_stat.chmod(0o755)
-
     result = subprocess.run(
         [str(wrapper)],
         check=False,
@@ -321,17 +337,17 @@ def test_codex_wrapper_rejects_malformed_capability_owner_before_relay(
         env={
             **os.environ,
             "BRIDGE_DB_ENV_FILE": str(env_file),
-            "PATH": os.pathsep.join((str(fake_bin), os.environ.get("PATH", ""))),
+            "FIXTURE_OUTPUT": str(output),
         },
     )
 
-    assert result.returncode == 69
+    assert result.returncode == 0
     assert result.stdout == ""
-    assert (
-        result.stderr.strip()
-        == "bridge_db.shared_relay_capability_file_not_private"
-    )
-    assert not any(group.glob("relay-*"))
+    assert result.stderr == ""
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        "shared",
+        "--run-shared-relay",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -387,5 +403,8 @@ def test_codex_wrapper_source_is_syntax_valid_and_immutable_path_bound() -> None
     assert "/Users/d/Projects/bridge-db" not in source
     assert "source " not in source
     assert ". \"$env_file\"" not in source
-    assert '--header "@$capability_file"' in source
+    assert "BRIDGE_DB_SHARED_RUNTIME_LAUNCHER=$stable_launcher" in source
+    assert "--run-shared-relay" in source
+    assert "curl" not in source
+    assert "mkfifo" not in source
     assert 'cat "$capability_file"' not in source

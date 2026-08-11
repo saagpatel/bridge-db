@@ -223,19 +223,24 @@ installed generation.
 The source-owned `config/bridge-db-mcp-immutable` is the Codex install input. It
 parses token/auth-mode plus an optional `BRIDGE_DB_TRANSPORT_MODE=direct|shared`
 from an owner-only env file. `direct` is the default rollback. `shared` retains
-stdio for the client while a thin shell relay uses one credential- and complete
-launch-contract-bound broker over a private Unix socket; command-line
-maintenance operations remain direct. Each relay gets a distinct capability in
-an owner-only mode-`0400` header file, and curl reads that file directly so the
-capability does not enter argv, logs, socket names, or receipts. Every request
-also requires the relay's current PID/start identity to match its lease. The broker has
-no TCP listener or LaunchAgent, serializes database access across MCP sessions,
-and exits after the final relay has been absent for its bounded idle window.
+stdio for the client while the wrapper execs a Python relay to one credential-
+and complete launch-contract-bound broker over a private Unix socket;
+command-line maintenance operations remain direct. The wrapper pins
+shared-runtime broker launches to the stable launcher path rather than
+inherited override variables. Broker receipts carry a credential-bound HMAC and
+the published socket identity. For each request, the registered relay mints a
+short-lived one-use capability in process memory, verifies the connected socket
+identity against the authenticated receipt, and the broker consumes the matching
+lease hash before forwarding. Capability values do not enter argv, durable
+header files, logs, socket names, leases, or receipts. The broker has no TCP
+listener or LaunchAgent, serializes database access across MCP sessions, and
+exits after the final relay has been absent for its bounded idle window.
 `health` / `status` and `python -m bridge_db --shared-runtime-status` expose the
 no-secret `BridgeSharedRuntimeInventoryV1`. Health/status additionally expose
 `BridgeSharedRuntimeReadinessV1`, which requires the exact current launch group,
-broker PID/start identity, receipt, and socket; another active group cannot make
-selected shared transport report ready.
+broker PID/start identity, credential-authenticated receipt, and connected
+socket identity; another active group cannot make selected shared transport
+report ready.
 `config/com.saagar.bridge-db-checkpoint.plist` preserves the existing
 30-minute receipt wrapper through the reviewed operator-script pointer while
 running that launcher with `--checkpoint`.
@@ -248,7 +253,7 @@ that a live client has reloaded them.
 
 - **DB**: `~/.local/share/bridge-db/bridge.db`
 - **Schema compatibility**: core `user_version=23` plus the additive backward-readable refusal extension, verified against exact previous merged generation `d7272d489873faa5ed84c81734636ffc8cecb095`. Activation and pointer rollback enforce the owning recovery lifecycle's current verified anchor/seal verdict after repairing any pending journal; forward activation additionally requires exact tenancy replay evidence. Source compatibility is not activation authority.
-- **MCP tenancy**: Inventory V2 separates live identity-bound processes from stale lease files, preserves multiple leases that share a reused PID, and reports current RSS separately from lease-last-observed RSS. Direct servers and shared brokers account for requests, PID ancestry, and generation. `BridgeSharedRuntimeInventoryV1` separately reports broker reachability, relay capabilities, and stale/unknown client identities without exposing selector or capability values. Obsolete generations refuse new work and cooperatively close after active requests finish; lifecycle tooling cannot terminate another process. Forward generation activation requires a mode-`0400` `BridgeMcpTenancyActivationEvidenceV1` bundle and re-derives its policy from the bound replay rows before any pointer write; rollback does not require new replay evidence.
+- **MCP tenancy**: Inventory V2 separates live identity-bound processes from stale lease files, preserves multiple leases that share a reused PID, and reports current RSS separately from lease-last-observed RSS. Direct servers and shared brokers account for requests, PID ancestry, and generation. Health/status expose a `BridgeMcpTenancyReadinessV1` claim and keep top-level health non-green when tenancy evidence is missing, unverified, stale, or has unknown process identity. `BridgeSharedRuntimeInventoryV1` separately reports broker reachability, relay capabilities, and stale/unknown client identities without exposing selector or capability values. Obsolete generations refuse new work and cooperatively close after active requests finish; lifecycle tooling cannot terminate another process. Forward generation activation requires a mode-`0400` `BridgeMcpTenancyActivationEvidenceV1` bundle and re-derives its policy from the bound replay rows before any pointer write; rollback does not require new replay evidence.
 - **Bridge file**: `~/.claude/projects/<encoded-home>/memory/claude_ai_context.md`
   (Claude Code encodes your home dir path by replacing `/` with `-`; the default is derived
   automatically at runtime — override via `BRIDGE_FILE_PATH` if needed)
@@ -346,6 +351,7 @@ The CLI status command prints freshness as compact hints:
 
 ```text
   Storage health: <healthy|degraded>
+  MCP tenancy: state=<state>, readiness=<verified|missing|unverified|stale|unknown>, ...
   Operating state: <fresh|attention|stale|unknown>
   Freshness: <overall>
   Next actions: <action> (<owner>), ...

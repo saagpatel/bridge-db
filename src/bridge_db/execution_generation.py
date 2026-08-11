@@ -29,14 +29,51 @@ from bridge_db import clock
 GENERATION_SCHEMA = "BridgeExecutionGenerationV1"
 ACTIVATION_SCHEMA = "BridgeExecutionActivationV1"
 ACTIVATION_RECEIPT_SCHEMA = "BridgeExecutionActivationReceiptV1"
+RUNTIME_DEPENDENCY_EVIDENCE_SCHEMA = "BridgeRuntimeDependencyEvidenceV1"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GENERATION_RE = re.compile(r"^[0-9a-f]{12}-[0-9a-f]{12}$")
 _RESERVED_RELEASE_PATHS = frozenset({"generation-manifest.json", "bin/bridge-db-mcp"})
 _TENANCY_EVIDENCE_NAME = "tenancy-activation-evidence.json"
 _MAX_TENANCY_EVIDENCE_BYTES = 1024 * 1024
+RUNTIME_DEPENDENCY_STATE = "external_runtime_dependency_files_verified"
+RUNTIME_DEPENDENCY_CLAIM_CEILING = (
+    "source_interpreter_and_runtime_dependencies_bound_external_os_unmanaged"
+)
 
 DEFAULT_DEPENDENCY_PATHS = ("pyproject.toml", "uv.lock")
+DEFAULT_RUNTIME_DEPENDENCY_DISTRIBUTIONS = (
+    "aiosqlite",
+    "annotated-types",
+    "anyio",
+    "attrs",
+    "certifi",
+    "cffi",
+    "click",
+    "cryptography",
+    "h11",
+    "httpcore",
+    "httpx",
+    "httpx-sse",
+    "idna",
+    "jsonschema",
+    "jsonschema-specifications",
+    "mcp",
+    "pycparser",
+    "pydantic",
+    "pydantic-core",
+    "pydantic-settings",
+    "pyjwt",
+    "python-dotenv",
+    "python-multipart",
+    "referencing",
+    "rpds-py",
+    "sse-starlette",
+    "starlette",
+    "typing-extensions",
+    "typing-inspection",
+    "uvicorn",
+)
 DEFAULT_CONTRACT_PATHS = (
     ".codex/verify.commands",
     "config/bridge-db-mcp-immutable",
@@ -287,6 +324,359 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _runtime_dependency_collector_script(distributions: tuple[str, ...]) -> str:
+    names = json.dumps(list(distributions), sort_keys=True, separators=(",", ":"))
+    return f"""
+from __future__ import annotations
+
+import hashlib
+import importlib.metadata as metadata
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+
+NAMES = {names}
+SCHEMA = {RUNTIME_DEPENDENCY_EVIDENCE_SCHEMA!r}
+
+
+def stable_json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def file_identity(metadata):
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IMODE(metadata.st_mode),
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def stat_identity(path):
+    try:
+        metadata = path.lstat()
+    except OSError:
+        fail("generation.runtime_dependency_file_missing")
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        fail("generation.runtime_dependency_file_invalid")
+    return file_identity(metadata)
+
+
+def open_runtime_file(path):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        fail("generation.runtime_dependency_file_missing")
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            fail("generation.runtime_dependency_file_invalid")
+        opened_identity = file_identity(metadata)
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError:
+            fail("generation.runtime_dependency_file_missing")
+        if (
+            stat_identity(path) != opened_identity
+            or stat_identity(resolved) != opened_identity
+        ):
+            fail("generation.runtime_dependency_file_changed_during_scan")
+        return {{
+            "descriptor": descriptor,
+            "path": path,
+            "resolved": resolved,
+            "identity": opened_identity,
+            "metadata": metadata,
+        }}
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def revalidate_open_file(opened):
+    try:
+        current_identity = file_identity(os.fstat(opened["descriptor"]))
+    except OSError:
+        fail("generation.runtime_dependency_file_changed_during_scan")
+    if (
+        current_identity != opened["identity"]
+        or stat_identity(opened["path"]) != opened["identity"]
+        or stat_identity(opened["resolved"]) != opened["identity"]
+    ):
+        fail("generation.runtime_dependency_file_changed_during_scan")
+
+
+def sha256_open_file(opened):
+    digest = hashlib.sha256()
+    descriptor = opened["descriptor"]
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+    except OSError:
+        fail("generation.runtime_dependency_file_changed_during_scan")
+    while True:
+        try:
+            chunk = os.read(descriptor, 1024 * 1024)
+        except OSError:
+            fail("generation.runtime_dependency_file_changed_during_scan")
+        if not chunk:
+            break
+        digest.update(chunk)
+    revalidate_open_file(opened)
+    return digest.hexdigest()
+
+
+def close_open_files(opened_files):
+    for opened in opened_files:
+        try:
+            os.close(opened["descriptor"])
+        except OSError:
+            pass
+
+
+def dependency_file_entry(record_path, opened):
+    metadata = opened["metadata"]
+    return {{
+        "record_path": record_path,
+        "path": str(opened["resolved"]),
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "mode": stat.S_IMODE(metadata.st_mode),
+        "size": metadata.st_size,
+        "mtime_ns": metadata.st_mtime_ns,
+        "ctime_ns": metadata.st_ctime_ns,
+        "sha256": sha256_open_file(opened),
+    }}
+
+
+def collect_distribution_open_files(dist, files):
+    opened_files = []
+    for package_path in files:
+        located = Path(str(dist.locate_file(package_path)))
+        opened_files.append(
+            (str(package_path).replace(os.sep, "/"), open_runtime_file(located))
+        )
+    return opened_files
+
+
+def fail(reason_code):
+    print(json.dumps({{"ok": False, "reason_code": reason_code}}, sort_keys=True))
+    raise SystemExit(1)
+
+
+distribution_inputs = []
+all_opened_files = []
+try:
+    for name in NAMES:
+        try:
+            dist = metadata.distribution(name)
+        except metadata.PackageNotFoundError:
+            fail("generation.runtime_dependency_missing")
+        files = dist.files
+        if files is None:
+            fail("generation.runtime_dependency_files_unavailable")
+        opened_files = collect_distribution_open_files(dist, files)
+        all_opened_files.extend(opened for _record_path, opened in opened_files)
+        distribution_inputs.append(
+            {{
+                "distribution": name,
+                "version": dist.version,
+                "opened_files": opened_files,
+            }}
+        )
+
+    for opened in all_opened_files:
+        revalidate_open_file(opened)
+
+    items = []
+    for distribution_input in distribution_inputs:
+        file_entries = [
+            dependency_file_entry(record_path, opened)
+            for record_path, opened in distribution_input["opened_files"]
+        ]
+        file_entries.sort(key=lambda item: (item["record_path"], item["path"]))
+        for _record_path, opened in distribution_input["opened_files"]:
+            revalidate_open_file(opened)
+        distribution = {{
+            "distribution": distribution_input["distribution"],
+            "version": distribution_input["version"],
+            "file_count": len(file_entries),
+            "files": file_entries,
+        }}
+        distribution["sha256"] = hashlib.sha256(stable_json(distribution)).hexdigest()
+        items.append(distribution)
+
+    for opened in all_opened_files:
+        revalidate_open_file(opened)
+
+    evidence = {{
+        "schema": SCHEMA,
+        "state": "verified",
+        "python_executable": str(Path(sys.executable).resolve(strict=True)),
+        "distributions": items,
+    }}
+    evidence["sha256"] = hashlib.sha256(stable_json(evidence)).hexdigest()
+    print(json.dumps({{"ok": True, "evidence": evidence}}, sort_keys=True))
+finally:
+    close_open_files(all_opened_files)
+"""
+
+
+def _runtime_dependency_evidence(
+    python_executable: Path,
+    distributions: tuple[str, ...] = DEFAULT_RUNTIME_DEPENDENCY_DISTRIBUTIONS,
+) -> dict[str, Any]:
+    completed = subprocess.run(
+        [
+            str(python_executable),
+            "-I",
+            "-c",
+            _runtime_dependency_collector_script(distributions),
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        payload = cast(object, json.loads(completed.stdout))
+    except json.JSONDecodeError as exc:
+        raise GenerationContractError(
+            "generation.runtime_dependency_probe_failed"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise GenerationContractError("generation.runtime_dependency_probe_failed")
+    result = {str(key): value for key, value in cast(dict[object, Any], payload).items()}
+    if completed.returncode != 0 or result.get("ok") is not True:
+        reason = result.get("reason_code")
+        raise GenerationContractError(
+            reason
+            if isinstance(reason, str)
+            else "generation.runtime_dependency_probe_failed"
+        )
+    evidence = result.get("evidence")
+    if not isinstance(evidence, dict):
+        raise GenerationContractError("generation.runtime_dependency_probe_failed")
+    return _validate_runtime_dependency_evidence(cast(object, evidence))
+
+
+def _validate_runtime_dependency_evidence(evidence: object) -> dict[str, Any]:
+    if not isinstance(evidence, dict):
+        raise GenerationContractError("generation.runtime_dependency_evidence_invalid")
+    parsed = {str(key): value for key, value in cast(dict[object, Any], evidence).items()}
+    if set(parsed) != {
+        "schema",
+        "state",
+        "python_executable",
+        "distributions",
+        "sha256",
+    }:
+        raise GenerationContractError("generation.runtime_dependency_evidence_invalid")
+    distributions = parsed.get("distributions")
+    digest = parsed.get("sha256")
+    if (
+        parsed.get("schema") != RUNTIME_DEPENDENCY_EVIDENCE_SCHEMA
+        or parsed.get("state") != "verified"
+        or not isinstance(parsed.get("python_executable"), str)
+        or not isinstance(distributions, list)
+        or not isinstance(digest, str)
+        or not _SHA256_RE.fullmatch(digest)
+    ):
+        raise GenerationContractError("generation.runtime_dependency_evidence_invalid")
+    for raw_distribution in cast(list[object], distributions):
+        if not isinstance(raw_distribution, dict):
+            raise GenerationContractError(
+                "generation.runtime_dependency_evidence_invalid"
+            )
+        distribution = {
+            str(key): value
+            for key, value in cast(dict[object, Any], raw_distribution).items()
+        }
+        if set(distribution) != {
+            "distribution",
+            "version",
+            "file_count",
+            "files",
+            "sha256",
+        }:
+            raise GenerationContractError(
+                "generation.runtime_dependency_evidence_invalid"
+            )
+        files = distribution.get("files")
+        if (
+            not isinstance(distribution.get("distribution"), str)
+            or not isinstance(distribution.get("version"), str)
+            or not isinstance(distribution.get("file_count"), int)
+            or isinstance(distribution.get("file_count"), bool)
+            or not isinstance(files, list)
+            or not isinstance(distribution.get("sha256"), str)
+            or not _SHA256_RE.fullmatch(str(distribution["sha256"]))
+        ):
+            raise GenerationContractError(
+                "generation.runtime_dependency_evidence_invalid"
+            )
+        file_items = cast(list[object], files)
+        if distribution["file_count"] != len(file_items):
+            raise GenerationContractError(
+                "generation.runtime_dependency_evidence_invalid"
+            )
+        for raw_file in file_items:
+            if not isinstance(raw_file, dict):
+                raise GenerationContractError(
+                    "generation.runtime_dependency_evidence_invalid"
+                )
+            file_entry = {
+                str(key): value
+                for key, value in cast(dict[object, Any], raw_file).items()
+            }
+            if set(file_entry) != {
+                "record_path",
+                "path",
+                "device",
+                "inode",
+                "mode",
+                "size",
+                "mtime_ns",
+                "ctime_ns",
+                "sha256",
+            }:
+                raise GenerationContractError(
+                    "generation.runtime_dependency_evidence_invalid"
+                )
+            if (
+                not isinstance(file_entry["record_path"], str)
+                or not isinstance(file_entry["path"], str)
+                or not isinstance(file_entry["sha256"], str)
+                or not _SHA256_RE.fullmatch(str(file_entry["sha256"]))
+            ):
+                raise GenerationContractError(
+                    "generation.runtime_dependency_evidence_invalid"
+                )
+            for field_name in ("device", "inode", "mode", "size", "mtime_ns", "ctime_ns"):
+                value = file_entry[field_name]
+                if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                    raise GenerationContractError(
+                        "generation.runtime_dependency_evidence_invalid"
+                    )
+        without_digest = {
+            key: value for key, value in distribution.items() if key != "sha256"
+        }
+        if distribution["sha256"] != _sha256_bytes(
+            _stable_json(without_digest).encode("utf-8")
+        ):
+            raise GenerationContractError(
+                "generation.runtime_dependency_evidence_invalid"
+            )
+    without_digest = {key: value for key, value in parsed.items() if key != "sha256"}
+    if parsed["sha256"] != _sha256_bytes(_stable_json(without_digest).encode("utf-8")):
+        raise GenerationContractError("generation.runtime_dependency_evidence_invalid")
+    return parsed
 
 
 def _fsync_directory(path: Path) -> None:
@@ -671,6 +1061,8 @@ def verify_generation(root: Path, generation_id: str) -> dict[str, Any]:
         "source_tree_sha256",
         "dependency_sha256",
         "dependency_paths",
+        "runtime_dependency_sha256",
+        "runtime_dependency_evidence",
         "contract_sha256",
         "contract_paths",
         "python_executable",
@@ -706,10 +1098,17 @@ def verify_generation(root: Path, generation_id: str) -> dict[str, Any]:
         kind="contract",
         expected_paths=DEFAULT_CONTRACT_PATHS,
     )
+    runtime_dependency_evidence = _validate_runtime_dependency_evidence(
+        manifest.get("runtime_dependency_evidence")
+    )
+    runtime_dependency_sha256 = manifest.get("runtime_dependency_sha256")
     if (
-        manifest.get("dependency_environment_state")
-        != "external_unmanaged_lockfiles_only"
+        not isinstance(runtime_dependency_sha256, str)
+        or not _SHA256_RE.fullmatch(runtime_dependency_sha256)
+        or runtime_dependency_sha256 != runtime_dependency_evidence["sha256"]
     ):
+        raise GenerationContractError("generation.runtime_dependency_digest_mismatch")
+    if manifest.get("dependency_environment_state") != RUNTIME_DEPENDENCY_STATE:
         raise GenerationContractError("generation.dependency_claim_invalid")
     if (
         manifest.get("python_binding")
@@ -727,6 +1126,15 @@ def verify_generation(root: Path, generation_id: str) -> dict[str, Any]:
     }:
         raise GenerationContractError("generation.database_rollback_claim_invalid")
     python_executable, python_sha256 = _verify_python_binding(manifest)
+    if runtime_dependency_evidence["python_executable"] != manifest.get(
+        "python_executable_resolved"
+    ):
+        raise GenerationContractError("generation.runtime_dependency_python_mismatch")
+    observed_runtime_dependency_evidence = _runtime_dependency_evidence(
+        python_executable
+    )
+    if observed_runtime_dependency_evidence != runtime_dependency_evidence:
+        raise GenerationContractError("generation.runtime_dependency_digest_mismatch")
     _verify_exact_release_tree(release, entries)
     for entry in entries:
         relative = Path(str(entry.get("path", "")))
@@ -760,13 +1168,16 @@ def verify_generation(root: Path, generation_id: str) -> dict[str, Any]:
         "reviewed_source_sha": manifest["reviewed_source_sha"],
         "source_tree_sha256": manifest["source_tree_sha256"],
         "dependency_sha256": manifest["dependency_sha256"],
+        "runtime_dependency_sha256": runtime_dependency_sha256,
+        "runtime_dependency_state": runtime_dependency_evidence["state"],
+        "runtime_dependency_evidence": runtime_dependency_evidence,
         "contract_sha256": manifest["contract_sha256"],
         "launcher_sha256": manifest["launcher_sha256"],
         "python_executable": str(python_executable),
         "python_sha256": python_sha256,
         "dependency_environment_state": manifest["dependency_environment_state"],
         "database_rollback_contract": manifest["database_rollback_contract"],
-        "claim_ceiling": "source_and_interpreter_bound_external_environment_unmanaged",
+        "claim_ceiling": RUNTIME_DEPENDENCY_CLAIM_CEILING,
         "release_path": str(release),
     }
 
@@ -840,6 +1251,11 @@ def stage_generation(
             raise GenerationContractError("generation.source_changed_during_stage")
         _validated_source(source, reviewed_sha)
         python_sha256 = _sha256_file(executable_resolved)
+        runtime_dependency_evidence = _runtime_dependency_evidence(executable)
+        if runtime_dependency_evidence["python_executable"] != str(executable_resolved):
+            raise GenerationContractError(
+                "generation.runtime_dependency_python_mismatch"
+            )
         launcher_bytes = _make_launcher(
             release_path=release,
             python_executable=executable,
@@ -864,7 +1280,9 @@ def stage_generation(
             "python_executable_resolved": str(executable_resolved),
             "python_sha256": python_sha256,
             "python_binding": "external_executable_digest_verified_not_environment_immutable",
-            "dependency_environment_state": "external_unmanaged_lockfiles_only",
+            "dependency_environment_state": RUNTIME_DEPENDENCY_STATE,
+            "runtime_dependency_sha256": runtime_dependency_evidence["sha256"],
+            "runtime_dependency_evidence": runtime_dependency_evidence,
             "database_rollback_contract": {
                 "core_user_version": 23,
                 "previous_merged_generation_user_version": 23,
@@ -1437,6 +1855,8 @@ def _read_activation_without_pending(root: Path) -> dict[str, Any]:
         "previous_generation": previous,
         "reviewed_source_sha": verified["reviewed_source_sha"],
         "dependency_sha256": verified["dependency_sha256"],
+        "runtime_dependency_sha256": verified["runtime_dependency_sha256"],
+        "runtime_dependency_state": verified["runtime_dependency_state"],
         "contract_sha256": verified["contract_sha256"],
         "python_sha256": verified["python_sha256"],
         "dependency_environment_state": verified["dependency_environment_state"],
@@ -1512,7 +1932,9 @@ def runtime_generation_identity() -> dict[str, Any]:
         "state": "verified",
         "generation_id": generation_id,
         "reviewed_source_sha": manifest.get("reviewed_source_sha"),
-        "dependency_sha256": manifest.get("dependency_sha256"),
+        "dependency_sha256": verified["dependency_sha256"],
+        "runtime_dependency_sha256": verified["runtime_dependency_sha256"],
+        "runtime_dependency_state": verified["runtime_dependency_state"],
         "contract_sha256": manifest.get("contract_sha256"),
         "python_sha256": verified["python_sha256"],
         "dependency_environment_state": verified["dependency_environment_state"],

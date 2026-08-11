@@ -140,6 +140,7 @@ async def run_status(*, now: datetime | None = None) -> bool:
     print(
         "  MCP tenancy:"
         f" state={summary['signals']['tenancy_state']},"
+        f" readiness={summary['signals']['tenancy_readiness_state']},"
         f" active={summary['signals']['tenancy_active_count']},"
         f" active_requests={summary['signals']['tenancy_active_request_count']}"
     )
@@ -1844,6 +1845,11 @@ def main() -> None:
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--run-shared-relay",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--release-shared-client",
         metavar="LEASE_PATH",
         help=argparse.SUPPRESS,
@@ -1870,6 +1876,17 @@ def main() -> None:
 
         run_shared_broker()
         return
+    if args.run_shared_relay:
+        from bridge_db.shared_runtime import (
+            SharedRuntimeContractError,
+            run_shared_relay,
+        )
+
+        try:
+            sys.exit(run_shared_relay())
+        except SharedRuntimeContractError as exc:
+            print(f"bridge_db.{exc.reason_code}", file=sys.stderr)
+            sys.exit(69)
     if args.release_shared_client:
         from pathlib import Path
 

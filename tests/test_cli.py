@@ -887,14 +887,19 @@ async def test_log_session_boundary_uses_fts_safe_activity_path(
 
 
 @pytest.mark.parametrize(
-    ("flag", "expected_text"),
+    ("flag", "expected_text", "expected_returncode"),
     [
-        ("--status", "bridge-db status"),
-        ("--doctor", "DB opens (WAL + schema)"),
-        ("--dogfood", "bridge-db dogfood"),
+        ("--status", "bridge-db status", 1),
+        ("--doctor", "DB opens (WAL + schema)", 0),
+        ("--dogfood", "bridge-db dogfood", 1),
     ],
 )
-def test_cli_entrypoints_smoke(flag: str, expected_text: str, tmp_path: Path) -> None:
+def test_cli_entrypoints_smoke(
+    flag: str,
+    expected_text: str,
+    expected_returncode: int,
+    tmp_path: Path,
+) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     db_path = tmp_path / "bridge.db"
     bridge_path = tmp_path / "claude_ai_context.md"
@@ -971,7 +976,7 @@ asyncio.run(main())
         check=False,
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == expected_returncode, result.stderr
     assert expected_text in result.stdout
     if flag == "--doctor":
         assert str(db_path) in result.stdout
@@ -984,7 +989,8 @@ asyncio.run(main())
         ).read_text(encoding="utf-8")
     if flag == "--status":
         assert "contexts=0" in result.stdout
-        assert "Attention: execution_generation_state=mutable_direct_path" in result.stdout
+        assert "readiness=missing" in result.stdout
+        assert "Execution generation: state=mutable_direct_path" in result.stdout
 
 
 def test_enroll_writes_hashed_token_with_0600(

@@ -60,6 +60,25 @@ def _noisy_gnu_stat_shim(tmp_path: Path) -> Path:
     return bin_dir
 
 
+def _broker_receipt(
+    paths: shared_runtime_module.SharedRuntimePaths,
+    *,
+    pid: int | None = None,
+    identity: str | None = None,
+    state: str = "ready",
+) -> dict[str, object]:
+    process_id = os.getpid() if pid is None else pid
+    process_identity_value = identity or process_identity(process_id)
+    assert process_identity_value is not None
+    return shared_runtime_module._broker_receipt_record(  # pyright: ignore[reportPrivateUsage]
+        paths,
+        pid=process_id,
+        process_identity_value=process_identity_value,
+        state=state,
+        started_at="2026-08-05T00:00:00Z",
+    )
+
+
 @pytest.fixture
 def short_runtime_root() -> Iterator[Path]:
     # AF_UNIX paths are short on several platforms. Resolve both the platform
@@ -146,31 +165,23 @@ def test_current_readiness_cannot_borrow_an_unrelated_active_group(
     first = shared_runtime_paths()
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(str(first.socket))
-    identity = process_identity(os.getpid())
-    assert identity is not None
+    listener.listen(1)
     shared_runtime_module._atomic_json(  # pyright: ignore[reportPrivateUsage]
         first.broker_receipt,
-        {
-            "schema": shared_runtime_module.BROKER_SCHEMA,
-            "state": "ready",
-            "group_id": first.group.name,
-            "launch_contract_sha256": (
-                shared_runtime_module._launch_contract_sha256()  # pyright: ignore[reportPrivateUsage]
-            ),
-            "pid": os.getpid(),
-            "process_identity": identity,
-            "socket": str(first.socket),
-            "started_at": "2026-08-05T00:00:00Z",
-            "generation": "generation-one",
-            "auth_mode": "off",
-            "transport": "streamable_http_over_private_unix_socket",
-        },
+        _broker_receipt(first),
         replace=False,
     )
-    def selected_socket(path: Path) -> bool:
-        return path == first.socket
+    def selected_socket(
+        paths: shared_runtime_module.SharedRuntimePaths,
+        _record: dict[str, object],
+        *,
+        verify_receipt_hmac: bool = True,
+        verify_launch_contract: bool = True,
+    ) -> bool:
+        _ = (verify_receipt_hmac, verify_launch_contract)
+        return paths.socket == first.socket
 
-    monkeypatch.setattr(shared_runtime_module, "_probe_socket", selected_socket)
+    monkeypatch.setattr(shared_runtime_module, "_probe_broker_socket", selected_socket)
 
     try:
         assert shared_runtime_inventory(first.root)["adoption_state"] == "active"
@@ -208,21 +219,11 @@ def test_stale_broker_receipt_and_socket_are_archived_before_restart(
     stale_socket.close()
     shared_runtime_module._atomic_json(  # pyright: ignore[reportPrivateUsage]
         paths.broker_receipt,
-        {
-            "schema": shared_runtime_module.BROKER_SCHEMA,
-            "state": "ready",
-            "group_id": paths.group.name,
-            "launch_contract_sha256": (
-                shared_runtime_module._launch_contract_sha256()  # pyright: ignore[reportPrivateUsage]
-            ),
-            "pid": 99_999_999,
-            "process_identity": "fixture-missing-process",
-            "socket": str(paths.socket),
-            "started_at": "2026-08-05T00:00:00Z",
-            "generation": "generation-one",
-            "auth_mode": "enforce",
-            "transport": "streamable_http_over_private_unix_socket",
-        },
+        _broker_receipt(
+            paths,
+            pid=99_999_999,
+            identity="fixture-missing-process",
+        ),
         replace=False,
     )
 
@@ -261,21 +262,14 @@ def test_existing_broker_receipt_must_match_complete_launch_contract(
     actual_contract = shared_runtime_module._launch_contract_sha256()  # pyright: ignore[reportPrivateUsage]
     replacement = "0" if actual_contract[12] != "0" else "1"
     mismatched_contract = actual_contract[:12] + replacement + actual_contract[13:]
+    record = _broker_receipt(paths)
+    record["launch_contract_sha256"] = mismatched_contract
+    record = shared_runtime_module._rehash_broker_receipt(  # pyright: ignore[reportPrivateUsage]
+        paths, record
+    )
     shared_runtime_module._atomic_json(  # pyright: ignore[reportPrivateUsage]
         paths.broker_receipt,
-        {
-            "schema": shared_runtime_module.BROKER_SCHEMA,
-            "state": "ready",
-            "group_id": paths.group.name,
-            "launch_contract_sha256": mismatched_contract,
-            "pid": os.getpid(),
-            "process_identity": identity,
-            "socket": str(paths.socket),
-            "started_at": "2026-08-05T00:00:00Z",
-            "generation": "generation-one",
-            "auth_mode": "off",
-            "transport": "streamable_http_over_private_unix_socket",
-        },
+        record,
         replace=False,
     )
 
@@ -292,6 +286,174 @@ def test_existing_broker_receipt_must_match_complete_launch_contract(
         assert exc_info.value.reason_code == "shared_runtime.broker_receipt_invalid"
     finally:
         listener.close()
+        paths.socket.unlink(missing_ok=True)
+
+
+def test_existing_broker_receipt_requires_credential_bound_hmac(
+    short_runtime_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "BRIDGE_DB_SHARED_RUNTIME_ROOT", str(short_runtime_root / "shared")
+    )
+    monkeypatch.setenv(
+        "BRIDGE_DB_PRINCIPAL_TOKEN", "fixture-shared-secret-abcdefghijklmnopqrstuvwxyz"
+    )
+    monkeypatch.setenv("BRIDGE_DB_GENERATION_ID", "generation-one")
+    paths = shared_runtime_paths()
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(paths.socket))
+    listener.listen(1)
+    forged_record = _broker_receipt(paths)
+    forged_record["receipt_hmac_sha256"] = "0" * 64
+    shared_runtime_module._atomic_json(  # pyright: ignore[reportPrivateUsage]
+        paths.broker_receipt,
+        forged_record,
+        replace=False,
+    )
+
+    try:
+        with (
+            shared_runtime_module._group_lifecycle_lock(  # pyright: ignore[reportPrivateUsage]
+                paths
+            ),
+            pytest.raises(SharedRuntimeContractError) as exc_info,
+        ):
+            shared_runtime_module._existing_broker_ready(  # pyright: ignore[reportPrivateUsage]
+                paths
+            )
+        assert exc_info.value.reason_code == "shared_runtime.broker_receipt_invalid"
+    finally:
+        listener.close()
+        paths.socket.unlink(missing_ok=True)
+
+
+def test_relay_request_rejects_socket_replacement_after_receipt_validation(
+    short_runtime_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "BRIDGE_DB_SHARED_RUNTIME_ROOT", str(short_runtime_root / "shared")
+    )
+    monkeypatch.setenv(
+        "BRIDGE_DB_PRINCIPAL_TOKEN", "fixture-shared-secret-abcdefghijklmnopqrstuvwxyz"
+    )
+    monkeypatch.setenv("BRIDGE_DB_GENERATION_ID", "generation-one")
+    paths = shared_runtime_paths()
+    original_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    original_listener.bind(str(paths.socket))
+    original_listener.listen(1)
+    broker_record = _broker_receipt(paths)
+    shared_runtime_module._atomic_json(  # pyright: ignore[reportPrivateUsage]
+        paths.broker_receipt,
+        broker_record,
+        replace=False,
+    )
+    with shared_runtime_module._group_lifecycle_lock(  # pyright: ignore[reportPrivateUsage]
+        paths
+    ):
+        lease, _capability_file = shared_runtime_module._register_client(  # pyright: ignore[reportPrivateUsage]
+            paths,
+            owner_pid=os.getpid(),
+        )
+    original_listener.close()
+    paths.socket.unlink()
+    replacement_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    replacement_listener.bind(str(paths.socket))
+    replacement_listener.listen(1)
+
+    try:
+        with pytest.raises(SharedRuntimeContractError) as exc_info:
+            shared_runtime_module._http_request_to_broker(  # pyright: ignore[reportPrivateUsage]
+                paths,
+                method="POST",
+                body=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+                headers=shared_runtime_module._relay_request_headers(  # pyright: ignore[reportPrivateUsage]
+                    lease,
+                    session_id=None,
+                    protocol_version=None,
+                ),
+            )
+        assert exc_info.value.reason_code == "shared_runtime.socket_identity_mismatch"
+    finally:
+        replacement_listener.close()
+        paths.socket.unlink(missing_ok=True)
+
+
+def test_relay_request_rejects_socket_swap_restored_before_path_readback(
+    short_runtime_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "BRIDGE_DB_SHARED_RUNTIME_ROOT", str(short_runtime_root / "shared")
+    )
+    monkeypatch.setenv(
+        "BRIDGE_DB_PRINCIPAL_TOKEN", "fixture-shared-secret-abcdefghijklmnopqrstuvwxyz"
+    )
+    monkeypatch.setenv("BRIDGE_DB_GENERATION_ID", "generation-one")
+    paths = shared_runtime_paths()
+    original_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    original_listener.bind(str(paths.socket))
+    original_listener.listen(1)
+    broker_record = _broker_receipt(paths)
+    shared_runtime_module._atomic_json(  # pyright: ignore[reportPrivateUsage]
+        paths.broker_receipt,
+        broker_record,
+        replace=False,
+    )
+    saved_original = paths.group / "bridge.sock.original"
+    os.rename(paths.socket, saved_original)
+    replacement = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import socket, sys, time\n"
+                "listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+                "listener.bind(sys.argv[1])\n"
+                "listener.listen(1)\n"
+                "print('ready', flush=True)\n"
+                "conn, _ = listener.accept()\n"
+                "time.sleep(1)\n"
+                "conn.close()\n"
+                "listener.close()\n"
+            ),
+            str(paths.socket),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert replacement.stdout is not None
+    assert replacement.stdout.readline().strip() == "ready"
+    original_socket_identity = shared_runtime_module._socket_identity  # pyright: ignore[reportPrivateUsage]
+    armed = True
+
+    def restored_socket_identity(path: Path) -> dict[str, int]:
+        nonlocal armed
+        if armed:
+            armed = False
+            path.unlink()
+            os.rename(saved_original, path)
+        return original_socket_identity(path)
+
+    monkeypatch.setattr(
+        shared_runtime_module,
+        "_socket_identity",
+        restored_socket_identity,
+    )
+
+    try:
+        with pytest.raises(SharedRuntimeContractError) as exc_info:
+            shared_runtime_module._connect_verified_broker_socket(  # pyright: ignore[reportPrivateUsage]
+                paths,
+                broker_record,
+                timeout=1.0,
+            )
+        assert exc_info.value.reason_code == (
+            "shared_runtime.socket_peer_identity_mismatch"
+        )
+    finally:
+        replacement.terminate()
+        replacement.communicate(timeout=5)
+        original_listener.close()
         paths.socket.unlink(missing_ok=True)
 
 
@@ -366,6 +528,29 @@ def test_broker_start_refuses_an_unreceipted_existing_socket(
         paths.socket.unlink(missing_ok=True)
 
 
+def test_generation_manifest_launcher_preempts_inherited_launcher_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = tmp_path / "release"
+    launcher = release / "bin" / "bridge-db-mcp"
+    manifest = release / "generation-manifest.json"
+    malicious = tmp_path / "malicious-launcher"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    manifest.write_text("{}\n", encoding="utf-8")
+    malicious.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    malicious.chmod(0o755)
+    monkeypatch.setenv("BRIDGE_DB_GENERATION_MANIFEST", str(manifest))
+    monkeypatch.setenv("BRIDGE_DB_SHARED_RUNTIME_LAUNCHER", str(malicious))
+
+    assert shared_runtime_module._launcher_path() == launcher  # pyright: ignore[reportPrivateUsage]
+    assert (
+        shared_runtime_module._launch_contract()["runtime_source"]  # pyright: ignore[reportPrivateUsage]
+        == str(launcher)
+    )
+
+
 def test_release_waits_for_inflight_lease_scan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -438,7 +623,7 @@ def test_release_waits_for_inflight_lease_scan(
     assert not capability_file.exists()
 
 
-def test_capability_file_bytes_remain_bound_to_the_exact_lease(
+def test_request_capability_is_single_use_and_hash_bound(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -454,25 +639,56 @@ def test_capability_file_bytes_remain_bound_to_the_exact_lease(
         lease, capability_file = shared_runtime_module._register_client(  # pyright: ignore[reportPrivateUsage]
             paths
         )
-    capability_value = capability_file.read_bytes().split(b": ", 1)[1].rstrip(b"\n")
+    capability_header = shared_runtime_module.renew_shared_capability(  # pyright: ignore[reportPrivateUsage]
+        lease
+    )
+    capability_value = capability_header.encode("ascii").split(b": ", 1)[1]
 
     assert shared_runtime_module._relay_capability_authorized(  # pyright: ignore[reportPrivateUsage]
         paths, capability_value
     )
 
-    capability_file.chmod(0o600)
-    capability_file.write_text(
-        f"X-Bridge-Relay-Capability: {lease.stem}.{'0' * 64}\n",
-        encoding="ascii",
-    )
-    capability_file.chmod(0o400)
-
     assert not shared_runtime_module._relay_capability_authorized(  # pyright: ignore[reportPrivateUsage]
         paths, capability_value
     )
+    assert not capability_file.exists()
+
+
+def test_request_capability_renewal_requires_exact_relay_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRIDGE_DB_SHARED_RUNTIME_ROOT", str(tmp_path / "shared"))
+    monkeypatch.setenv(
+        "BRIDGE_DB_PRINCIPAL_TOKEN",
+        "fixture-shared-secret-abcdefghijklmnopqrstuvwxyz",
+    )
+    paths = shared_runtime_paths()
+    with shared_runtime_module._group_lifecycle_lock(  # pyright: ignore[reportPrivateUsage]
+        paths
+    ):
+        lease, _capability_file = shared_runtime_module._register_client(  # pyright: ignore[reportPrivateUsage]
+            paths
+        )
+
+    def mismatched_parent(_pid: int) -> str:
+        return "fixture-different-parent"
+
+    monkeypatch.setattr(
+        shared_runtime_module,
+        "process_identity",
+        mismatched_parent,
+    )
+
+    with pytest.raises(SharedRuntimeContractError) as exc_info:
+        shared_runtime_module.renew_shared_capability(lease)  # pyright: ignore[reportPrivateUsage]
+
+    assert exc_info.value.reason_code == (
+        "shared_runtime.capability_renew_identity_mismatch"
+    )
     inventory = shared_runtime_inventory(paths.root)
-    assert inventory["state"] == "unverified"
-    assert inventory["reason_code"] == "shared_runtime.capability_file_invalid"
+    assert inventory["state"] == "observed"
+    assert inventory["capability_file_count"] == 0
 
 
 def test_request_capability_requires_live_exact_relay_identity(
@@ -488,10 +704,13 @@ def test_request_capability_requires_live_exact_relay_identity(
     with shared_runtime_module._group_lifecycle_lock(  # pyright: ignore[reportPrivateUsage]
         paths
     ):
-        _lease, capability_file = shared_runtime_module._register_client(  # pyright: ignore[reportPrivateUsage]
+        lease, _capability_file = shared_runtime_module._register_client(  # pyright: ignore[reportPrivateUsage]
             paths
         )
-    capability_value = capability_file.read_bytes().split(b": ", 1)[1].rstrip(b"\n")
+    capability_header = shared_runtime_module.renew_shared_capability(  # pyright: ignore[reportPrivateUsage]
+        lease
+    )
+    capability_value = capability_header.encode("ascii").split(b": ", 1)[1]
 
     def mismatched_process(_pid: int, _identity: str) -> str:
         return "mismatch"
@@ -624,19 +843,7 @@ def test_shared_wrapper_relays_mcp_over_one_idle_bounded_broker(
     assert len(list(shared_root.glob("*/clients/*.json"))) == 2
     assert len(list(shared_root.glob("*/broker.json"))) == 1
     capability_files = list(shared_root.glob("*/capabilities/*.header"))
-    assert len(capability_files) == 2
-    capability_values = [path.read_text(encoding="ascii") for path in capability_files]
-    assert len(set(capability_values)) == 2
-    assert all(
-        value.startswith("X-Bridge-Relay-Capability: ")
-        for value in capability_values
-    )
-    for capability_file in capability_files:
-        lease_file = next(
-            shared_root.glob(f"*/clients/{capability_file.stem}.json")
-        )
-        secret = capability_file.read_text(encoding="ascii").strip().split(".", 1)[1]
-        assert secret not in lease_file.read_text(encoding="utf-8")
+    assert capability_files == []
 
     broker_socket = next(shared_root.glob("*/bridge.sock"))
     unauthorized = subprocess.run(
@@ -670,7 +877,7 @@ def test_shared_wrapper_relays_mcp_over_one_idle_bounded_broker(
     assert live_inventory["group_count"] == 1
     assert live_inventory["ready_broker_count"] == 1
     assert live_inventory["live_client_count"] == 2
-    assert live_inventory["capability_file_count"] == 2
+    assert live_inventory["capability_file_count"] == 0
     assert live_inventory["orphan_capability_file_count"] == 0
     assert live_inventory["auth_modes"] == {"off": 1}
 
@@ -715,10 +922,8 @@ def test_shared_wrapper_relays_mcp_over_one_idle_bounded_broker(
         path.read_text(encoding="utf-8")
         for path in shared_root.glob("*/history/*.json")
     )
-    for value in capability_values:
-        secret = value.strip().split(".", 1)[1]
-        assert secret not in broker_log_text
-        assert secret not in history_text
+    assert "X-Bridge-Relay-Capability" not in broker_log_text
+    assert "X-Bridge-Relay-Capability" not in history_text
     client_history = list(shared_root.glob("*/history/*.json"))
     assert any(
         json.loads(path.read_text(encoding="utf-8")).get("lifecycle_reason")
