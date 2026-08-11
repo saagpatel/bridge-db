@@ -97,6 +97,8 @@ def _tenancy_readiness(tenancy: dict[str, Any]) -> dict[str, Any]:
             "reason_code": "tenancy.inventory_state_unknown",
         }
 
+    active_count = _nonnegative_int(tenancy.get("active_count"))
+    lease_count = _nonnegative_int(tenancy.get("lease_count"))
     stale_lease_count = _nonnegative_int(tenancy.get("stale_lease_count"))
     unknown_process_count = _nonnegative_int(tenancy.get("unknown_process_count"))
     process_states_raw = tenancy.get("process_states")
@@ -108,17 +110,27 @@ def _tenancy_readiness(tenancy: dict[str, Any]) -> dict[str, Any]:
             "reason_code": "tenancy.inventory_counters_invalid",
         }
     process_states = cast(dict[object, object], process_states_raw)
+    same_process_count = _nonnegative_int(process_states.get("same"))
     missing_process_count = _nonnegative_int(process_states.get("missing"))
     mismatched_process_count = _nonnegative_int(process_states.get("mismatch"))
     unknown_process_state_count = _nonnegative_int(process_states.get("unknown"))
     if (
-        stale_lease_count is None
+        active_count is None
+        or lease_count is None
+        or stale_lease_count is None
         or unknown_process_count is None
+        or same_process_count is None
         or missing_process_count is None
         or mismatched_process_count is None
         or unknown_process_state_count is None
         or stale_lease_count != missing_process_count + mismatched_process_count
         or unknown_process_count != unknown_process_state_count
+        or active_count != same_process_count
+        or lease_count
+        != same_process_count
+        + missing_process_count
+        + mismatched_process_count
+        + unknown_process_state_count
     ):
         return {
             "schema": "BridgeMcpTenancyReadinessV1",
@@ -141,6 +153,15 @@ def _tenancy_readiness(tenancy: dict[str, Any]) -> dict[str, Any]:
             "ready": False,
             "state": "stale",
             "reason_code": "tenancy.stale_lease_evidence",
+            "unknown_process_count": unknown_process_count,
+            "stale_lease_count": stale_lease_count,
+        }
+    if active_count == 0:
+        return {
+            "schema": "BridgeMcpTenancyReadinessV1",
+            "ready": False,
+            "state": "missing",
+            "reason_code": "tenancy.live_process_evidence_missing",
             "unknown_process_count": unknown_process_count,
             "stale_lease_count": stale_lease_count,
         }

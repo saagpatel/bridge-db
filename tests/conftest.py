@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 from bridge_db import config
 from bridge_db.db import open_db
 from bridge_db.invariants import reset_sometimes_counts
+from bridge_db.tools import health as health_tool
 from bridge_db.tools import recall as recall_tool
 
 
@@ -53,6 +54,28 @@ def isolate_runtime_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         child.mkdir(mode=0o700)
         child.chmod(0o700)
     monkeypatch.setenv("BRIDGE_DB_TENANCY_ROOT", str(tenancy_root))
+    monkeypatch.setattr(
+        health_tool,
+        "tenancy_inventory",
+        lambda: {
+            "schema": "BridgeMcpTenancyInventoryV2",
+            "state": "observed",
+            "root": str(tenancy_root),
+            "active_count": 1,
+            "lease_count": 1,
+            "stale_lease_count": 0,
+            "unknown_process_count": 0,
+            "process_states": {
+                "same": 1,
+                "missing": 0,
+                "mismatch": 0,
+                "unknown": 0,
+            },
+            "owners": {"fixture": 1},
+            "generations": {"fixture": 1},
+            "active_request_count": 0,
+        },
+    )
     monkeypatch.setattr(config, "AUTH_MODE", "off")
 
 

@@ -58,6 +58,28 @@ async def patch_db_path(
     await db.commit()
     await _backup_db_file(db, "health-fixture")
     _replace_test_anchor(config.DB_PATH)
+    monkeypatch.setattr(
+        mod,
+        "tenancy_inventory",
+        lambda: {
+            "schema": "BridgeMcpTenancyInventoryV2",
+            "state": "observed",
+            "root": str(tmp_path / "tenancy"),
+            "active_count": 1,
+            "lease_count": 1,
+            "stale_lease_count": 0,
+            "unknown_process_count": 0,
+            "process_states": {
+                "same": 1,
+                "missing": 0,
+                "mismatch": 0,
+                "unknown": 0,
+            },
+            "owners": {"fixture": 1},
+            "generations": {"fixture": 1},
+            "active_request_count": 0,
+        },
+    )
 
 
 async def test_health_returns_ok_on_healthy_db(
@@ -1534,6 +1556,28 @@ async def test_health_reports_auth_block(
             },
             "unverified",
             "tenancy.child_not_private",
+        ),
+        (
+            {
+                "schema": "BridgeMcpTenancyInventoryV2",
+                "state": "observed",
+                "root": "/tmp/empty-tenancy",
+                "active_count": 0,
+                "lease_count": 0,
+                "stale_lease_count": 0,
+                "unknown_process_count": 0,
+                "process_states": {
+                    "same": 0,
+                    "missing": 0,
+                    "mismatch": 0,
+                    "unknown": 0,
+                },
+                "owners": {},
+                "generations": {},
+                "active_request_count": 0,
+            },
+            "missing",
+            "tenancy.live_process_evidence_missing",
         ),
         (
             {
