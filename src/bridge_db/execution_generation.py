@@ -40,6 +40,10 @@ RUNTIME_DEPENDENCY_STATE = "external_runtime_dependency_files_verified"
 RUNTIME_DEPENDENCY_CLAIM_CEILING = (
     "source_interpreter_and_runtime_dependencies_bound_external_os_unmanaged"
 )
+LEGACY_RUNTIME_DEPENDENCY_STATE = "external_unmanaged_lockfiles_only"
+LEGACY_RUNTIME_DEPENDENCY_CLAIM_CEILING = (
+    "source_and_interpreter_bound_external_environment_unmanaged"
+)
 
 DEFAULT_DEPENDENCY_PATHS = ("pyproject.toml", "uv.lock")
 DEFAULT_RUNTIME_DEPENDENCY_DISTRIBUTIONS = (
@@ -1054,15 +1058,13 @@ def verify_generation(root: Path, generation_id: str) -> dict[str, Any]:
         or manifest.get("generation_id") != generation_id
     ):
         raise GenerationContractError("generation.manifest_identity_mismatch")
-    expected_manifest_fields = {
+    legacy_manifest_fields = {
         "schema",
         "generation_id",
         "reviewed_source_sha",
         "source_tree_sha256",
         "dependency_sha256",
         "dependency_paths",
-        "runtime_dependency_sha256",
-        "runtime_dependency_evidence",
         "contract_sha256",
         "contract_paths",
         "python_executable",
@@ -1074,12 +1076,22 @@ def verify_generation(root: Path, generation_id: str) -> dict[str, Any]:
         "launcher_sha256",
         "source_files",
     }
-    if set(manifest) != expected_manifest_fields:
+    expected_manifest_fields = legacy_manifest_fields | {
+        "runtime_dependency_sha256",
+        "runtime_dependency_evidence",
+    }
+    manifest_fields = set(manifest)
+    if manifest_fields not in (legacy_manifest_fields, expected_manifest_fields):
         raise GenerationContractError("generation.manifest_shape_invalid")
     reviewed_sha = manifest.get("reviewed_source_sha")
     if not isinstance(reviewed_sha, str) or not _SHA_RE.fullmatch(reviewed_sha):
         raise GenerationContractError("generation.reviewed_sha_invalid")
     entries = _validated_manifest_entries(manifest)
+    legacy_runtime_dependency_binding = manifest_fields == legacy_manifest_fields
+    if legacy_runtime_dependency_binding and any(
+        entry["path"] == _SHARED_RUNTIME_CONTRACT_PATH for entry in entries
+    ):
+        raise GenerationContractError("generation.manifest_shape_invalid")
     source_tree_digest = _entries_digest(entries)
     if source_tree_digest != manifest.get("source_tree_sha256"):
         raise GenerationContractError("generation.source_tree_digest_mismatch")
@@ -1098,18 +1110,34 @@ def verify_generation(root: Path, generation_id: str) -> dict[str, Any]:
         kind="contract",
         expected_paths=DEFAULT_CONTRACT_PATHS,
     )
-    runtime_dependency_evidence = _validate_runtime_dependency_evidence(
-        manifest.get("runtime_dependency_evidence")
-    )
-    runtime_dependency_sha256 = manifest.get("runtime_dependency_sha256")
-    if (
-        not isinstance(runtime_dependency_sha256, str)
-        or not _SHA256_RE.fullmatch(runtime_dependency_sha256)
-        or runtime_dependency_sha256 != runtime_dependency_evidence["sha256"]
-    ):
-        raise GenerationContractError("generation.runtime_dependency_digest_mismatch")
-    if manifest.get("dependency_environment_state") != RUNTIME_DEPENDENCY_STATE:
-        raise GenerationContractError("generation.dependency_claim_invalid")
+    runtime_dependency_evidence: dict[str, Any] | None = None
+    runtime_dependency_sha256: str | None = None
+    runtime_dependency_state = "legacy_unverified"
+    claim_ceiling = LEGACY_RUNTIME_DEPENDENCY_CLAIM_CEILING
+    if legacy_runtime_dependency_binding:
+        if (
+            manifest.get("dependency_environment_state")
+            != LEGACY_RUNTIME_DEPENDENCY_STATE
+        ):
+            raise GenerationContractError("generation.dependency_claim_invalid")
+    else:
+        runtime_dependency_evidence = _validate_runtime_dependency_evidence(
+            manifest.get("runtime_dependency_evidence")
+        )
+        runtime_dependency_sha256_value = manifest.get("runtime_dependency_sha256")
+        if (
+            not isinstance(runtime_dependency_sha256_value, str)
+            or not _SHA256_RE.fullmatch(runtime_dependency_sha256_value)
+            or runtime_dependency_sha256_value != runtime_dependency_evidence["sha256"]
+        ):
+            raise GenerationContractError(
+                "generation.runtime_dependency_digest_mismatch"
+            )
+        if manifest.get("dependency_environment_state") != RUNTIME_DEPENDENCY_STATE:
+            raise GenerationContractError("generation.dependency_claim_invalid")
+        runtime_dependency_sha256 = runtime_dependency_sha256_value
+        runtime_dependency_state = str(runtime_dependency_evidence["state"])
+        claim_ceiling = RUNTIME_DEPENDENCY_CLAIM_CEILING
     if (
         manifest.get("python_binding")
         != "external_executable_digest_verified_not_environment_immutable"
@@ -1126,15 +1154,20 @@ def verify_generation(root: Path, generation_id: str) -> dict[str, Any]:
     }:
         raise GenerationContractError("generation.database_rollback_claim_invalid")
     python_executable, python_sha256 = _verify_python_binding(manifest)
-    if runtime_dependency_evidence["python_executable"] != manifest.get(
-        "python_executable_resolved"
-    ):
-        raise GenerationContractError("generation.runtime_dependency_python_mismatch")
-    observed_runtime_dependency_evidence = _runtime_dependency_evidence(
-        python_executable
-    )
-    if observed_runtime_dependency_evidence != runtime_dependency_evidence:
-        raise GenerationContractError("generation.runtime_dependency_digest_mismatch")
+    if runtime_dependency_evidence is not None:
+        if runtime_dependency_evidence["python_executable"] != manifest.get(
+            "python_executable_resolved"
+        ):
+            raise GenerationContractError(
+                "generation.runtime_dependency_python_mismatch"
+            )
+        observed_runtime_dependency_evidence = _runtime_dependency_evidence(
+            python_executable
+        )
+        if observed_runtime_dependency_evidence != runtime_dependency_evidence:
+            raise GenerationContractError(
+                "generation.runtime_dependency_digest_mismatch"
+            )
     _verify_exact_release_tree(release, entries)
     for entry in entries:
         relative = Path(str(entry.get("path", "")))
@@ -1169,7 +1202,7 @@ def verify_generation(root: Path, generation_id: str) -> dict[str, Any]:
         "source_tree_sha256": manifest["source_tree_sha256"],
         "dependency_sha256": manifest["dependency_sha256"],
         "runtime_dependency_sha256": runtime_dependency_sha256,
-        "runtime_dependency_state": runtime_dependency_evidence["state"],
+        "runtime_dependency_state": runtime_dependency_state,
         "runtime_dependency_evidence": runtime_dependency_evidence,
         "contract_sha256": manifest["contract_sha256"],
         "launcher_sha256": manifest["launcher_sha256"],
@@ -1177,7 +1210,7 @@ def verify_generation(root: Path, generation_id: str) -> dict[str, Any]:
         "python_sha256": python_sha256,
         "dependency_environment_state": manifest["dependency_environment_state"],
         "database_rollback_contract": manifest["database_rollback_contract"],
-        "claim_ceiling": RUNTIME_DEPENDENCY_CLAIM_CEILING,
+        "claim_ceiling": claim_ceiling,
         "release_path": str(release),
     }
 

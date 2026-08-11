@@ -298,12 +298,34 @@ def test_pre_shared_runtime_generation_remains_verified_and_rollbackable(
         contract_paths=legacy_contract_paths,
     )
     legacy_id = str(legacy["generation_id"])
+    legacy_manifest_path = (
+        root / "releases" / legacy_id / "generation-manifest.json"
+    )
+    legacy_manifest_path.chmod(0o644)
+    legacy_manifest = json.loads(legacy_manifest_path.read_text())
+    del legacy_manifest["runtime_dependency_sha256"]
+    del legacy_manifest["runtime_dependency_evidence"]
+    legacy_manifest["dependency_environment_state"] = (
+        execution_generation.LEGACY_RUNTIME_DEPENDENCY_STATE
+    )
+    legacy_manifest_path.write_text(
+        json.dumps(legacy_manifest, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    legacy_manifest_path.chmod(0o444)
     _write_tenancy_activation_evidence(root, legacy_id)
     monkeypatch.setattr(
         execution_generation, "DEFAULT_CONTRACT_PATHS", current_contract_paths
     )
 
-    assert verify_generation(root, legacy_id)["state"] == "verified"
+    verified_legacy = verify_generation(root, legacy_id)
+    assert verified_legacy["state"] == "verified"
+    assert verified_legacy["runtime_dependency_sha256"] is None
+    assert verified_legacy["runtime_dependency_state"] == "legacy_unverified"
+    assert (
+        verified_legacy["claim_ceiling"]
+        == execution_generation.LEGACY_RUNTIME_DEPENDENCY_CLAIM_CEILING
+    )
     activate_generation(root, legacy_id)
 
     shared_runtime.write_text("SHARED_RUNTIME = 'fixture'\n", encoding="utf-8")
@@ -317,6 +339,31 @@ def test_pre_shared_runtime_generation_remains_verified_and_rollbackable(
     rollback = rollback_generation(root)
     assert rollback["outcome"] == "activated"
     assert read_activation(root)["current_generation"] == legacy_id
+
+
+def test_verify_rejects_legacy_runtime_dependency_shape_with_shared_runtime(
+    tmp_path: Path,
+) -> None:
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    generation_id = str(_stage(source, root, sha)["generation_id"])
+    manifest_path = root / "releases" / generation_id / "generation-manifest.json"
+    manifest_path.chmod(0o644)
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["runtime_dependency_sha256"]
+    del manifest["runtime_dependency_evidence"]
+    manifest["dependency_environment_state"] = (
+        execution_generation.LEGACY_RUNTIME_DEPENDENCY_STATE
+    )
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    manifest_path.chmod(0o444)
+
+    with pytest.raises(GenerationContractError) as refused:
+        verify_generation(root, generation_id)
+
+    assert refused.value.reason_code == "generation.manifest_shape_invalid"
 
 
 def test_verify_rejects_legacy_contract_downgrade_with_shared_runtime(
