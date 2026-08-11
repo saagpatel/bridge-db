@@ -28,6 +28,13 @@ contract path was added; staging still emits only the current complete contract
 path set, and a generation containing shared-runtime source cannot downgrade
 that digest boundary.
 
+The same source-inventory boundary permits the exact legacy manifest shape that
+predates runtime-dependency evidence. Such a generation retains its original
+`source_and_interpreter_bound_external_environment_unmanaged` claim ceiling and
+reports runtime dependencies as `legacy_unverified`; it is never normalized to
+the stronger current claim. A generation containing shared-runtime source must
+carry the complete runtime-dependency evidence fields.
+
 The release tree is read-only. `current` and `previous` are relative symlinks
 under one private execution root. Activation replaces `current` atomically,
 records `previous`, writes an exact readback receipt, and leaves an explicit
