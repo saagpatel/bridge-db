@@ -1,9 +1,12 @@
-"""Migration: parse the existing bridge markdown file and populate the SQLite DB.
+"""Migration: import the bounded legacy Markdown projection into SQLite.
 
 Run with: uv run python -m bridge_db.migration
 
 The migration is idempotent — it checks for existing rows before inserting and
 skips anything already present. Safe to re-run.
+
+The Markdown file is not a complete backup. It does not preserve every durable
+surface, identifier, trust label, or receipt held by bridge-db.
 """
 
 from __future__ import annotations
@@ -155,9 +158,12 @@ def parse_cost_table(cost_section: str) -> list[dict[str, Any]]:
     return records
 
 
-def parse_activity_lines(text: str, source: str) -> list[dict[str, Any]]:
-    """Parse activity log lines into list of dicts. Skips HTML comments and blanks."""
+def _parse_activity_lines_with_malformed_count(
+    text: str, source: str
+) -> tuple[list[dict[str, Any]], int]:
+    """Parse activity lines and count non-comment data lines that are malformed."""
     entries: list[dict[str, Any]] = []
+    malformed = 0
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("<!--") or line.startswith("-->"):
@@ -179,7 +185,14 @@ def parse_activity_lines(text: str, source: str) -> list[dict[str, Any]]:
                 }
             )
         else:
+            malformed += 1
             logger.debug("Skipping unparseable activity line: %s", line[:80])
+    return entries, malformed
+
+
+def parse_activity_lines(text: str, source: str) -> list[dict[str, Any]]:
+    """Parse activity log lines into a list of dicts."""
+    entries, _malformed = _parse_activity_lines_with_malformed_count(text, source)
     return entries
 
 
@@ -188,14 +201,19 @@ def parse_activity_lines(text: str, source: str) -> list[dict[str, Any]]:
 
 async def _insert_context_section(
     db: aiosqlite.Connection, section_name: str, owner: str, content: str
-) -> bool:
-    """Insert a context section. Returns True if inserted, False if already present."""
+) -> str:
+    """Insert a context section and return imported, skipped, or conflicted."""
     cursor = await db.execute(
-        "SELECT 1 FROM context_sections WHERE section_name = ?", (section_name,)
+        "SELECT owner, content FROM context_sections WHERE section_name = ?",
+        (section_name,),
     )
-    if await cursor.fetchone() is not None:
-        logger.debug("context_sections: %s already exists, skipping", section_name)
-        return False
+    existing = await cursor.fetchone()
+    if existing is not None:
+        if existing["owner"] == owner and existing["content"] == content:
+            logger.debug("context_sections: %s already exists, skipping", section_name)
+            return "skipped"
+        logger.warning("context_sections: %s conflicts with existing row", section_name)
+        return "conflicted"
     await db.execute(
         """
         INSERT INTO context_sections (section_name, owner, content)
@@ -204,48 +222,77 @@ async def _insert_context_section(
         (section_name, owner, content),
     )
     logger.info("Inserted context section: %s", section_name)
-    return True
+    return "imported"
 
 
 async def _insert_snapshot(
     db: aiosqlite.Connection, system: str, snap_date: str, data: dict[str, Any]
-) -> bool:
-    """Insert a snapshot. Returns True if inserted, False if system already has one."""
-    cursor = await db.execute("SELECT 1 FROM system_snapshots WHERE system = ? LIMIT 1", (system,))
-    if await cursor.fetchone() is not None:
-        logger.debug("system_snapshots: %s already has a snapshot, skipping", system)
-        return False
+) -> str:
+    """Insert a snapshot and return imported, skipped, or conflicted."""
+    cursor = await db.execute(
+        "SELECT snapshot_date, data FROM system_snapshots WHERE system = ? LIMIT 1",
+        (system,),
+    )
+    existing = await cursor.fetchone()
+    encoded_data = json.dumps(data)
+    if existing is not None:
+        if existing["snapshot_date"] == snap_date and json.loads(existing["data"]) == data:
+            logger.debug("system_snapshots: %s already has this snapshot", system)
+            return "skipped"
+        logger.warning("system_snapshots: %s conflicts with existing snapshot", system)
+        return "conflicted"
     await db.execute(
         "INSERT INTO system_snapshots (system, snapshot_date, data) VALUES (?, ?, ?)",
-        (system, snap_date, json.dumps(data)),
+        (system, snap_date, encoded_data),
     )
     logger.info("Inserted snapshot: system=%s date=%s", system, snap_date)
-    return True
+    return "imported"
 
 
 async def _upsert_cost_record(
     db: aiosqlite.Connection, system: str, month: str, amount: float
-) -> None:
-    """Upsert a cost record."""
+) -> str:
+    """Import a cost record without overwriting a conflicting canonical value."""
+    cursor = await db.execute(
+        "SELECT amount FROM cost_records WHERE system = ? AND month = ?",
+        (system, month),
+    )
+    existing = await cursor.fetchone()
+    if existing is not None:
+        if float(existing["amount"]) == amount:
+            return "skipped"
+        logger.warning("cost_records: %s/%s conflicts with existing value", system, month)
+        return "conflicted"
     await db.execute(
         """
         INSERT INTO cost_records (system, month, amount)
         VALUES (?, ?, ?)
-        ON CONFLICT(system, month) DO UPDATE SET amount = excluded.amount
         """,
         (system, month, amount),
     )
-    logger.info("Upserted cost record: system=%s month=%s amount=%.0f", system, month, amount)
+    logger.info("Inserted cost record: system=%s month=%s amount=%.0f", system, month, amount)
+    return "imported"
 
 
-async def _insert_activity(db: aiosqlite.Connection, entry: dict[str, Any]) -> bool:
-    """Insert an activity entry. Deduplicates on (source, timestamp, project_name)."""
+async def _insert_activity(db: aiosqlite.Connection, entry: dict[str, Any]) -> str:
+    """Insert an activity entry. Deduplicate only an exact semantic identity."""
     cursor = await db.execute(
-        "SELECT 1 FROM activity_log WHERE source=? AND timestamp=? AND project_name=?",
-        (entry["source"], entry["timestamp"], entry["project_name"]),
+        """
+        SELECT 1 FROM activity_log
+        WHERE source=? AND timestamp=? AND project_name=? AND summary=?
+          AND branch IS ? AND tags=?
+        """,
+        (
+            entry["source"],
+            entry["timestamp"],
+            entry["project_name"],
+            entry["summary"],
+            entry["branch"],
+            entry["tags"],
+        ),
     )
     if await cursor.fetchone() is not None:
-        return False
+        return "skipped"
     await db.execute(
         """
         INSERT INTO activity_log (source, timestamp, project_name, summary, branch, tags)
@@ -260,7 +307,7 @@ async def _insert_activity(db: aiosqlite.Connection, entry: dict[str, Any]) -> b
             entry["tags"],
         ),
     )
-    return True
+    return "imported"
 
 
 # ── Main migration entry point ───────────────────────────────────────────────
@@ -269,13 +316,15 @@ async def _insert_activity(db: aiosqlite.Connection, entry: dict[str, Any]) -> b
 async def migrate_from_markdown(db: aiosqlite.Connection, bridge_path: Path) -> dict[str, Any]:
     """Parse bridge markdown and populate the DB. Idempotent.
 
-    Returns a summary dict with counts of rows inserted per table.
+    Returns per-table import counts plus an explicit record-level outcome
+    summary. This imports a lossy projection and must not be represented as
+    complete backup restoration.
     """
     if not bridge_path.exists():
         raise FileNotFoundError(f"Bridge file not found: {bridge_path}")
 
     content = bridge_path.read_text(encoding="utf-8")
-    sections = extract_sections(content)
+    sections = extract_sections(content, allowed_headings=BRIDGE_SECTION_HEADINGS)
     logger.info("Parsed %d level-2 sections from %s", len(sections), bridge_path)
 
     counts: dict[str, int] = {
@@ -284,13 +333,25 @@ async def migrate_from_markdown(db: aiosqlite.Connection, bridge_path: Path) -> 
         "cost_records": 0,
         "activity_log": 0,
     }
+    outcomes = {
+        "parsed": 0,
+        "imported": 0,
+        "skipped": 0,
+        "conflicted": 0,
+        "malformed": 0,
+    }
+
+    def record_outcome(outcome: str) -> None:
+        outcomes["parsed"] += 1
+        outcomes[outcome] += 1
 
     # 1. Context sections (owned by claude_ai)
     for heading, section_name in SECTION_MAP.items():
         body = sections.get(heading, "")
         if body:
-            inserted = await _insert_context_section(db, section_name, "claude_ai", body)
-            if inserted:
+            outcome = await _insert_context_section(db, section_name, "claude_ai", body)
+            record_outcome(outcome)
+            if outcome == "imported":
                 counts["context_sections"] += 1
 
     # 2. CC State Snapshot
@@ -305,8 +366,9 @@ async def migrate_from_markdown(db: aiosqlite.Connection, bridge_path: Path) -> 
         # Remove the cost sub-section from snapshot data (cost goes to its own table)
         cost_text = snapshot_data.pop("cost", "")
 
-        inserted = await _insert_snapshot(db, "cc", snap_date, snapshot_data)
-        if inserted:
+        outcome = await _insert_snapshot(db, "cc", snap_date, snapshot_data)
+        record_outcome(outcome)
+        if outcome == "imported":
             counts["snapshots"] += 1
 
         # Parse cost table from the "Cost" subsection
@@ -318,14 +380,22 @@ async def migrate_from_markdown(db: aiosqlite.Connection, bridge_path: Path) -> 
                 cost_text = cost_match.group(1)
 
         for record in parse_cost_table(cost_text):
-            await _upsert_cost_record(db, "cc", record["month"], record["amount"])
-            counts["cost_records"] += 1
+            outcome = await _upsert_cost_record(db, "cc", record["month"], record["amount"])
+            record_outcome(outcome)
+            if outcome == "imported":
+                counts["cost_records"] += 1
 
     # 3. CC Activity
     cc_activity_heading = "Recent Claude Code Activity"
     if cc_activity_heading in sections:
-        for entry in parse_activity_lines(sections[cc_activity_heading], "cc"):
-            if await _insert_activity(db, entry):
+        entries, malformed = _parse_activity_lines_with_malformed_count(
+            sections[cc_activity_heading], "cc"
+        )
+        outcomes["malformed"] += malformed
+        for entry in entries:
+            outcome = await _insert_activity(db, entry)
+            record_outcome(outcome)
+            if outcome == "imported":
                 counts["activity_log"] += 1
 
     # 4. Codex State Snapshot
@@ -336,23 +406,35 @@ async def migrate_from_markdown(db: aiosqlite.Connection, bridge_path: Path) -> 
         snap_date = snap_date_match.group(1) if snap_date_match else "2026-01-01"
 
         snapshot_data = parse_subsections(codex_snap_content, CODEX_SNAPSHOT_KEYS)
-        inserted = await _insert_snapshot(db, "codex", snap_date, snapshot_data)
-        if inserted:
+        outcome = await _insert_snapshot(db, "codex", snap_date, snapshot_data)
+        record_outcome(outcome)
+        if outcome == "imported":
             counts["snapshots"] += 1
 
     # 5. Codex Activity
     codex_activity_heading = "Recent Codex Activity"
     if codex_activity_heading in sections:
-        for entry in parse_activity_lines(sections[codex_activity_heading], "codex"):
-            if await _insert_activity(db, entry):
+        entries, malformed = _parse_activity_lines_with_malformed_count(
+            sections[codex_activity_heading], "codex"
+        )
+        outcomes["malformed"] += malformed
+        for entry in entries:
+            outcome = await _insert_activity(db, entry)
+            record_outcome(outcome)
+            if outcome == "imported":
                 counts["activity_log"] += 1
 
     await db.commit()
     # Bulk direct INSERTs above bypass the per-tool FTS5 hooks; rebuild the
     # content_index from source tables so recall stays consistent after bootstrap.
     await repopulate_content_index(db)
-    logger.info("Migration complete: %s", counts)
-    return counts
+    result: dict[str, Any] = {
+        **counts,
+        **outcomes,
+        "source_contract": "projection_only_not_complete_backup",
+    }
+    logger.info("Migration complete: %s", result)
+    return result
 
 
 async def _main() -> None:

@@ -75,6 +75,37 @@ def test_load_manifest_requires_keys(tmp_path: Path) -> None:
         load_manifest(path)
 
 
+@pytest.mark.parametrize("value", [None, "seed", 7, []])
+def test_load_manifest_rejects_scalar_or_array_root(tmp_path: Path, value: object) -> None:
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        load_manifest(path)
+
+
+def test_load_manifest_rejects_deep_payload(tmp_path: Path) -> None:
+    manifest = make_v2_manifest()
+    nested: dict[str, object] = {}
+    cursor = nested
+    for _ in range(40):
+        child: dict[str, object] = {}
+        cursor["child"] = child
+        cursor = child
+    manifest["snapshot_payload"] = nested
+    manifest["fingerprint"] = fingerprint_manifest_v2(manifest)
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="maximum depth"):
+        load_manifest(path)
+
+
+def test_load_manifest_rejects_oversized_file_before_parsing(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.json"
+    path.write_bytes(b" " * (1_048_576 + 1))
+    with pytest.raises(ValueError, match="byte limit"):
+        load_manifest(path)
+
+
 def test_load_manifest_rejects_mismatched_fingerprint(tmp_path: Path) -> None:
     path = tmp_path / "manifest.json"
     manifest = make_manifest()

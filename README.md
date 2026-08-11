@@ -122,10 +122,19 @@ reports the projection as `untracked` until an authenticated export records the
 whole-file export state; matching section text alone is not sufficient proof
 that a legacy file is safe to overwrite.
 
+The Markdown bridge is a bounded, lossy projection for fallback readers, not a
+complete backup. Legacy Markdown import cannot restore durable identifiers,
+trust labels, handoffs, protected ledger state, receipts, or every activity
+source. Migration output labels this contract and reports parsed, imported,
+skipped, conflicted, and malformed record counts.
+
 Exports to the real Claude.ai fallback path are also guarded against empty
 fixture-like output: bridge-db refuses to overwrite that file when all four core
 Claude.ai-owned sections would render as `_Not yet populated._`. Set
 `BRIDGE_DB_ALLOW_EMPTY_BRIDGE_EXPORT=1` only for an intentional empty bootstrap.
+If a process fails after atomic file replacement but before the export-state
+transaction commits, retrying the same rendered content reconciles the missing
+state and receipt. A different file hash remains a hard conflict.
 
 Use `get_write_conflicts(status="open")` to inspect stale section writes,
 stale markdown imports, and raced handoff claims.

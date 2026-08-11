@@ -273,6 +273,28 @@ async def test_successful_manual_export_records_principal_bound_receipt(
     assert receipt["byte_count"] == result["bytes"]
 
 
+async def test_export_receipt_counts_utf8_bytes(
+    db: aiosqlite.Connection,
+    all_fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge_path = tmp_path / "bridge.md"
+    monkeypatch.setattr(exp_mod.config, "BRIDGE_FILE_PATH", bridge_path)
+    await all_fns["update_section"](
+        caller="claude_ai",
+        section_name="career",
+        content="Résumé 日本語 مرحبا",
+        ctx=make_ctx(db, principal="claude_ai"),
+    )
+
+    result = await all_fns["export_bridge_markdown"](
+        ctx=make_ctx(db, principal="claude_ai")
+    )
+
+    assert result["bytes"] == len(bridge_path.read_bytes())
+
+
 async def test_export_records_context_section_export_state(
     db: aiosqlite.Connection, all_fns: dict[str, Any], tmp_path: Path
 ) -> None:
@@ -344,6 +366,79 @@ async def test_export_refuses_unsynchronized_file_edit_but_allows_db_update(
         assert bridge_path.read_text(encoding="utf-8") == edited
     finally:
         cfg.BRIDGE_FILE_PATH = original_path
+
+
+async def test_export_retry_recovers_file_replacement_before_receipt_commit(
+    db: aiosqlite.Connection,
+    all_fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge_path = tmp_path / "bridge.md"
+    monkeypatch.setattr(exp_mod.config, "BRIDGE_FILE_PATH", bridge_path)
+    ctx = make_ctx(db, principal="claude_ai")
+    await all_fns["update_section"](
+        caller="claude_ai",
+        section_name="career",
+        content="export base",
+        ctx=ctx,
+    )
+    await all_fns["export_bridge_markdown"](ctx=ctx)
+    current = await all_fns["get_section"](section_name="career", ctx=ctx)
+    await all_fns["update_section"](
+        caller="claude_ai",
+        section_name="career",
+        content="replacement survived",
+        if_match_version=current["version"],
+        ctx=ctx,
+    )
+    snapshot: list[exp_mod.ContextExportSnapshot] = []
+    rendered = await exp_mod.build_markdown(db, context_snapshot=snapshot)
+    original_record = exp_mod.record_context_export_state
+
+    async def fail_after_replacement(
+        _db: Any, _snapshot: list[exp_mod.ContextExportSnapshot]
+    ) -> int:
+        raise OSError("simulated failure after file replacement")
+
+    monkeypatch.setattr(exp_mod, "record_context_export_state", fail_after_replacement)
+    with pytest.raises(OSError, match="after file replacement"):
+        await exp_mod.export_bridge_file(
+            db,
+            rendered,
+            snapshot,
+            principal="claude_ai",
+            trigger="manual",
+        )
+    await db.rollback()
+    assert bridge_path.read_text(encoding="utf-8") == rendered
+
+    monkeypatch.setattr(exp_mod, "record_context_export_state", original_record)
+    exported = await exp_mod.export_bridge_file(
+        db,
+        rendered,
+        snapshot,
+        principal="claude_ai",
+        trigger="manual",
+    )
+    await db.commit()
+
+    state = await (
+        await db.execute(
+            "SELECT exported_content_sha256 FROM bridge_file_export_state"
+        )
+    ).fetchone()
+    receipt = await (
+        await db.execute(
+            "SELECT exported_content_sha256 FROM bridge_export_receipts "
+            "ORDER BY id DESC LIMIT 1"
+        )
+    ).fetchone()
+    assert exported == len(snapshot)
+    assert state is not None
+    assert receipt is not None
+    assert state["exported_content_sha256"] == exp_mod.content_sha256(rendered)
+    assert receipt["exported_content_sha256"] == state["exported_content_sha256"]
 
 
 async def test_export_bootstrap_round_trips_legacy_nested_h2_sections(

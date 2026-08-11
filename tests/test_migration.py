@@ -312,7 +312,11 @@ async def test_migration_is_idempotent(db: aiosqlite.Connection, bridge_file: Pa
     # Second run inserts nothing
     assert counts2["context_sections"] == 0
     assert counts2["snapshots"] == 0
+    assert counts2["cost_records"] == 0
     assert counts2["activity_log"] == 0
+    assert counts2["imported"] == 0
+    assert counts2["skipped"] == counts1["imported"]
+    assert counts2["source_contract"] == "projection_only_not_complete_backup"
 
     # Data still present
     cursor = await db.execute("SELECT COUNT(*) FROM context_sections")
@@ -321,6 +325,103 @@ async def test_migration_is_idempotent(db: aiosqlite.Connection, bridge_file: Pa
     assert row[0] == 4  # unchanged from first run
 
     _ = counts1  # suppress unused warning
+
+
+async def test_migration_reports_conflicts_and_malformed_activity(
+    db: aiosqlite.Connection, tmp_path: Path
+) -> None:
+    await db.execute(
+        """
+        INSERT INTO context_sections (section_name, owner, content)
+        VALUES ('career', 'claude_ai', 'canonical value')
+        """
+    )
+    await db.commit()
+    bridge = tmp_path / "bridge.md"
+    bridge.write_text(
+        "\n".join(
+            [
+                "## Career & Professional Target",
+                "different projected value",
+                "## Recent Codex Activity",
+                "not an activity record",
+                "- [2026-07-17][LEDGER] Bridge: valid record (main)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    counts = await migrate_from_markdown(db, bridge)
+    row = await (
+        await db.execute(
+            "SELECT content FROM context_sections WHERE section_name = 'career'"
+        )
+    ).fetchone()
+
+    assert row is not None
+    assert row["content"] == "canonical value"
+    assert counts["parsed"] == 2
+    assert counts["imported"] == 1
+    assert counts["conflicted"] == 1
+    assert counts["malformed"] == 1
+
+
+async def test_migration_preserves_distinct_same_day_project_activity(
+    db: aiosqlite.Connection, tmp_path: Path
+) -> None:
+    bridge = tmp_path / "bridge.md"
+    bridge.write_text(
+        "\n".join(
+            [
+                "## Recent Codex Activity",
+                "- [2026-07-17][LEDGER] SameProject: first summary (main)",
+                "- [2026-07-17][SHIPPED] SameProject: second summary (feature)",
+                "- [2026-07-17][LEDGER] SameProject: third summary (main)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    counts = await migrate_from_markdown(db, bridge)
+    rows = await (
+        await db.execute("SELECT summary, branch, tags FROM activity_log ORDER BY id")
+    ).fetchall()
+
+    assert counts["activity_log"] == 3
+    assert [(row["summary"], row["branch"]) for row in rows] == [
+        ("first summary", "main"),
+        ("second summary", "feature"),
+        ("third summary", "main"),
+    ]
+
+
+async def test_migration_preserves_nested_h2_in_owned_section(
+    db: aiosqlite.Connection, tmp_path: Path
+) -> None:
+    bridge = tmp_path / "bridge.md"
+    bridge.write_text(
+        "\n".join(
+            [
+                "## Career & Professional Target",
+                "Lead paragraph",
+                "## Nested plan",
+                "Keep this body",
+                "## Speaking Engagements",
+                "Talk notes",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    await migrate_from_markdown(db, bridge)
+    row = await (
+        await db.execute(
+            "SELECT content FROM context_sections WHERE section_name='career'"
+        )
+    ).fetchone()
+
+    assert row is not None
+    assert row["content"] == "Lead paragraph\n## Nested plan\nKeep this body"
 
 
 async def test_migration_populates_content_index(

@@ -317,80 +317,14 @@ CREATE VIRTUAL TABLE IF NOT EXISTS content_index USING fts5(
 # SQLite cannot ALTER COLUMN check constraints; must rename+recreate.
 # Also ensures all other v2 tables exist (IF NOT EXISTS is a no-op on real v1
 # DBs that already had them; defensive for reconstructed-from-minimal v1 DBs).
-_MIGRATION_V1_TO_V2 = """
-ALTER TABLE activity_log RENAME TO activity_log_v1;
-
-CREATE TABLE activity_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source TEXT NOT NULL CHECK(source IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
-    timestamp TEXT NOT NULL,
-    project_name TEXT NOT NULL,
-    summary TEXT NOT NULL,
-    branch TEXT,
-    tags TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
-
-INSERT INTO activity_log SELECT * FROM activity_log_v1;
-DROP TABLE activity_log_v1;
-
-CREATE INDEX IF NOT EXISTS idx_activity_source ON activity_log(source);
-CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_log(timestamp DESC);
-
-ALTER TABLE cost_records RENAME TO cost_records_v1;
-
-CREATE TABLE cost_records (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    system TEXT NOT NULL CHECK(system IN ('cc', 'codex', 'notion_os', 'personal_ops')),
-    month TEXT NOT NULL,
-    amount REAL NOT NULL,
-    notes TEXT,
-    recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    UNIQUE(system, month)
-);
-
-INSERT INTO cost_records SELECT * FROM cost_records_v1;
-DROP TABLE cost_records_v1;
-
-CREATE TABLE IF NOT EXISTS context_sections (
-    section_name TEXT PRIMARY KEY,
-    owner TEXT NOT NULL CHECK(owner IN ('claude_ai', 'cc', 'codex')),
-    content TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
-
-CREATE TABLE IF NOT EXISTS system_snapshots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    system TEXT NOT NULL CHECK(system IN ('cc', 'codex')),
-    snapshot_date TEXT NOT NULL,
-    data TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_snapshot_system ON system_snapshots(system, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS pending_handoffs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_name TEXT NOT NULL,
-    project_path TEXT,
-    roadmap_file TEXT,
-    phase TEXT,
-    dispatched_from TEXT NOT NULL DEFAULT 'claude_ai',
-    dispatched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    picked_up_at TEXT,
-    cleared_at TEXT,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'active', 'cleared'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_handoff_status ON pending_handoffs(status);
-"""
+_MIGRATION_V1_TO_V2 = (
+    "-- v1 → v2: restart-safe table rebuild runs in _migrate_v1_to_v2.\n"
+)
 
 # Migration v4 → v5: add nullable canonical_key to activity_log so each entry
 # can carry the resolved canonical project key (see project_resolver). Additive
 # and FTS-neutral — canonical_key is not part of fts_text_for_activity.
-_MIGRATION_V4_TO_V5 = """
-ALTER TABLE activity_log ADD COLUMN canonical_key TEXT;
-"""
+_MIGRATION_V4_TO_V5 = "-- v4 → v5: guarded ADD runs in post-hook.\n"
 
 # Migration v5 → v6: extend canonical resolution to the handoff queue by adding
 # nullable canonical_key to pending_handoffs (mirrors the v5 activity_log change).
@@ -398,9 +332,7 @@ ALTER TABLE activity_log ADD COLUMN canonical_key TEXT;
 # dispatched under one project_name still clears when /end passes a sibling alias
 # (F1 consumer adoption). Additive and FTS-neutral — canonical_key is not part of
 # fts_text_for_handoff.
-_MIGRATION_V5_TO_V6 = """
-ALTER TABLE pending_handoffs ADD COLUMN canonical_key TEXT;
-"""
+_MIGRATION_V5_TO_V6 = "-- v5 → v6: guarded ADD runs in post-hook.\n"
 
 # Migration v6 → v7: add the source_trust provenance label to the four
 # instruction-bearing tables. Additive ADD COLUMN — SQLite permits a column CHECK
@@ -409,18 +341,7 @@ ALTER TABLE pending_handoffs ADD COLUMN canonical_key TEXT;
 # handoff rows therefore become 'ingested'; activity and snapshot history keeps
 # the non-privileged 'agent' default. source_trust is not FTS-indexed, so
 # content_index is untouched (no repopulate_content_index).
-_MIGRATION_V6_TO_V7 = """
-ALTER TABLE pending_handoffs ADD COLUMN source_trust TEXT NOT NULL DEFAULT 'agent'
-    CHECK(source_trust IN ('operator', 'agent', 'ingested'));
-ALTER TABLE activity_log ADD COLUMN source_trust TEXT NOT NULL DEFAULT 'agent'
-    CHECK(source_trust IN ('operator', 'agent', 'ingested'));
-ALTER TABLE context_sections ADD COLUMN source_trust TEXT NOT NULL DEFAULT 'agent'
-    CHECK(source_trust IN ('operator', 'agent', 'ingested'));
-ALTER TABLE system_snapshots ADD COLUMN source_trust TEXT NOT NULL DEFAULT 'agent'
-    CHECK(source_trust IN ('operator', 'agent', 'ingested'));
-UPDATE context_sections SET source_trust = 'ingested';
-UPDATE pending_handoffs SET source_trust = 'ingested';
-"""
+_MIGRATION_V6_TO_V7 = "-- v6 → v7: guarded ADDs and updates run in post-hook.\n"
 
 
 # Migration v7 → v8: add shipped-event policy dispositions. This is deliberately
@@ -471,8 +392,6 @@ CREATE INDEX IF NOT EXISTS idx_sc_started ON session_costs(started_at DESC);
 # conflict receipts and markdown-export base state. FTS-neutral: no indexed text
 # changes.
 _MIGRATION_V9_TO_V10 = """
-ALTER TABLE context_sections ADD COLUMN version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1);
-
 CREATE TABLE IF NOT EXISTS context_section_export_state (
     section_name TEXT PRIMARY KEY,
     exported_version INTEGER NOT NULL,
@@ -538,9 +457,7 @@ CREATE INDEX IF NOT EXISTS idx_scl_routing ON session_classification(routing_bas
 
 # Migration v12 → v13: add claimed_by to pending_handoffs so INV-13's
 # handoff-claimant fix has a durable column to record against.
-_MIGRATION_V12_TO_V13 = """
-ALTER TABLE pending_handoffs ADD COLUMN claimed_by TEXT;
-"""
+_MIGRATION_V12_TO_V13 = "-- v12 → v13: guarded ADD runs in post-hook.\n"
 
 
 # Migration v13 → v14: collapse the shipped-sync trio into activity-row columns.
@@ -735,6 +652,145 @@ async def _table_exists(db: aiosqlite.Connection, name: str) -> bool:
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
     )
     return await cursor.fetchone() is not None
+
+
+async def _column_exists(
+    db: aiosqlite.Connection, table: str, column: str
+) -> bool:
+    cursor = await db.execute(f"PRAGMA table_info({table})")  # noqa: S608
+    return column in {str(row["name"]) for row in await cursor.fetchall()}
+
+
+async def _add_column_if_missing(
+    db: aiosqlite.Connection, table: str, column: str, declaration: str
+) -> None:
+    """Converge an additive migration after a prior interrupted ALTER."""
+    if not await _column_exists(db, table, column):
+        await db.execute(
+            f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"  # noqa: S608
+        )
+
+
+async def _migrate_v1_to_v2(db: aiosqlite.Connection) -> None:
+    """Restart-safe v1 table rebuild, including partially completed old attempts."""
+    for table, legacy, create_sql in (
+        (
+            "activity_log",
+            "activity_log_v1",
+            """
+            CREATE TABLE IF NOT EXISTS activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL CHECK(source IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+                timestamp TEXT NOT NULL,
+                project_name TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                branch TEXT,
+                tags TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )
+            """,
+        ),
+        (
+            "cost_records",
+            "cost_records_v1",
+            """
+            CREATE TABLE IF NOT EXISTS cost_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                system TEXT NOT NULL CHECK(system IN ('cc', 'codex', 'notion_os', 'personal_ops')),
+                month TEXT NOT NULL,
+                amount REAL NOT NULL,
+                notes TEXT,
+                recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                UNIQUE(system, month)
+            )
+            """,
+        ),
+    ):
+        if not await _table_exists(db, legacy):
+            await db.execute(f"ALTER TABLE {table} RENAME TO {legacy}")  # noqa: S608
+        await db.execute(create_sql)
+        await db.execute(
+            f"INSERT OR IGNORE INTO {table} SELECT * FROM {legacy}"  # noqa: S608
+        )
+        await db.execute(f"DROP TABLE IF EXISTS {legacy}")  # noqa: S608
+
+    statements = (
+        "CREATE INDEX IF NOT EXISTS idx_activity_source ON activity_log(source)",
+        "CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_log(timestamp DESC)",
+        """
+        CREATE TABLE IF NOT EXISTS context_sections (
+            section_name TEXT PRIMARY KEY,
+            owner TEXT NOT NULL CHECK(owner IN ('claude_ai', 'cc', 'codex')),
+            content TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS system_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            system TEXT NOT NULL CHECK(system IN ('cc', 'codex')),
+            snapshot_date TEXT NOT NULL,
+            data TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_snapshot_system ON system_snapshots(system, created_at DESC)",
+        """
+        CREATE TABLE IF NOT EXISTS pending_handoffs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_name TEXT NOT NULL,
+            project_path TEXT,
+            roadmap_file TEXT,
+            phase TEXT,
+            dispatched_from TEXT NOT NULL DEFAULT 'claude_ai',
+            dispatched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            picked_up_at TEXT,
+            cleared_at TEXT,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'active', 'cleared'))
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_handoff_status ON pending_handoffs(status)",
+    )
+    for statement in statements:
+        await db.execute(statement)
+
+
+async def _migrate_v4_to_v5(db: aiosqlite.Connection) -> None:
+    await _add_column_if_missing(db, "activity_log", "canonical_key", "TEXT")
+
+
+async def _migrate_v5_to_v6(db: aiosqlite.Connection) -> None:
+    await _add_column_if_missing(db, "pending_handoffs", "canonical_key", "TEXT")
+
+
+async def _migrate_v6_to_v7(db: aiosqlite.Connection) -> None:
+    declaration = (
+        "TEXT NOT NULL DEFAULT 'agent' "
+        "CHECK(source_trust IN ('operator', 'agent', 'ingested'))"
+    )
+    for table in (
+        "pending_handoffs",
+        "activity_log",
+        "context_sections",
+        "system_snapshots",
+    ):
+        await _add_column_if_missing(db, table, "source_trust", declaration)
+    await db.execute("UPDATE context_sections SET source_trust = 'ingested'")
+    await db.execute("UPDATE pending_handoffs SET source_trust = 'ingested'")
+
+
+async def _migrate_v9_to_v10(db: aiosqlite.Connection) -> None:
+    await _add_column_if_missing(
+        db,
+        "context_sections",
+        "version",
+        "INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1)",
+    )
+
+
+async def _migrate_v12_to_v13(db: aiosqlite.Connection) -> None:
+    await _add_column_if_missing(db, "pending_handoffs", "claimed_by", "TEXT")
 
 
 async def _backup_db_file(db: aiosqlite.Connection, label: str) -> None:
@@ -1026,24 +1082,24 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         return
 
     # Step-wise migration ladder: (target_version, ddl, post_hook), applied in
-    # order. Each step advances user_version by one and commits independently, so a
-    # mid-sequence failure leaves the DB at the last fully-migrated version. The
-    # post_hook (e.g. FTS repopulation) runs after the DDL, before the version bump.
+    # order. Each step receives a verified pre-migration backup and advances
+    # user_version in the same transaction as its DDL/post-hook. Guarded hooks
+    # converge old partially-applied ALTER migrations before the version bump.
     # Built here rather than at module scope because repopulate_content_index is
     # defined below and resolves at call time.
     migrations: list[tuple[int, str, _PostHook | None]] = [
-        (2, _MIGRATION_V1_TO_V2, None),
+        (2, _MIGRATION_V1_TO_V2, _migrate_v1_to_v2),
         (3, _MIGRATION_V2_TO_V3, repopulate_content_index),
         (4, _MIGRATION_V3_TO_V4, None),
-        (5, _MIGRATION_V4_TO_V5, None),
-        (6, _MIGRATION_V5_TO_V6, None),
-        (7, _MIGRATION_V6_TO_V7, None),
+        (5, _MIGRATION_V4_TO_V5, _migrate_v4_to_v5),
+        (6, _MIGRATION_V5_TO_V6, _migrate_v5_to_v6),
+        (7, _MIGRATION_V6_TO_V7, _migrate_v6_to_v7),
         (8, _MIGRATION_V7_TO_V8, None),
         (9, _MIGRATION_V8_TO_V9, None),
-        (10, _MIGRATION_V9_TO_V10, None),
+        (10, _MIGRATION_V9_TO_V10, _migrate_v9_to_v10),
         (11, _MIGRATION_V10_TO_V11, reindex_all_activity_fts),
         (12, _MIGRATION_V11_TO_V12, None),
-        (13, _MIGRATION_V12_TO_V13, None),
+        (13, _MIGRATION_V12_TO_V13, _migrate_v12_to_v13),
         (14, _MIGRATION_V13_TO_V14, _migrate_shipped_state_to_columns),
         (15, _MIGRATION_V14_TO_V15, None),
         (16, _MIGRATION_V15_TO_V16, None),
@@ -1058,12 +1114,17 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         if current_version >= target:
             continue
         logger.info("Migrating schema v%d → v%d", current_version, target)
-        await db.executescript(ddl)
-        if post_hook is not None:
-            await post_hook(db)
-        current_version = target
-        await db.execute(f"PRAGMA user_version = {current_version}")
-        await db.commit()
+        await _backup_db_file(db, f"pre-v{target}")
+        try:
+            await db.executescript(f"BEGIN IMMEDIATE;\n{ddl}")
+            if post_hook is not None:
+                await post_hook(db)
+            current_version = target
+            await db.execute(f"PRAGMA user_version = {current_version}")
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
         logger.info("Schema migrated to v%d", target)
 
     if current_version != SCHEMA_VERSION:

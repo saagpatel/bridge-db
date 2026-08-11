@@ -9,7 +9,7 @@ import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from bridge_db import clock, config
 from bridge_db.db import (
@@ -28,18 +28,83 @@ LEGACY_FINGERPRINT_SUNSET = datetime(2026, 8, 18, tzinfo=UTC)
 LEGACY_FINGERPRINT_SUNSET_TEXT = "2026-08-18T00:00:00Z"
 
 logger = logging.getLogger("bridge_db.codex_seed")
+MAX_MANIFEST_BYTES = 1_048_576
+MAX_JSON_DEPTH = 32
+MAX_JSON_NODES = 10_000
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
+    size = path.stat().st_size
+    if size > MAX_MANIFEST_BYTES:
+        raise ValueError(
+            f"manifest exceeds UTF-8 byte limit: maximum={MAX_MANIFEST_BYTES} actual={size}"
+        )
     data = json.loads(path.read_text(encoding="utf-8"))
     return _validate_manifest(data)
 
 
-def _validate_manifest(data: dict[str, Any]) -> dict[str, Any]:
+def _validate_manifest(data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ValueError("manifest must be a JSON object")
+    data = cast(dict[str, Any], data)
+    stack: list[tuple[Any, int]] = [(data, 1)]
+    nodes = 0
+    while stack:
+        value, depth = stack.pop()
+        nodes += 1
+        if depth > MAX_JSON_DEPTH:
+            raise ValueError(f"manifest JSON exceeds maximum depth {MAX_JSON_DEPTH}")
+        if nodes > MAX_JSON_NODES:
+            raise ValueError(f"manifest JSON exceeds maximum node count {MAX_JSON_NODES}")
+        if isinstance(value, dict):
+            mapping = cast(dict[Any, Any], value)
+            if not all(isinstance(key, str) for key in mapping):
+                raise ValueError("manifest object keys must be strings")
+            stack.extend((child, depth + 1) for child in mapping.values())
+        elif isinstance(value, list):
+            sequence = cast(list[Any], value)
+            stack.extend((child, depth + 1) for child in sequence)
+
     required = {"fingerprint", "snapshot_date", "snapshot_payload", "baseline_activity"}
     missing = sorted(required.difference(data))
     if missing:
         raise ValueError(f"manifest missing required keys: {', '.join(missing)}")
+    if not isinstance(data["fingerprint"], str) or not data["fingerprint"]:
+        raise ValueError("manifest fingerprint must be a non-empty string")
+    if not isinstance(data["snapshot_date"], str):
+        raise ValueError("manifest snapshot_date must be a string")
+    try:
+        datetime.strptime(data["snapshot_date"], "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError("manifest snapshot_date must use YYYY-MM-DD") from exc
+    if not isinstance(data["snapshot_payload"], dict):
+        raise ValueError("manifest snapshot_payload must be a JSON object")
+    activity_value = data["baseline_activity"]
+    if not isinstance(activity_value, dict):
+        raise ValueError("manifest baseline_activity must be a JSON object")
+    activity = cast(dict[str, Any], activity_value)
+    activity_required = {"caller", "timestamp", "project_name", "summary"}
+    missing_activity = sorted(activity_required.difference(activity))
+    if missing_activity:
+        raise ValueError(
+            "manifest baseline_activity missing required keys: "
+            + ", ".join(missing_activity)
+        )
+    for field in activity_required:
+        if not isinstance(activity[field], str) or not activity[field].strip():
+            raise ValueError(f"manifest baseline_activity.{field} must be a non-empty string")
+    if activity["caller"] != "codex":
+        raise ValueError("manifest baseline_activity.caller must be 'codex'")
+    if "branch" in activity and activity["branch"] is not None and not isinstance(
+        activity["branch"], str
+    ):
+        raise ValueError("manifest baseline_activity.branch must be a string or null")
+    tags = activity.get("tags", [])
+    if not isinstance(tags, list):
+        raise ValueError("manifest baseline_activity.tags must be a list of strings")
+    tag_values = cast(list[Any], tags)
+    if not all(isinstance(tag, str) for tag in tag_values):
+        raise ValueError("manifest baseline_activity.tags must be a list of strings")
     version_value = data.get("fingerprint_version")
     implicit_legacy = version_value is None
     if implicit_legacy:

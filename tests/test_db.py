@@ -225,6 +225,103 @@ async def test_migration_v1_to_v2(tmp_path: Path) -> None:
     await migrated.close()
 
 
+async def test_migration_v1_to_v2_recovers_partial_table_rebuild(
+    tmp_path: Path,
+) -> None:
+    """A crash after rename/create/copy but before user_version still converges."""
+    db_path = tmp_path / "v1-partial.db"
+    db = await aiosqlite.connect(db_path)
+    await db.executescript(
+        """
+        CREATE TABLE activity_log_v1 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            branch TEXT,
+            tags TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO activity_log_v1
+            VALUES (1, 'cc', '2026-01-01', 'Partial', 'activity', NULL, '[]', '2026-01-01');
+        CREATE TABLE activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            branch TEXT,
+            tags TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO activity_log SELECT * FROM activity_log_v1;
+
+        CREATE TABLE cost_records_v1 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            system TEXT NOT NULL,
+            month TEXT NOT NULL,
+            amount REAL NOT NULL,
+            notes TEXT,
+            recorded_at TEXT NOT NULL,
+            UNIQUE(system, month)
+        );
+        INSERT INTO cost_records_v1
+            VALUES (1, 'cc', '2026-01', 42.0, NULL, '2026-01-01');
+        CREATE TABLE cost_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            system TEXT NOT NULL,
+            month TEXT NOT NULL,
+            amount REAL NOT NULL,
+            notes TEXT,
+            recorded_at TEXT NOT NULL,
+            UNIQUE(system, month)
+        );
+        PRAGMA user_version = 1;
+        """
+    )
+    await db.close()
+
+    migrated = await open_db(db_path)
+    try:
+        version = await (await migrated.execute("PRAGMA user_version")).fetchone()
+        integrity = await (await migrated.execute("PRAGMA integrity_check")).fetchone()
+        activity = await (
+            await migrated.execute("SELECT project_name FROM activity_log")
+        ).fetchall()
+        costs = await (
+            await migrated.execute("SELECT month, amount FROM cost_records")
+        ).fetchall()
+        assert version is not None and version[0] == SCHEMA_VERSION
+        assert integrity is not None and integrity[0] == "ok"
+        assert [row["project_name"] for row in activity] == ["Partial"]
+        assert [(row["month"], row["amount"]) for row in costs] == [
+            ("2026-01", 42.0)
+        ]
+    finally:
+        await migrated.close()
+
+
+async def test_additive_migrations_converge_when_columns_precede_version(
+    tmp_path: Path,
+) -> None:
+    """Previously applied ADD COLUMNs with a stale v4 ledger are retry-safe."""
+    db_path = tmp_path / "partial-adds.db"
+    db = await open_db(db_path)
+    await db.execute("PRAGMA user_version = 4")
+    await db.commit()
+    await db.close()
+
+    migrated = await open_db(db_path)
+    try:
+        version = await (await migrated.execute("PRAGMA user_version")).fetchone()
+        integrity = await (await migrated.execute("PRAGMA integrity_check")).fetchone()
+        assert version is not None and version[0] == SCHEMA_VERSION
+        assert integrity is not None and integrity[0] == "ok"
+    finally:
+        await migrated.close()
+
+
 async def test_migration_v2_to_current_populates_content_index(tmp_path: Path) -> None:
     """A v2 DB gains current tables and backfills content_index from source rows."""
     db = await aiosqlite.connect(str(tmp_path / "v2.db"))

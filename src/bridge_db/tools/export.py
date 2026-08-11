@@ -431,9 +431,16 @@ async def export_bridge_file(
     trigger: str,
     projection_job_id: int | None = None,
 ) -> int:
-    """CAS-protect and durably attribute one complete fallback-file export."""
+    """CAS-protect and durably attribute one complete fallback-file export.
+
+    If a prior attempt atomically replaced the file but its database transaction
+    rolled back, an exact match with the content being retried is treated as a
+    recoverable interrupted export. Any other out-of-band file change still
+    fails closed.
+    """
     path = config.BRIDGE_FILE_PATH
     current_content = path.read_text(encoding="utf-8") if path.exists() else None
+    projected_hash = content_sha256(content)
     cursor = await db.execute(
         "SELECT exported_content_sha256 FROM bridge_file_export_state WHERE singleton = 1"
     )
@@ -441,7 +448,8 @@ async def export_bridge_file(
     expected_hash = state["exported_content_sha256"] if state is not None else None
 
     if current_content is not None and expected_hash is not None:
-        if content_sha256(current_content) != expected_hash:
+        current_hash = content_sha256(current_content)
+        if current_hash != expected_hash and current_hash != projected_hash:
             raise BridgeExportSafetyError(
                 "Refusing to overwrite the fallback bridge file because it changed "
                 "since the last export; import or merge the file edits first."
@@ -498,20 +506,34 @@ async def export_bridge_file(
             exported_content_sha256 = excluded.exported_content_sha256,
             exported_at = excluded.exported_at
         """,
-        (content_sha256(content),),
+        (projected_hash,),
     )
-    await db.execute(
-        """
-        UPDATE bridge_projection_jobs SET
-            status = 'completed',
-            attempts = attempts + 1,
-            error_category = NULL,
-            projected_content_sha256 = ?,
-            completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-        WHERE status = 'pending'
-        """,
-        (content_sha256(content),),
-    )
+    if projection_job_id is None:
+        await db.execute(
+            """
+            UPDATE bridge_projection_jobs SET
+                status = 'completed',
+                attempts = attempts + 1,
+                error_category = NULL,
+                projected_content_sha256 = ?,
+                completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE status = 'pending'
+            """,
+            (projected_hash,),
+        )
+    else:
+        await db.execute(
+            """
+            UPDATE bridge_projection_jobs SET
+                status = 'completed',
+                attempts = attempts + 1,
+                error_category = NULL,
+                projected_content_sha256 = ?,
+                completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ? AND status = 'pending'
+            """,
+            (projected_hash, projection_job_id),
+        )
     exported_context_sections = len(context_snapshot)
     await db.execute(
         """
@@ -525,9 +547,9 @@ async def export_bridge_file(
             trigger,
             projection_job_id,
             expected_hash,
-            content_sha256(content),
+            projected_hash,
             exported_context_sections,
-            len(content),
+            len(content.encode("utf-8")),
         ),
     )
     return exported_context_sections
@@ -554,12 +576,11 @@ def register(mcp: FastMCP) -> None:
         await db.commit()
         bridge_path = config.BRIDGE_FILE_PATH
 
-        logger.info(
-            "bridge markdown exported: %s (%d bytes)", bridge_path, len(content)
-        )
+        byte_count = len(content.encode("utf-8"))
+        logger.info("bridge markdown exported: %s (%d bytes)", bridge_path, byte_count)
         return {
             "ok": True,
             "path": str(bridge_path),
-            "bytes": len(content),
+            "bytes": byte_count,
             "exported_context_sections": exported_context_sections,
         }
