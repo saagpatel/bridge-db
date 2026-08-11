@@ -32,7 +32,7 @@ uv run python -m bridge_db --quarantine-cleared-operator-handoffs  # recoverable
 uv run python -m bridge_db --restore-handoff-trust 42  # exact recovery image
 python -m bridge_db.execution_generation readback --root <private-runtime-root>
 python -m bridge_db.tenancy derive-activation-evidence --observations <private-replay-observations.json> --generation-id <generation-id>
-python -m bridge_db.client_rebinding rebind --client claude-code --config-path /Users/d/.claude.json --backup-root <private-backup-root>
+python -m bridge_db.client_rebinding rebind --client claude-code --config-path ~/.claude.json --backup-root <private-backup-root>
 python -m bridge_db.tenancy status --root <private-tenancy-root>
 ```
 
