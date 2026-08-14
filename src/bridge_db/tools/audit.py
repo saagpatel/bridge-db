@@ -1,8 +1,8 @@
 """Audit tail tool: read the audit JSONL log with simple filters."""
 
-import heapq
 import logging
 from collections.abc import Iterator
+from itertools import islice
 from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
@@ -42,9 +42,10 @@ def collect_audit_tail(
                     continue
             yield record
 
-    return heapq.nlargest(
-        limit, matching_records(), key=lambda record: record.get("ts") or ""
-    )
+    # The family iterator is already newest-ingest-first. Preserve that order:
+    # event timestamps are evidence, not ordering authority, and a stale or
+    # future-dated row must never jump ahead of later ingested rows.
+    return list(islice(matching_records(), limit))
 
 
 def register(mcp: FastMCP) -> None:
@@ -68,12 +69,12 @@ def register(mcp: FastMCP) -> None:
             Field(description="If set, return only entries matching this ok flag"),
         ] = None,
     ) -> list[dict[str, Any]]:
-        """Return recent audit events, newest first, with optional filters.
+        """Return recent audit events, newest-ingest-first, with optional filters.
 
         Reads one bounded newest-byte horizon across the active audit log and
         losslessly rotated segments. Missing files return []; malformed or
-        boundary-truncated lines are skipped. Timestamps are ISO8601 UTC;
-        `since` compares as string, which matches temporal order for that
-        format.
+        boundary-truncated lines are skipped. Timestamps are ISO8601 UTC
+        evidence used only by the explicit `since` filter; they never reorder
+        or mask the bounded ingest horizon.
         """
         return collect_audit_tail(limit=limit, caller=caller, tool=tool, since=since, ok=ok)
