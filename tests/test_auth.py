@@ -310,6 +310,7 @@ def test_generation_change_invalidates_active_session(
 
 
 def test_scope_matrix_is_least_privilege() -> None:
+    assert auth.scopes_for_caller("hermes") == []
     assert "create_handoff" in auth.scopes_for_caller("claude_ai")
     assert "create_handoff" not in auth.scopes_for_caller("cc")
     assert "update_section" not in auth.scopes_for_caller("codex")

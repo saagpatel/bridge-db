@@ -29,7 +29,7 @@ from bridge_db.auth import (
     load_principal_grants,
     scopes_for_caller,
 )
-from bridge_db.models import CALLER_IDS
+from bridge_db.models import PRINCIPAL_IDS
 
 _MAX_SECRET_BYTES = 4096
 
@@ -240,7 +240,7 @@ def bind_principal_from_fd(
     auth_mode: str = "warn",
 ) -> dict[str, Any]:
     """Rotate one grant and bind its same secret without returning secret material."""
-    if caller not in CALLER_IDS:
+    if caller not in PRINCIPAL_IDS:
         raise SecureBindingError("binding.caller_invalid")
     if caller != "codex":
         raise SecureBindingError("binding.caller_not_authorized_for_local_binding")

@@ -54,6 +54,11 @@ Today the behavior is **(a)** by default.
 
 ## Recommendation
 
+Hermes is modeled separately from the five historical write-capable callers.
+Its authenticated principal has zero write scopes; enrollment proves client
+identity without granting activity, cost, handoff, snapshot, disposition, or
+export mutations. Its shown-once token remains an operator-run TTY ceremony.
+
 **Hold at `warn`.** The `source_trust` operator→agent clamp — the actual impersonation
 defense — is already active in `warn` (confirmed firing 2026-06-28: `requested=operator
 stored=agent`). Enforce's only *added* value is rejecting wrong-caller writes, of which the
