@@ -1020,6 +1020,26 @@ def test_enroll_writes_hashed_token_with_0600(
     assert (tmp_path / "principals.json").stat().st_mode & 0o777 == 0o600
 
 
+def test_enroll_accepts_read_only_hermes_principal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(config, "PRINCIPALS_PATH", tmp_path / "principals.json")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    assert run_enroll("hermes") is True
+    output = capsys.readouterr().out
+    token = next(
+        line.removeprefix("  token: ").strip()
+        for line in output.splitlines()
+        if line.startswith("  token: ")
+    )
+    data = json.loads((tmp_path / "principals.json").read_text(encoding="utf-8"))
+    entry = data["principals"]["hermes"]
+    assert entry["token_sha256"] == auth.hash_token(token)
+    assert entry["generation"] == 1
+    assert entry["scopes"] == []
+
+
 def test_upgrade_principals_v2_preserves_hashes_and_adds_grants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

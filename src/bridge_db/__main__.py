@@ -771,10 +771,13 @@ def run_enroll(caller: str) -> bool:
     """Generate a token for one caller, store its hash, print the token once."""
     from bridge_db.audit import log_audit
     from bridge_db.auth import GRANT_TTL_DAYS, hash_token, scopes_for_caller
-    from bridge_db.models import CALLER_IDS
+    from bridge_db.models import PRINCIPAL_IDS
 
-    if caller not in CALLER_IDS:
-        print(f"refused: unknown caller '{caller}'. Known: {', '.join(CALLER_IDS)}")
+    if caller not in PRINCIPAL_IDS:
+        print(
+            f"refused: unknown principal '{caller}'. "
+            f"Known: {', '.join(PRINCIPAL_IDS)}"
+        )
         return False
     if not _require_tty("enroll"):
         return False
@@ -815,7 +818,7 @@ def run_upgrade_principals_v2() -> bool:
     from bridge_db import config
     from bridge_db.audit import log_audit
     from bridge_db.auth import GRANT_TTL_DAYS, scopes_for_caller
-    from bridge_db.models import CALLER_IDS
+    from bridge_db.models import PRINCIPAL_IDS
 
     if not _require_tty("upgrade-principals-v2"):
         return False
@@ -834,7 +837,7 @@ def run_upgrade_principals_v2() -> bool:
         entry_dict = cast(dict[str, Any], entry) if isinstance(entry, dict) else {}
         token_hash = entry_dict.get("token_sha256")
         if (
-            caller not in CALLER_IDS
+            caller not in PRINCIPAL_IDS
             or not isinstance(token_hash, str)
             or len(token_hash) != 64
             or any(char not in "0123456789abcdef" for char in token_hash)
