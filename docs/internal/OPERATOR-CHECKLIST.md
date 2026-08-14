@@ -279,6 +279,10 @@ dogfood, shipped-event, and export proof.
 
 **Phase A — Enroll (one TTY session):**
 1. `uv run python -m bridge_db --enroll cc` / `--enroll codex` / `--enroll claude_ai` / `--enroll notion_os` / `--enroll personal_ops` — capture each token once.
+   Hermes is a separate read-only principal: enroll it with
+   `uv run python -m bridge_db --enroll hermes`, bind the shown-once token only
+   in Hermes's private MCP spawn environment, and verify its grant has zero
+   write scopes.
 
 **Phase B — Wire envs (each client spawns its own server process):**
 2. **CC:** `claude mcp remove bridge-db -s user`, then re-add with `--env BRIDGE_DB_PRINCIPAL_TOKEN=<cc> --env BRIDGE_DB_AUTH_MODE=warn` (full command in CLAUDE.md Registration).

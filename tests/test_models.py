@@ -5,12 +5,18 @@ from bridge_db.models import (
     CALLER_IDS,
     COST_SYSTEM_MAP,
     NOTIFICATION_SOURCE_ALIASES,
+    PRINCIPAL_IDS,
     SYSTEM_IDS,
 )
 
 
 def test_activity_sources_track_caller_ids() -> None:
     assert frozenset(CALLER_IDS) == ACTIVITY_SOURCES
+
+
+def test_principal_ids_include_read_only_hermes_without_write_caller_authority() -> None:
+    assert "hermes" in PRINCIPAL_IDS
+    assert "hermes" not in CALLER_IDS
 
 
 def test_system_ids_track_cost_system_map() -> None:

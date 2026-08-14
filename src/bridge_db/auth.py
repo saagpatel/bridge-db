@@ -22,7 +22,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 from bridge_db import clock, config
 from bridge_db.audit import log_audit
-from bridge_db.models import CALLER_IDS, SourceTrust
+from bridge_db.models import PRINCIPAL_IDS, SourceTrust
 
 logger = logging.getLogger("bridge_db.auth")
 
@@ -83,6 +83,9 @@ _SCOPES_BY_CALLER: dict[str, frozenset[str]] = {
             "export_bridge_markdown",
         }
     ),
+    # Hermes consumes read tools only. Keeping this explicit and empty makes
+    # enrollment possible without granting any caller-bearing write surface.
+    "hermes": frozenset(),
 }
 
 
@@ -148,7 +151,7 @@ def load_principal_grants(path: Path) -> dict[str, PrincipalGrant]:
             return {}
         result: dict[str, PrincipalGrant] = {}
         for caller, entry in cast(dict[str, object], entries).items():
-            if caller not in CALLER_IDS or not isinstance(entry, dict):
+            if caller not in PRINCIPAL_IDS or not isinstance(entry, dict):
                 continue
             entry_dict = cast(dict[str, object], entry)
             token_hash = entry_dict.get("token_sha256")

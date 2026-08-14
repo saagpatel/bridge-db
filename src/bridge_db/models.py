@@ -2,7 +2,22 @@
 
 from typing import Literal
 
-# All systems that can interact with the bridge
+# Authenticated clients. A principal may be read-only and therefore absent
+# from the write-capable CallerID vocabulary below.
+PrincipalID = Literal[
+    "cc", "codex", "claude_ai", "notion_os", "personal_ops", "hermes"
+]
+
+PRINCIPAL_IDS: tuple[PrincipalID, ...] = (
+    "cc",
+    "codex",
+    "claude_ai",
+    "notion_os",
+    "personal_ops",
+    "hermes",
+)
+
+# Systems allowed to identify themselves as callers on write tools.
 CallerID = Literal["cc", "codex", "claude_ai", "notion_os", "personal_ops"]
 
 # Systems that own activity/snapshot/cost records
