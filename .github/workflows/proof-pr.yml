@@ -8,10 +8,10 @@ jobs:
     permissions:
       contents: read
       actions: read
-    uses: saagpatel/proof-pr/.github/workflows/proof-pr-receipt.yml@v0.2.14
+    uses: saagpatel/proof-pr/.github/workflows/proof-pr-receipt.yml@bc08f17fa83c5dbe6d9d9a4026ad4b2180a1cf2a # v0.2.14
     with:
       receipt_path: docs/proof-pr-dogfood.receipt.json
-      proof_pr_ref: v0.2.14
+      proof_pr_ref: bc08f17fa83c5dbe6d9d9a4026ad4b2180a1cf2a
       proof_summary_filename: bridge-db-proof-summary.md
       check_public_git_metadata: true
       public_git_metadata_mode: introduced
