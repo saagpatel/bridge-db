@@ -176,7 +176,9 @@ def load_principal_grants(path: Path) -> dict[str, PrincipalGrant]:
             if not all(isinstance(scope, str) for scope in scopes):
                 continue
             scope_set = frozenset(cast(list[str], scopes))
-            if not scope_set or not scope_set.issubset(allowed_scopes):
+            if (not scope_set and allowed_scopes) or not scope_set.issubset(
+                allowed_scopes
+            ):
                 continue
             if token_hash in result:
                 logger.warning("duplicate token hash in principals registry")
