@@ -193,7 +193,7 @@ python -m bridge_db.client_rebinding rebind \
 
 python -m bridge_db.client_rebinding rebind \
   --client claude-desktop \
-  --config-path "~/Library/Application Support/Claude/claude_desktop_config.json" \
+  --config-path "$HOME/Library/Application Support/Claude/claude_desktop_config.json" \
   --backup-root ~/.local/state/bridge-db/client-config-backups
 ```
 
