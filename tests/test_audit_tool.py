@@ -1,5 +1,6 @@
 """Tests for the audit_tail MCP tool."""
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,34 @@ async def test_audit_tail_returns_newest_first(fns: dict[str, Any]) -> None:
 
     results = await fns["audit_tail"](limit=10)
     assert [r["tool"] for r in results] == ["update_section", "record_cost", "log_activity"]
+
+
+async def test_audit_tail_future_timestamp_cannot_mask_later_ingest(
+    fns: dict[str, Any],
+) -> None:
+    rows = [
+        {
+            "ts": "2030-01-01T00:00:00Z",
+            "tool": "fixture",
+            "caller": "cc",
+            "project": "future-earlier-ingest",
+            "ok": True,
+        },
+        {
+            "ts": "2026-08-14T00:00:00Z",
+            "tool": "runtime",
+            "caller": "cc",
+            "project": "current-later-ingest",
+            "ok": True,
+        },
+    ]
+    config.AUDIT_LOG_PATH.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+    results = await fns["audit_tail"](limit=1)
+
+    assert [record["project"] for record in results] == ["current-later-ingest"]
 
 
 async def test_audit_tail_limit_respected(fns: dict[str, Any]) -> None:
@@ -97,8 +126,8 @@ async def test_audit_tail_handles_records_missing_ts(fns: dict[str, Any], tmp_pa
     """Externally-written records without `ts` must not corrupt output.
 
     Writer always emits `ts`, but the log is append-only and could be edited.
-    Such records sort as "oldest" (empty string sort key) and must still be
-    excluded by a `since` filter that expects a string timestamp.
+    Such records remain at their ingest position and must still be excluded by
+    a `since` filter that expects a string timestamp.
     """
     # Properly-written events bracket a hand-rolled record with no ts.
     audit.log_audit("log_activity", "cc", "A", ok=True)
@@ -106,10 +135,9 @@ async def test_audit_tail_handles_records_missing_ts(fns: dict[str, Any], tmp_pa
         f.write('{"tool":"manual","caller":"cc","project":"NOTS","ok":true}\n')
     audit.log_audit("log_activity", "cc", "B", ok=True)
 
-    # No `since`: all three returned; ts-less sorts last (oldest).
+    # No `since`: all three return newest-ingest-first, including the ts-less row.
     results = await fns["audit_tail"](limit=10)
-    assert [r["project"] for r in results[:2]] == ["B", "A"]
-    assert results[-1]["project"] == "NOTS"
+    assert [r["project"] for r in results] == ["B", "NOTS", "A"]
 
     # With `since`: ts-less record is excluded (ts comparison fails type check).
     filtered = await fns["audit_tail"](limit=10, since="1970-01-01")
