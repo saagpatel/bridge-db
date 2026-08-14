@@ -56,6 +56,17 @@ def test_load_principals_maps_hash_to_caller(tmp_path: Path) -> None:
     assert len(loaded) == 2
 
 
+def test_load_principals_accepts_zero_scope_hermes_grant(tmp_path: Path) -> None:
+    path = tmp_path / "principals.json"
+    write_principals(path, {"hermes": "token-hermes"})
+
+    grants = auth.load_principal_grants(path)
+
+    grant = grants[auth.hash_token("token-hermes")]
+    assert grant.caller == "hermes"
+    assert grant.scopes == frozenset()
+
+
 def test_resolve_principal_known_unknown_and_none(tmp_path: Path) -> None:
     path = tmp_path / "principals.json"
     write_principals(path, {"cc": "token-cc"})
