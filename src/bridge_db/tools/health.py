@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -148,6 +149,25 @@ async def collect_claude_ai_section_drift(db: Any) -> dict[str, Any]:
         "reason": None,
         "drifted_sections": drifted,
     }
+
+
+def _failure_log_recordable(path: Path) -> bool:
+    """True if an audit-write failure could be durably recorded at ``path``.
+
+    A 0-byte or absent failure log is the NORMAL healthy state (no failures yet),
+    so absence must not read as unhealthy. But if the file exists and is not
+    writable, or its parent directory is missing or not writable, a real failure
+    could not be recorded — so a 0-byte inventory is untrustworthy, not a clean
+    bill. Health folds unrecordability into ``audit_degraded`` rather than
+    inferring health from byte-count alone.
+    """
+    try:
+        if path.exists():
+            return os.access(path, os.W_OK)
+        parent = path.parent
+        return parent.is_dir() and os.access(parent, os.W_OK)
+    except OSError:
+        return False
 
 
 async def collect_health_metrics(db: Any) -> dict[str, Any]:
@@ -319,7 +339,15 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     disposition_state = evidence_disposition_inventory(
         config.EVIDENCE_DISPOSITION_LOG_PATH
     )
-    audit_degraded = failure_inventory["total_bytes"] > 0
+    # A 0-byte failure log is the normal healthy state (no audit-write failures
+    # yet). But if the failure-log location is not writable, a real failure could
+    # not be recorded, so "0 bytes" is untrustworthy — not proof of health. Fold
+    # unrecordability into audit_degraded; the distinct "blind" state below tells
+    # "clean" and "can't record" apart for operators.
+    audit_failure_recordable = _failure_log_recordable(config.AUDIT_FAILURE_LOG_PATH)
+    audit_degraded = (
+        failure_inventory["total_bytes"] > 0 or not audit_failure_recordable
+    )
     disposition_degraded = disposition_state["state"] == "degraded"
     database_list_cursor = await db.execute("PRAGMA database_list")
     database_rows = await database_list_cursor.fetchall()
@@ -360,7 +388,14 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         },
         "audit_failures": {
             **failure_inventory,
-            "state": "degraded" if audit_degraded else "clear",
+            "recordable": audit_failure_recordable,
+            "state": (
+                "degraded"
+                if failure_inventory["total_bytes"] > 0
+                else "blind"
+                if not audit_failure_recordable
+                else "clear"
+            ),
         },
         "acknowledgements": {
             **acknowledgement_inventory,

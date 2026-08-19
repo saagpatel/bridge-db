@@ -172,9 +172,7 @@ async def test_health_surfaces_retained_backup_companions_without_degrading_anch
     assert result["evidence_lifecycle"]["current_recovery_ready"] is True
     assert inventory["orphaned_companion_count"] == 1
     assert inventory["missing_primary_count"] == 1
-    assert inventory["missing_primary_paths"] == [
-        str(tmp_path / "test.db.retired.bak")
-    ]
+    assert inventory["missing_primary_paths"] == [str(tmp_path / "test.db.retired.bak")]
     assert inventory["companion_state"] == "mixed"
     assert {
         "path": str(companion),
@@ -228,6 +226,33 @@ async def test_health_degrades_on_durable_audit_failure_receipt(
     assert result["storage_ok"] is False
     assert result["evidence_lifecycle"]["audit_degraded"] is True
     assert result["evidence_lifecycle"]["audit_failures"]["state"] == "degraded"
+
+
+async def test_health_degrades_when_failure_log_unrecordable(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 0-byte failure log under an unwritable/missing location is NOT a clean
+    bill: if a real audit-write failure could not be recorded there, health must
+    flag it 'blind' rather than infer health from byte-count alone."""
+    (tmp_path / "test.db").touch()
+    # Point the failure log under a directory that does not exist, so a failure
+    # receipt could never be written there — the monitor is blind, not clear.
+    monkeypatch.setattr(
+        config,
+        "AUDIT_FAILURE_LOG_PATH",
+        tmp_path / "missing-dir" / "audit_failures.jsonl",
+    )
+
+    result = await fns["health"](ctx=make_ctx(db))
+
+    audit_failures = result["evidence_lifecycle"]["audit_failures"]
+    assert audit_failures["recordable"] is False
+    assert audit_failures["state"] == "blind"
+    assert result["evidence_lifecycle"]["audit_degraded"] is True
+    assert result["ok"] is False
 
 
 async def test_health_degrades_on_open_evidence_disposition(
