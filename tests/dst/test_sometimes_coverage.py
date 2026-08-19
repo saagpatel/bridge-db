@@ -16,17 +16,23 @@ Coverage roster (label → cheapest pinned firing run):
   since the 2026-07-12 canary cut — no longer race-dependent)
 - wal_truncated                 → wal-starvation control @ PINNED_SEED
 - clear_refused_foreign_claim    → clear-race @ CLEAR_REFUSED_SEED
-
-Known-unreachable by the current corpus (Phase 2+ scenario debt, NOT
-asserted here — listing them keeps the gap loud instead of silent):
-- attribution_divergence — needs AUTH_MODE=warn with a channel-bound
-  principal diverging from the claimed caller (R4 RC-10); the DST suite
-  runs auth off.
+- attribution_divergence         → auth-on RC-10 firing: AUTH_MODE=warn with a
+  channel-bound principal diverging from the claimed caller. The SimConnection
+  corpus runs auth off, so this label is fired through a real auth-bound ctx
+  (log_activity rejects the forged authorship, but the sometimes() counter fires
+  first). No known-unreachable labels remain.
 """
 
 from pathlib import Path
 
+import aiosqlite
+import pytest
+from conftest import CaptureMCP, make_ctx
+from mcp.server.fastmcp.exceptions import ToolError
+
+from bridge_db import config
 from bridge_db.invariants import sometimes_counts
+from bridge_db.tools import activity as activity_mod
 from dst.test_cas_pingpong import (
     MISSING_CAS_SEED,
     STALE_CAS_SEED,
@@ -47,17 +53,43 @@ EXPECTED_LABELS = frozenset(
         "missing_cas_rejection",
         "wal_truncated",
         "clear_refused_foreign_claim",
+        "attribution_divergence",
     }
 )
 
 
-async def test_every_corpus_reachable_label_fires(tmp_path: Path) -> None:
+async def _fire_attribution_divergence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reach the auth-on RC-10 path the SimConnection corpus cannot. Under
+    AUTH_MODE=warn a channel-bound principal that diverges from the claimed caller
+    fires sometimes('attribution_divergence') before log_activity rejects the
+    forged authorship. Uses a real auth-bound ctx; no row is written (the reject
+    precedes any get_db), so no schema or sim harness is needed."""
+    monkeypatch.setattr(config, "AUTH_MODE", "warn")
+    cap = CaptureMCP()
+    activity_mod.register(cap)
+    conn = await aiosqlite.connect(":memory:")
+    try:
+        diverged = make_ctx(conn, principal="cc")
+        with pytest.raises(ToolError, match="bound to 'cc'"):
+            await cap.fns["log_activity"](
+                caller="codex", project_name="P", summary="s", ctx=diverged
+            )
+    finally:
+        await conn.close()
+
+
+async def test_every_corpus_reachable_label_fires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     await run_claim_race(tmp_path / "claim", RACING_SEED)
     await run_receipt_crash(tmp_path / "crash", CRASHING_SEED)
     await run_blind_vs_cas(tmp_path / "missing-cas", MISSING_CAS_SEED)
     await run_cas_vs_cas(tmp_path / "stale-cas", STALE_CAS_SEED)
     await run_wal_starvation(tmp_path / "wal", PINNED_SEED, leak=False)
     await run_clear_race(tmp_path / "clear", CLEAR_REFUSED_SEED)
+    # Fire the auth-on divergence LAST: AUTH_MODE=warn is monkeypatched inside, so
+    # it never perturbs the auth-off sim scenarios above.
+    await _fire_attribution_divergence(monkeypatch)
 
     counts = sometimes_counts()
     dead = sorted(label for label in EXPECTED_LABELS if not counts.get(label))
