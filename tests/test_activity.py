@@ -84,6 +84,7 @@ async def test_log_activity_canonicalizes_lowercase_protected_tag(
         "SELECT tags FROM activity_log WHERE project_name = 'LowerShip'"
     )
     row = await cursor.fetchone()
+    assert row is not None
     stored = json.loads(row["tags"])
     # Protected tag folded to canonical case; free-form tag preserved verbatim.
     assert stored == ["SHIPPED", "my-Free-Form"]
