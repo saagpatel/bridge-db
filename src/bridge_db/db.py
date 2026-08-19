@@ -776,7 +776,11 @@ async def _backup_db_file(db: aiosqlite.Connection, label: str) -> None:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as check:
             integrity = check.execute("PRAGMA integrity_check").fetchone()
             backup_version = int(check.execute("PRAGMA user_version").fetchone()[0])
-        if integrity is None or integrity[0] != "ok" or backup_version != expected_version:
+        if (
+            integrity is None
+            or integrity[0] != "ok"
+            or backup_version != expected_version
+        ):
             raise RuntimeError(
                 f"migration backup {path} failed SQLite/version verification; "
                 "refusing destructive migration"
@@ -1488,6 +1492,22 @@ def protected_tags_predicate(column: str = "tags") -> tuple[str, list[str]]:
     return sql, [t.upper() for t in tags]
 
 
+def canonicalize_protected_tags(tags: list[str] | None) -> list[str] | None:
+    """Fold any casing of a retention-protected lifecycle tag to its registered
+    uppercase form (``config.LEDGER_PROTECTED_TAGS``); leave free-form tags as-is.
+
+    Retention matches these case-insensitively (see ``protected_tags_predicate``),
+    but the shipped-sync feed, health nags, and ``record_disposition`` all match
+    exact-case ``'SHIPPED'``/``'LEDGER'``. Canonicalizing on write keeps every
+    reader in agreement, so a lowercase ``shipped`` can never become a row that is
+    retention-protected yet silently never synced and never nagged.
+    """
+    if not tags:
+        return tags
+    protected = {t.upper() for t in config.LEDGER_PROTECTED_TAGS}
+    return [tag.upper() if tag.upper() in protected else tag for tag in tags]
+
+
 async def insert_activity_row(
     db: aiosqlite.Connection,
     *,
@@ -1503,6 +1523,13 @@ async def insert_activity_row(
     source_trust: str = "agent",
 ) -> InsertActivityResult:
     """Insert an activity row, keep the FTS mirror in sync, and apply protected-aware retention."""
+    # Canonicalize retention-protected lifecycle tags at this single write choke
+    # point so every reader agrees on one form. Retention matches SHIPPED/LEDGER
+    # case-insensitively, but the shipped-sync feed, health nags, and
+    # record_disposition match exact-case; a stored lowercase 'shipped' would be
+    # retention-protected yet never synced and never nagged. Reassigning `tags`
+    # here also feeds the canonical form to the FTS mirror below.
+    tags = canonicalize_protected_tags(tags)
     raw_tags = json.dumps(tags or [])
     is_protected = bool(
         {tag.upper() for tag in tags or []} & config.LEDGER_PROTECTED_TAGS

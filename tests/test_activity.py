@@ -63,6 +63,36 @@ async def test_log_activity_inserts_row(
     assert json.loads(rows[0]["tags"]) == ["SHIPPED"]
 
 
+async def test_log_activity_canonicalizes_lowercase_protected_tag(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    """A lowercase 'shipped' is retention-protected (case-insensitive) but was
+    invisible to the exact-case shipped-sync feed and health nags. Canonicalize it
+    to 'SHIPPED' on write; leave free-form tags untouched."""
+    ctx = make_ctx(db)
+    await fns["log_activity"](
+        caller="cc",
+        project_name="LowerShip",
+        summary="shipped it",
+        branch=None,
+        tags=["shipped", "my-Free-Form"],
+        timestamp="2026-04-14",
+        ctx=ctx,
+    )
+
+    cursor = await db.execute(
+        "SELECT tags FROM activity_log WHERE project_name = 'LowerShip'"
+    )
+    row = await cursor.fetchone()
+    stored = json.loads(row["tags"])
+    # Protected tag folded to canonical case; free-form tag preserved verbatim.
+    assert stored == ["SHIPPED", "my-Free-Form"]
+
+    # It now reaches the exact-case shipped-sync feed instead of silently vanishing.
+    shipped = await fns["get_shipped_events"](limit=10, ctx=ctx)
+    assert "LowerShip" in [r["project_name"] for r in shipped]
+
+
 async def test_log_activity_rejects_attribution_divergence_even_in_warn_mode(
     db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -423,7 +453,9 @@ async def test_get_activity_signal_bounds_raw_horizon_and_reports_truncation(
         "raw_scan_limit": 3,
         "message": "Lifecycle aggregates cover only the bounded newest-row horizon",
     }
-    aggregates = [entry for entry in signal[1:] if entry["kind"] == "lifecycle_aggregate"]
+    aggregates = [
+        entry for entry in signal[1:] if entry["kind"] == "lifecycle_aggregate"
+    ]
     assert [entry["project_name"] for entry in aggregates] == [
         "project-4",
         "project-3",
@@ -780,8 +812,7 @@ async def test_get_shipped_events_includes_notion_sync_contract(
         "notion_title": "Ready Project",
     }
     assert (
-        by_name["ready-project"]["delivery_state"]["state"]
-        == "downstream_sync_pending"
+        by_name["ready-project"]["delivery_state"]["state"] == "downstream_sync_pending"
     )
     assert (
         by_name["ready-project"]["delivery_state"]["dimensions"][
@@ -1074,9 +1105,7 @@ async def test_record_disposition_synced_requires_downstream_proof(
         )
 
 
-@pytest.mark.parametrize(
-    ("owner", "attacker"), [("cc", "codex"), ("codex", "cc")]
-)
+@pytest.mark.parametrize(("owner", "attacker"), [("cc", "codex"), ("codex", "cc")])
 async def test_record_disposition_synced_rejects_cross_source_principal(
     db: aiosqlite.Connection,
     fns: dict[str, Any],
@@ -1090,7 +1119,9 @@ async def test_record_disposition_synced_rejects_cross_source_principal(
     async def unexpected_export(_db: aiosqlite.Connection) -> None:
         raise AssertionError("unauthorized receipt must not trigger export")
 
-    monkeypatch.setattr(mod, "_export_bridge_markdown_after_processing", unexpected_export)
+    monkeypatch.setattr(
+        mod, "_export_bridge_markdown_after_processing", unexpected_export
+    )
     await fns["log_activity"](
         caller=owner,
         project_name=f"OwnedBy-{owner}",
@@ -1568,8 +1599,7 @@ async def test_record_disposition_synced_auto_export_records_context_export_stat
     assert export_state["exported_content_sha256"]
     receipt = await (
         await db.execute(
-            "SELECT principal, trigger, projection_job_id "
-            "FROM bridge_export_receipts"
+            "SELECT principal, trigger, projection_job_id FROM bridge_export_receipts"
         )
     ).fetchone()
     assert receipt is not None
