@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,6 +20,22 @@ from bridge_db.codex_seed import (
     load_manifest,
 )
 from bridge_db.db import open_db
+
+
+@pytest.fixture
+def before_legacy_sunset() -> Iterator[None]:
+    """Pin the clock just before the legacy-fingerprint sunset.
+
+    Tests that exercise the legacy-v1 acceptance path must not read the real
+    wall-clock: once real time crosses LEGACY_FINGERPRINT_SUNSET the legacy
+    branch fails closed, so an unpinned test rots at that date. The two cutoff
+    boundary tests install their own clocks and deliberately do not use this.
+    """
+    clock.install(lambda: datetime(2026, 8, 17, 23, 59, tzinfo=UTC))
+    try:
+        yield
+    finally:
+        clock.reset()
 
 
 def make_manifest() -> dict[str, object]:
@@ -75,6 +92,7 @@ def test_load_manifest_requires_keys(tmp_path: Path) -> None:
         load_manifest(path)
 
 
+@pytest.mark.usefixtures("before_legacy_sunset")
 def test_load_manifest_rejects_mismatched_fingerprint(tmp_path: Path) -> None:
     path = tmp_path / "manifest.json"
     manifest = make_manifest()
@@ -84,6 +102,7 @@ def test_load_manifest_rejects_mismatched_fingerprint(tmp_path: Path) -> None:
         load_manifest(path)
 
 
+@pytest.mark.usefixtures("before_legacy_sunset")
 def test_load_manifest_reports_implicit_legacy_v1(tmp_path: Path) -> None:
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps(make_manifest()), encoding="utf-8")
@@ -119,12 +138,15 @@ def test_legacy_manifest_fails_closed_after_cutoff(tmp_path: Path) -> None:
     path.write_text(json.dumps(make_manifest()), encoding="utf-8")
     clock.install(lambda: datetime(2026, 8, 18, 0, 0, tzinfo=UTC))
     try:
-        with pytest.raises(ValueError, match="legacy fingerprint compatibility expired"):
+        with pytest.raises(
+            ValueError, match="legacy fingerprint compatibility expired"
+        ):
             load_manifest(path)
     finally:
         clock.reset()
 
 
+@pytest.mark.usefixtures("before_legacy_sunset")
 def test_load_manifest_reports_explicit_legacy_v1(tmp_path: Path) -> None:
     path = tmp_path / "manifest.json"
     manifest = make_manifest()
@@ -212,6 +234,7 @@ async def test_apply_manifest_rejects_unknown_version_before_opening_database(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("before_legacy_sunset")
 async def test_codex_seed_dry_run_reports_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -230,6 +253,7 @@ async def test_codex_seed_dry_run_reports_writes(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("before_legacy_sunset")
 async def test_codex_seed_apply_is_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -252,7 +276,9 @@ async def test_codex_seed_apply_is_idempotent(
 
     db = await open_db(db_path)
     try:
-        cursor = await db.execute("SELECT COUNT(*) FROM system_snapshots WHERE system='codex'")
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM system_snapshots WHERE system='codex'"
+        )
         snapshot_row = await cursor.fetchone()
         assert snapshot_row is not None
         assert snapshot_row[0] == 1
@@ -268,6 +294,7 @@ async def test_codex_seed_apply_is_idempotent(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("before_legacy_sunset")
 async def test_codex_seed_refuses_conflicting_baseline_activity_atomically(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -315,6 +342,7 @@ async def test_codex_seed_refuses_conflicting_baseline_activity_atomically(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("before_legacy_sunset")
 async def test_codex_seed_populates_content_index(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
