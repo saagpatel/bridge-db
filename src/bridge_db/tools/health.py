@@ -25,7 +25,7 @@ from bridge_db.evidence import (
     migration_backup_inventory,
 )
 from bridge_db.execution_generation import (
-    RUNTIME_DEPENDENCY_STATE,
+    SUPPORTED_RUNTIME_DEPENDENCY_STATES,
     runtime_generation_identity,
 )
 from bridge_db.recovery import recovery_anchor_inventory
@@ -187,16 +187,20 @@ def _runtime_dependency_readiness(
                 "reason_code", "generation.runtime_dependency_generation_unverified"
             ),
         }
-    if runtime_generation.get("dependency_environment_state") != RUNTIME_DEPENDENCY_STATE:
+    if (
+        runtime_generation.get("dependency_environment_state")
+        not in SUPPORTED_RUNTIME_DEPENDENCY_STATES
+    ):
         return {
             "schema": "BridgeRuntimeDependencyReadinessV1",
             "ready": False,
             "state": "unverified",
             "reason_code": "generation.runtime_dependency_claim_invalid",
         }
-    if (
-        runtime_generation.get("runtime_dependency_state") != "verified"
-        or not isinstance(runtime_generation.get("runtime_dependency_sha256"), str)
+    if runtime_generation.get(
+        "runtime_dependency_state"
+    ) != "verified" or not isinstance(
+        runtime_generation.get("runtime_dependency_sha256"), str
     ):
         return {
             "schema": "BridgeRuntimeDependencyReadinessV1",
@@ -346,9 +350,9 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     tenancy = tenancy_inventory()
     tenancy_readiness = _tenancy_readiness(tenancy)
     shared_runtime = shared_runtime_inventory()
-    selected_transport_mode = os.environ.get(
-        "BRIDGE_DB_TRANSPORT_MODE", "direct"
-    ).strip().lower()
+    selected_transport_mode = (
+        os.environ.get("BRIDGE_DB_TRANSPORT_MODE", "direct").strip().lower()
+    )
     shared_runtime_required = selected_transport_mode == "shared"
     current_shared_runtime = (
         shared_runtime_current_readiness()
@@ -370,14 +374,11 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
             "reason_code": None,
         }
     )
-    shared_runtime_ready = (
-        selected_transport_mode == "direct"
-        or (
-            shared_runtime_required
-            and current_shared_runtime["state"] == "observed"
-            and current_shared_runtime["ready"] is True
-            and runtime_dependency_readiness["ready"] is True
-        )
+    shared_runtime_ready = selected_transport_mode == "direct" or (
+        shared_runtime_required
+        and current_shared_runtime["state"] == "observed"
+        and current_shared_runtime["ready"] is True
+        and runtime_dependency_readiness["ready"] is True
     )
     shared_runtime = {
         **shared_runtime,
@@ -388,8 +389,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "runtime_dependency_readiness": runtime_dependency_readiness,
         "runtime_dependency_required_for_current_process": shared_runtime_required,
         "runtime_dependency_ready_for_current_process": (
-            not shared_runtime_required
-            or runtime_dependency_readiness["ready"] is True
+            not shared_runtime_required or runtime_dependency_readiness["ready"] is True
         ),
     }
     cursor = await db.execute("PRAGMA user_version")
@@ -1146,9 +1146,7 @@ async def collect_status_summary(
                 "reason_code"
             ),
             "shared_runtime_state": health["shared_runtime"]["state"],
-            "shared_runtime_adoption_state": health["shared_runtime"][
-                "adoption_state"
-            ],
+            "shared_runtime_adoption_state": health["shared_runtime"]["adoption_state"],
             "shared_runtime_live_broker_count": health["shared_runtime"].get(
                 "live_broker_count"
             ),
