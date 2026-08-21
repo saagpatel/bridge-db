@@ -117,16 +117,15 @@ Codex binding are specified in
 
 Generation verification is exact-tree and fail-closed: unexpected bytes,
 owner/mode drift, interpreter drift, source-copy races, and generation-ID
-mismatch are non-green. The external interpreter executable is digest-bound, and
-shared broker readiness requires current `BridgeRuntimeDependencyEvidenceV1` for
-the declared project runtime dependency closure. That evidence binds installed
-distribution files for `aiosqlite`, `mcp`, `pydantic`, `uvicorn`, and their
-relevant transitive packages by path, identity metadata, mtime/ctime, and
-SHA-256. The collector holds no-follow descriptors open through digesting and
-revalidates every configured and resolved path against the still-open complete
-file set before accepting evidence. Packages outside the authenticated set, the
-standard library, shared libraries, and OS runtime remain outside the claim;
-lockfile binding is not a managed environment-convergence claim.
+mismatch are non-green. The external interpreter executable is digest-bound.
+New generations collect `BridgeRuntimeDependencyEvidenceV1` from the staging
+interpreter, require the declared versions in `uv.lock`, and freeze the safe
+importable files as a `BridgeRuntimeDependencyBundleV1` inside the read-only
+generation. Verification authenticates that exact bundle without consulting
+mutable external package file identities, and the launcher excludes external
+package paths. Legacy external-dependency manifests remain readable under their
+original weaker claim ceiling. The standard library, shared libraries, and OS
+runtime remain outside the immutable-bundle claim.
 
 Each direct MCP process and each shared broker publishes a private
 owner/principal/generation lease with request timing, lifecycle reason, PID
@@ -142,7 +141,7 @@ process. Forward activation requires a private
 exact replay rows, and requires the documented client and lifecycle-scenario
 coverage for the exact requested generation before any pointer write. Rollback
 remains the safety path and does not require new replay evidence. Snapshot
-refusal storage stays an additive extension over core SQLite
+Snapshot refusal storage stays an additive extension over core SQLite
 `user_version=23`, preserving open/read compatibility with exact previous
 merged generation `d7272d489873faa5ed84c81734636ffc8cecb095`; rollback loses
 the refusal API until roll-forward but does not discard its rows. Activation or

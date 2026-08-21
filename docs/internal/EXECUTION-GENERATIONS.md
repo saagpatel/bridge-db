@@ -9,7 +9,7 @@ a content-addressed release. Each release binds:
 - `pyproject.toml` and `uv.lock` dependency digests;
 - the MCP/auth/integration contract digest;
 - the exact Python interpreter digest;
-- `BridgeRuntimeDependencyEvidenceV1` for the declared project runtime
+- a `BridgeRuntimeDependencyBundleV1` copy of the lock-matched project runtime
   distribution closure needed by shared broker startup;
 - an immutable launcher and its digest.
 
@@ -34,6 +34,17 @@ predates runtime-dependency evidence. Such a generation retains its original
 reports runtime dependencies as `legacy_unverified`; it is never normalized to
 the stronger current claim. A generation containing shared-runtime source must
 carry the complete runtime-dependency evidence fields.
+
+New staging refuses an installed distribution version that is absent from the
+bound `uv.lock`. It copies each safe in-environment distribution file through a
+no-follow descriptor, rechecks the source identity and digest, and records the
+deduplicated release-relative file inventory. Console scripts outside
+`site-packages` are not part of the server import closure. The launcher removes
+external package paths and imports only from the generation's source, immutable
+runtime bundle, and standard library. Verification authenticates the exact
+bundle tree without consulting the mutable staging environment. Existing
+`BridgeRuntimeDependencyEvidenceV1` generations remain readable under their
+original external-environment claim ceiling.
 
 The release tree is read-only. `current` and `previous` are relative symlinks
 under one private execution root. Activation replaces `current` atomically,
@@ -121,23 +132,12 @@ is explicit operating attention rather than verified activation.
 
 The interpreter executable bytes are checked during staging, verification,
 activation readback, runtime identity readback, and launcher startup. Staging
-and verification also collect and re-read
-`BridgeRuntimeDependencyEvidenceV1` through the selected interpreter for the
-shared broker's declared project runtime dependency closure, including
-`aiosqlite`, `mcp`, `pydantic`, `uvicorn`, and their relevant installed
-transitive distributions. That evidence binds each distribution file's resolved
-path, device, inode, mode, size, mtime/ctime, and SHA-256, plus an aggregate
-dependency SHA-256. Collection opens every authenticated dependency file with
-no-follow descriptor semantics, holds the complete descriptor set open through
-collection and digesting, and revalidates each configured path and resolved path
-against the still-open descriptor identity before the evidence is emitted. This
-does not make the entire external environment immutable: packages outside the
-authenticated set, the standard library, shared libraries, and OS runtime remain
-outside the release. The precise claim is
-`source_interpreter_and_runtime_dependencies_bound_external_os_unmanaged`;
-`pyproject.toml` and `uv.lock` remain bound lockfile evidence, not proof of a
-managed content-addressed environment. A fully managed environment is a separate
-future activation contract.
+first collects `BridgeRuntimeDependencyEvidenceV1` through the selected
+interpreter, verifies every declared distribution version against `uv.lock`,
+then freezes the importable closure as `BridgeRuntimeDependencyBundleV1` under
+the release. The bundle remains bounded by the external interpreter, standard
+library, shared libraries, and OS runtime; its precise claim is
+`source_interpreter_and_generation_immutable_runtime_dependencies_bound`.
 
 ## Secure Codex binding
 
