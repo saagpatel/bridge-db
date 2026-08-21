@@ -228,6 +228,16 @@ Ops replay rows derive per-owner process-count, lifetime, RSS, and idle-review
 budgets; pooling is deliberately not introduced without live evidence that
 lifecycle cleanup is insufficient.
 
+An already-live lease recorded as `owner=unknown` can be corrected only through
+the separate `plan-owner-correction` and `apply-owner-correction` commands. The
+plan binds the exact lease identity, zero-active-request guard, PID/start
+identity, unchanged recorded ancestry, and the exact parent process identity
+and command. Apply rechecks every binding and writes a mode-`0400`, append-only
+owner projection under `owner-corrections`; it never rewrites the source lease
+or terminates a process. Inventory and lifecycle policy use the verified
+projection while retaining the recorded owner for audit. Any drift or malformed
+projection fails closed.
+
 The 2026-08-05 live selection snapshot observed approximately 30 concurrent
 stdio server pairs: the ChatGPT app-server parent (PID 15780 at observation
 time) owned the majority, Claude owned about nine, and Personal Ops and Hermes

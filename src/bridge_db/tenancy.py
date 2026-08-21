@@ -33,6 +33,9 @@ POLICY_SCHEMA = "BridgeMcpTenancyPolicyV1"
 REPLAY_OBSERVATIONS_SCHEMA = "BridgeMcpTenancyReplayObservationsV1"
 ACTIVATION_EVIDENCE_SCHEMA = "BridgeMcpTenancyActivationEvidenceV1"
 APPLY_SCHEMA = "BridgeMcpTenancyApplyReceiptV1"
+OWNER_CORRECTION_PLAN_SCHEMA = "BridgeMcpTenancyOwnerCorrectionPlanV1"
+OWNER_CORRECTION_SCHEMA = "BridgeMcpTenancyOwnerCorrectionV1"
+OWNER_CORRECTION_APPLY_SCHEMA = "BridgeMcpTenancyOwnerCorrectionApplyReceiptV1"
 _OWNER_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 _GENERATION_RE = re.compile(r"^[0-9a-f]{12}-[0-9a-f]{12}$")
 ACTIVATION_REQUIRED_OWNERS = (
@@ -52,6 +55,8 @@ ProcessState = Literal["same", "missing", "mismatch", "unknown"]
 ProcessProbe = Callable[[int, str], ProcessState]
 AncestryState = Literal["same", "changed", "unknown", "not_applicable"]
 AncestryProbe = Callable[[int], list[int] | None]
+ProcessIdentityProbe = Callable[[int], str | None]
+ProcessCommandProbe = Callable[[int], str | None]
 
 
 class TenancyContractError(RuntimeError):
@@ -191,6 +196,21 @@ def process_identity(pid: int) -> str | None:
     return f"ps-start:{value}" if result.returncode == 0 and value else None
 
 
+def process_command(pid: int) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except OSError:
+        return None
+    command = completed.stdout.rstrip("\n") if completed.returncode == 0 else ""
+    return command or None
+
+
 def _parent_pid(pid: int) -> int | None:
     proc_stat = Path(f"/proc/{pid}/stat")
     try:
@@ -301,9 +321,7 @@ def _process_observations_by_lease(
             for lease_id, identity in targets:
                 if row is not None:
                     observations[lease_id] = (
-                        ("same", row[1])
-                        if row[0] == identity
-                        else ("mismatch", None)
+                        ("same", row[1]) if row[0] == identity else ("mismatch", None)
                     )
                     continue
                 state = probe_process(pid, identity)
@@ -579,13 +597,251 @@ class TenancyTracker:
             return {"ok": True, "lease_id": self.lease_id, "history_path": str(history)}
 
 
+def _lease_identity_binding(record: dict[str, Any]) -> str:
+    fields = {
+        key: record.get(key)
+        for key in (
+            "lease_id",
+            "pid",
+            "parent_pid",
+            "pid_ancestry",
+            "process_identity",
+            "generation",
+            "created_at",
+        )
+    }
+    return _sha256_bytes(_stable_json(fields).encode("utf-8"))
+
+
+def _owner_correction_directory(root: Path, *, create: bool) -> Path:
+    directory = root / "owner-corrections"
+    if create:
+        directory.mkdir(exist_ok=True, mode=0o700)
+    if not directory.exists():
+        raise TenancyContractError("tenancy.owner_correction_directory_missing")
+    metadata = directory.lstat()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        raise TenancyContractError("tenancy.owner_correction_directory_invalid")
+    return directory
+
+
+def _project_owner(root: Path, record: dict[str, Any]) -> dict[str, Any]:
+    directory = root / "owner-corrections"
+    if not directory.exists():
+        return record
+    _owner_correction_directory(root, create=False)
+    path = directory / f"{record['lease_id']}.json"
+    if not path.exists():
+        return record
+    correction = _read_json(path)
+    body = {
+        key: value for key, value in correction.items() if key != "correction_sha256"
+    }
+    expected_fields = {
+        "schema",
+        "lease_id",
+        "original_owner",
+        "corrected_owner",
+        "lease_identity_sha256",
+        "parent_pid",
+        "parent_process_identity",
+        "parent_command",
+        "plan_sha256",
+        "applied_at",
+        "correction_sha256",
+    }
+    corrected_owner = correction.get("corrected_owner")
+    if (
+        set(correction) != expected_fields
+        or correction.get("schema") != OWNER_CORRECTION_SCHEMA
+        or correction.get("lease_id") != record.get("lease_id")
+        or correction.get("original_owner") != record.get("owner")
+        or correction.get("lease_identity_sha256") != _lease_identity_binding(record)
+        or not isinstance(corrected_owner, str)
+        or corrected_owner not in ACTIVATION_REQUIRED_OWNERS
+        or correction.get("correction_sha256")
+        != _sha256_bytes(_stable_json(body).encode("utf-8"))
+    ):
+        raise TenancyContractError("tenancy.owner_correction_invalid")
+    return {
+        **record,
+        "owner": corrected_owner,
+        "recorded_owner": record.get("owner"),
+        "owner_correction_sha256": correction["correction_sha256"],
+    }
+
+
+def plan_owner_correction(
+    *,
+    root: Path,
+    lease_id: str,
+    corrected_owner: str,
+    expected_parent_command: str,
+    process_probe: ProcessProbe = probe_process,
+    ancestry_probe: AncestryProbe = _pid_ancestry,
+    identity_probe: ProcessIdentityProbe = process_identity,
+    command_probe: ProcessCommandProbe = process_command,
+) -> dict[str, Any]:
+    root = _guard_root(root, create=False)
+    if not re.fullmatch(r"[0-9a-f]{24}", lease_id):
+        raise TenancyContractError("tenancy.target_lease_id_invalid")
+    if corrected_owner not in ACTIVATION_REQUIRED_OWNERS:
+        raise TenancyContractError("tenancy.corrected_owner_invalid")
+    if (
+        not expected_parent_command
+        or len(expected_parent_command) > 4096
+        or "\n" in expected_parent_command
+        or "\r" in expected_parent_command
+    ):
+        raise TenancyContractError("tenancy.parent_command_invalid")
+    path = root / "active" / f"{lease_id}.json"
+    record = _read_json(path)
+    _validate_lease_record(path, record)
+    if record.get("owner") != "unknown":
+        raise TenancyContractError("tenancy.owner_correction_not_unknown")
+    if record.get("active_request_count") != 0:
+        raise TenancyContractError("tenancy.owner_correction_active_request_refused")
+    pid = cast(int, record["pid"])
+    identity = cast(str, record["process_identity"])
+    if process_probe(pid, identity) != "same":
+        raise TenancyContractError("tenancy.process_state_changed")
+    recorded_ancestry = cast(list[int], record["pid_ancestry"])
+    observed_ancestry = ancestry_probe(pid)
+    if not recorded_ancestry or observed_ancestry != recorded_ancestry:
+        raise TenancyContractError("tenancy.ancestry_changed")
+    parent_pid = cast(int, record["parent_pid"])
+    if parent_pid != recorded_ancestry[0]:
+        raise TenancyContractError("tenancy.parent_identity_mismatch")
+    parent_identity = identity_probe(parent_pid)
+    parent_command = command_probe(parent_pid)
+    if parent_identity is None or parent_command != expected_parent_command:
+        raise TenancyContractError("tenancy.parent_identity_mismatch")
+    body = {
+        "schema": OWNER_CORRECTION_PLAN_SCHEMA,
+        "created_at": _utc_text(),
+        "root": str(root),
+        "lease_id": lease_id,
+        "source_lease_sha256": _sha256_file(path),
+        "lease_identity_sha256": _lease_identity_binding(record),
+        "original_owner": "unknown",
+        "corrected_owner": corrected_owner,
+        "pid": pid,
+        "process_identity": identity,
+        "pid_ancestry": recorded_ancestry,
+        "parent_pid": parent_pid,
+        "parent_process_identity": parent_identity,
+        "parent_command": parent_command,
+        "active_request_guard": 0,
+        "effect": "append_only_owner_projection",
+    }
+    return {**body, "plan_sha256": _sha256_bytes(_stable_json(body).encode("utf-8"))}
+
+
+def apply_owner_correction(
+    *,
+    root: Path,
+    plan: dict[str, Any],
+    process_probe: ProcessProbe = probe_process,
+    ancestry_probe: AncestryProbe = _pid_ancestry,
+    identity_probe: ProcessIdentityProbe = process_identity,
+    command_probe: ProcessCommandProbe = process_command,
+) -> dict[str, Any]:
+    root = _guard_root(root, create=False)
+    supplied_digest = plan.get("plan_sha256")
+    body = {key: value for key, value in plan.items() if key != "plan_sha256"}
+    if (
+        plan.get("schema") != OWNER_CORRECTION_PLAN_SCHEMA
+        or supplied_digest != _sha256_bytes(_stable_json(body).encode("utf-8"))
+        or plan.get("root") != str(root)
+        or plan.get("effect") != "append_only_owner_projection"
+        or plan.get("original_owner") != "unknown"
+        or plan.get("active_request_guard") != 0
+    ):
+        raise TenancyContractError("tenancy.owner_correction_plan_invalid")
+    lease_id = plan.get("lease_id")
+    if not isinstance(lease_id, str) or not re.fullmatch(r"[0-9a-f]{24}", lease_id):
+        raise TenancyContractError("tenancy.owner_correction_plan_invalid")
+    corrected_owner = plan.get("corrected_owner")
+    if corrected_owner not in ACTIVATION_REQUIRED_OWNERS:
+        raise TenancyContractError("tenancy.corrected_owner_invalid")
+    path = root / "active" / f"{lease_id}.json"
+    record = _read_json(path)
+    _validate_lease_record(path, record)
+    if (
+        _sha256_file(path) != plan.get("source_lease_sha256")
+        or _lease_identity_binding(record) != plan.get("lease_identity_sha256")
+        or record.get("owner") != "unknown"
+        or record.get("active_request_count") != 0
+    ):
+        raise TenancyContractError("tenancy.owner_correction_lease_changed")
+    pid = cast(int, record["pid"])
+    identity = cast(str, record["process_identity"])
+    ancestry = cast(list[int], record["pid_ancestry"])
+    parent_pid = cast(int, record["parent_pid"])
+    if (
+        process_probe(pid, identity) != "same"
+        or ancestry_probe(pid) != ancestry
+        or not ancestry
+        or ancestry[0] != parent_pid
+        or identity_probe(parent_pid) != plan.get("parent_process_identity")
+        or command_probe(parent_pid) != plan.get("parent_command")
+    ):
+        raise TenancyContractError("tenancy.owner_correction_identity_changed")
+    correction_body = {
+        "schema": OWNER_CORRECTION_SCHEMA,
+        "lease_id": lease_id,
+        "original_owner": "unknown",
+        "corrected_owner": corrected_owner,
+        "lease_identity_sha256": plan["lease_identity_sha256"],
+        "parent_pid": parent_pid,
+        "parent_process_identity": plan["parent_process_identity"],
+        "parent_command": plan["parent_command"],
+        "plan_sha256": supplied_digest,
+        "applied_at": plan["created_at"],
+    }
+    correction = {
+        **correction_body,
+        "correction_sha256": _sha256_bytes(
+            _stable_json(correction_body).encode("utf-8")
+        ),
+    }
+    directory = _owner_correction_directory(root, create=True)
+    correction_path = directory / f"{lease_id}.json"
+    if correction_path.exists():
+        existing = _read_json(correction_path)
+        if existing != correction:
+            raise TenancyContractError("tenancy.owner_correction_already_exists")
+    else:
+        _atomic_write(correction_path, correction, mode=0o400, replace=False)
+    projected = _project_owner(root, record)
+    if projected.get("owner") != corrected_owner:
+        raise TenancyContractError("tenancy.owner_correction_readback_failed")
+    return {
+        "schema": OWNER_CORRECTION_APPLY_SCHEMA,
+        "ok": True,
+        "lease_id": lease_id,
+        "recorded_owner": "unknown",
+        "effective_owner": corrected_owner,
+        "plan_sha256": supplied_digest,
+        "correction_sha256": correction["correction_sha256"],
+        "correction_path": str(correction_path),
+        "source_lease_preserved": True,
+        "process_termination": False,
+    }
+
+
 def read_active_leases(root: Path) -> list[tuple[Path, dict[str, Any]]]:
     root = _guard_root(root, create=False)
     records: list[tuple[Path, dict[str, Any]]] = []
     for path in sorted((root / "active").glob("*.json")):
         record = _read_json(path)
         _validate_lease_record(path, record)
-        records.append((path, record))
+        records.append((path, _project_owner(root, record)))
     return records
 
 
@@ -632,9 +888,7 @@ def derive_lifecycle_policy(observations: list[dict[str, Any]]) -> dict[str, Any
         budgets[owner] = {
             "max_processes": max(process_highwater + 1, 1),
             "max_lifetime_seconds": max(math.ceil(lifetime_highwater * 1.25), 60),
-            "max_rss_bytes": max(
-                (rss_highwater * 5 + 3) // 4, 16 * 1024 * 1024
-            ),
+            "max_rss_bytes": max((rss_highwater * 5 + 3) // 4, 16 * 1024 * 1024),
             "idle_review_seconds": max(math.ceil(lifetime_highwater * 2), 300),
             "derived_from": {
                 "observations": len(rows),
@@ -700,17 +954,23 @@ def validate_lifecycle_activation_evidence(
     evidence: dict[str, Any],
 ) -> dict[str, Any]:
     """Recompute and summarize a content-bound replay evidence bundle."""
-    if set(evidence) != {
-        "schema",
-        "generation_id",
-        "requirements",
-        "observations",
-        "policy",
-        "evidence_sha256",
-    } or evidence.get("schema") != ACTIVATION_EVIDENCE_SCHEMA:
+    if (
+        set(evidence)
+        != {
+            "schema",
+            "generation_id",
+            "requirements",
+            "observations",
+            "policy",
+            "evidence_sha256",
+        }
+        or evidence.get("schema") != ACTIVATION_EVIDENCE_SCHEMA
+    ):
         raise TenancyContractError("tenancy.activation_evidence_invalid")
     generation_id = evidence.get("generation_id")
-    if not isinstance(generation_id, str) or not _GENERATION_RE.fullmatch(generation_id):
+    if not isinstance(generation_id, str) or not _GENERATION_RE.fullmatch(
+        generation_id
+    ):
         raise TenancyContractError("tenancy.activation_generation_invalid")
     body = {key: value for key, value in evidence.items() if key != "evidence_sha256"}
     if evidence.get("evidence_sha256") != _sha256_bytes(
@@ -1168,8 +1428,7 @@ def tenancy_inventory(root: Path | None = None) -> dict[str, Any]:
         "root": str(selected),
         "active_count": live_count,
         "lease_count": len(leases),
-        "stale_lease_count": process_states["missing"]
-        + process_states["mismatch"],
+        "stale_lease_count": process_states["missing"] + process_states["mismatch"],
         "unknown_process_count": unknown_count,
         "process_states": process_states,
         "owners": owners,
@@ -1208,9 +1467,10 @@ def _load_json_file(path: Path) -> dict[str, Any]:
 
 def _load_replay_observations(path: Path) -> list[dict[str, Any]]:
     payload = _load_json_file(path)
-    if set(payload) != {"schema", "observations"} or payload.get(
-        "schema"
-    ) != REPLAY_OBSERVATIONS_SCHEMA:
+    if (
+        set(payload) != {"schema", "observations"}
+        or payload.get("schema") != REPLAY_OBSERVATIONS_SCHEMA
+    ):
         raise TenancyContractError("tenancy.replay_observations_invalid")
     raw_observations = payload.get("observations")
     if not isinstance(raw_observations, list):
@@ -1240,6 +1500,14 @@ def main() -> None:
     apply.add_argument("--root", type=Path, required=True)
     apply.add_argument("--plan", type=Path, required=True)
     apply.add_argument("--lease-id")
+    owner_plan = subparsers.add_parser("plan-owner-correction")
+    owner_plan.add_argument("--root", type=Path, required=True)
+    owner_plan.add_argument("--lease-id", required=True)
+    owner_plan.add_argument("--corrected-owner", required=True)
+    owner_plan.add_argument("--expected-parent-command", required=True)
+    owner_apply = subparsers.add_parser("apply-owner-correction")
+    owner_apply.add_argument("--root", type=Path, required=True)
+    owner_apply.add_argument("--plan", type=Path, required=True)
     args = parser.parse_args()
     try:
         if args.command == "status":
@@ -1255,11 +1523,23 @@ def main() -> None:
                 _load_replay_observations(args.observations),
                 generation_id=args.generation_id,
             )
-        else:
+        elif args.command == "apply":
             result = apply_lifecycle_plan(
                 root=args.root,
                 plan=_load_json_file(args.plan),
                 target_lease_id=args.lease_id,
+            )
+        elif args.command == "plan-owner-correction":
+            result = plan_owner_correction(
+                root=args.root,
+                lease_id=args.lease_id,
+                corrected_owner=args.corrected_owner,
+                expected_parent_command=args.expected_parent_command,
+            )
+        else:
+            result = apply_owner_correction(
+                root=args.root,
+                plan=_load_json_file(args.plan),
             )
     except TenancyContractError as exc:
         print(json.dumps({"ok": False, "reason_code": exc.reason_code}, sort_keys=True))
