@@ -15,7 +15,7 @@ Coverage roster (label → cheapest pinned firing run):
 - missing_cas_rejection         → blind-vs-cas @ MISSING_CAS_SEED (unconditional
   since the 2026-07-12 canary cut — no longer race-dependent)
 - wal_truncated                 → wal-starvation control @ PINNED_SEED
-- clear_refused_foreign_claim    → clear-race @ CLEAR_REFUSED_SEED
+- clear_refused_session_capability → clear-race @ CLEAR_REFUSED_SEED
 - attribution_divergence         → auth-on RC-10 firing: AUTH_MODE=warn with a
   channel-bound principal diverging from the claimed caller. The SimConnection
   corpus runs auth off, so this label is fired through a real auth-bound ctx
@@ -52,7 +52,7 @@ EXPECTED_LABELS = frozenset(
         "stale_cas_rejection",
         "missing_cas_rejection",
         "wal_truncated",
-        "clear_refused_foreign_claim",
+        "clear_refused_session_capability",
         "attribution_divergence",
     }
 )

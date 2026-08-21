@@ -1,4 +1,4 @@
-"""Entry point: python -m bridge_db [--doctor|--status|--dogfood]"""
+"""Entry point: python -m bridge_db [--doctor|--status|--dogfood]."""
 
 import argparse
 import asyncio
@@ -133,6 +133,18 @@ async def run_status(*, now: datetime | None = None) -> bool:
     print(f"  Projection health: {summary['projection_health']}")
     print(f"  Operating state: {summary['operating_state']}")
     print(
+        "  Execution generation:"
+        f" state={summary['signals']['execution_generation_state']},"
+        f" id={summary['signals']['execution_generation_id'] or 'none'}"
+    )
+    print(
+        "  MCP tenancy:"
+        f" state={summary['signals']['tenancy_state']},"
+        f" readiness={summary['signals']['tenancy_readiness_state']},"
+        f" active={summary['signals']['tenancy_active_count']},"
+        f" active_requests={summary['signals']['tenancy_active_request_count']}"
+    )
+    print(
         "  DB:"
         f" exists={summary['db']['exists']},"
         f" schema=v{summary['db']['schema_version']}"
@@ -148,6 +160,7 @@ async def run_status(*, now: datetime | None = None) -> bool:
         f" activity={summary['row_counts']['activity_log']},"
         f" handoffs={summary['row_counts']['pending_handoffs']},"
         f" snapshots={summary['row_counts']['system_snapshots']},"
+        f" snapshot_refusals={summary['row_counts']['snapshot_refusals']},"
         f" costs={summary['row_counts']['cost_records']},"
         f" synced_shipped={summary['signals']['synced_shipped']}"
     )
@@ -163,6 +176,8 @@ async def run_status(*, now: datetime | None = None) -> bool:
         f" fts_missing={summary['signals']['fts_missing']},"
         f" fts_orphaned={summary['signals']['fts_orphaned']},"
         f" open_write_conflicts={summary['signals']['open_write_conflicts']},"
+        " unacknowledged_snapshot_refusals="
+        f"{summary['signals']['unacknowledged_snapshot_refusals']},"
         f" audit_degraded={summary['signals']['audit_degraded']},"
         " evidence_disposition_degraded="
         f"{summary['signals']['evidence_disposition_degraded']},"
@@ -261,6 +276,18 @@ def _status_attention(summary: dict[str, Any]) -> str | None:
         notes.append(
             f"processed_shipped_without_receipt={signals['processed_shipped_without_receipt']}"
         )
+    if signals["unacknowledged_snapshot_refusals"]:
+        notes.append(
+            "unacknowledged_snapshot_refusals="
+            f"{signals['unacknowledged_snapshot_refusals']}"
+        )
+    if signals["execution_generation_state"] != "verified":
+        notes.append(
+            "execution_generation_state="
+            f"{signals['execution_generation_state']}"
+        )
+    if signals["tenancy_state"] == "unverified":
+        notes.append("tenancy_state=unverified")
     if signals["fts_missing"]:
         notes.append(f"fts_missing={signals['fts_missing']}")
     if signals["fts_orphaned"]:
@@ -1243,6 +1270,227 @@ async def run_cancel_handoff(handoff_id: int, reason: str) -> bool:
     return True
 
 
+_ORPHAN_RECOVERY_FIELDS = (
+    *_HANDOFF_PROMOTION_FIELDS,
+    "claim_session_id",
+    "capability_token_sha256",
+    "capability_claimed_caller",
+    "capability_allowed_transition",
+    "capability_issued_at",
+    "capability_expires_at",
+    "capability_consumed_at",
+    "capability_recovered_at",
+)
+
+
+async def _select_orphan_recovery_state(db: Any, handoff_id: int) -> Any:
+    cursor = await db.execute(
+        """
+        SELECT h.id, h.project_name, h.project_path, h.roadmap_file, h.phase,
+               h.dispatched_from, h.dispatched_at, h.picked_up_at, h.cleared_at,
+               h.canonical_key, h.source_trust, h.status, h.claimed_by,
+               c.session_id AS claim_session_id,
+               c.token_sha256 AS capability_token_sha256,
+               c.claimed_caller AS capability_claimed_caller,
+               c.allowed_transition AS capability_allowed_transition,
+               c.issued_at AS capability_issued_at,
+               c.expires_at AS capability_expires_at,
+               c.consumed_at AS capability_consumed_at,
+               c.recovered_at AS capability_recovered_at
+        FROM pending_handoffs AS h
+        LEFT JOIN handoff_session_capabilities AS c ON c.handoff_id = h.id
+        WHERE h.id = ?
+        """,
+        (handoff_id,),
+    )
+    return await cursor.fetchone()
+
+
+def _orphan_recovery_digest(row: Any) -> str:
+    payload = {field: row[field] for field in _ORPHAN_RECOVERY_FIELDS}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _parse_capability_expiry(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+async def run_recover_orphaned_handoff(handoff_id: int, reason: str) -> bool:
+    """Retire one expired or legacy active claim through an exact-row ceremony."""
+    from bridge_db import config
+    from bridge_db.audit import log_audit
+    from bridge_db.db import open_db
+
+    clean_reason = reason.strip()
+    if handoff_id <= 0 or not clean_reason:
+        print("refused: orphan recovery requires a positive handoff id and a reason")
+        return False
+    if not _require_tty("recover-orphaned-handoff"):
+        return False
+
+    db = await open_db(config.DB_PATH)
+    reviewed_digest: str | None = None
+    project_name: str | None = None
+    previous_claimant: str | None = None
+    claim_session_id: str | None = None
+    capability_expires_at: str | None = None
+    recovery_basis: str | None = None
+    try:
+        row = await _select_orphan_recovery_state(db, handoff_id)
+        if row is None:
+            print(f"no stored handoff {handoff_id}")
+            return False
+        if row["status"] != "active" or row["claimed_by"] is None:
+            print(
+                f"refused: handoff {handoff_id} is not an owned active claim; "
+                "use the normal cancellation ceremony for unclaimed work"
+            )
+            return False
+
+        previous_claimant = cast(str, row["claimed_by"])
+        claim_session_id = cast(str | None, row["claim_session_id"])
+        capability_expires_at = cast(str | None, row["capability_expires_at"])
+        if claim_session_id is None:
+            recovery_basis = "legacy_without_capability"
+        else:
+            if row["capability_consumed_at"] is not None:
+                print("refused: completion capability is already consumed")
+                return False
+            if row["capability_recovered_at"] is not None:
+                print("refused: orphan recovery was already recorded")
+                return False
+            expiry = _parse_capability_expiry(capability_expires_at)
+            if expiry is None:
+                print("refused: stored completion capability has an invalid expiry")
+                return False
+            if clock.now() < expiry:
+                print(
+                    "refused: completion capability is still live until "
+                    f"{capability_expires_at}; the claiming session retains ownership"
+                )
+                return False
+            recovery_basis = "expired_capability"
+
+        reviewed_digest = _orphan_recovery_digest(row)
+        project_name = cast(str, row["project_name"])
+        print(
+            f"recover orphaned handoff id={handoff_id} "
+            f"project={json.dumps(project_name)} claimant={previous_claimant} "
+            f"claim_session_id={claim_session_id or 'legacy'} "
+            f"basis={recovery_basis} sha256={reviewed_digest} "
+            f"reason={json.dumps(clean_reason)}"
+        )
+        try:
+            confirmed = input(
+                "Type 'recover' to retire this exact orphaned active claim: "
+            )
+        except EOFError:
+            confirmed = ""
+        if confirmed.strip() != "recover":
+            print("orphan recovery cancelled")
+            return False
+
+        await db.execute("BEGIN IMMEDIATE")
+        current = await _select_orphan_recovery_state(db, handoff_id)
+        if current is None or _orphan_recovery_digest(current) != reviewed_digest:
+            await db.rollback()
+            print("refused: handoff changed after review; inspect it again")
+            return False
+        if claim_session_id is not None:
+            locked_expiry = _parse_capability_expiry(current["capability_expires_at"])
+            if locked_expiry is None:
+                await db.rollback()
+                print("refused: stored completion capability has an invalid expiry")
+                return False
+            if clock.now() < locked_expiry:
+                await db.rollback()
+                print(
+                    "refused: completion capability became live again before "
+                    "orphan recovery; the claiming session retains ownership"
+                )
+                return False
+
+        cursor = await db.execute(
+            """
+            UPDATE pending_handoffs
+            SET status = 'cleared',
+                cleared_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ? AND status = 'active' AND claimed_by = ?
+            """,
+            (handoff_id, previous_claimant),
+        )
+        if cursor.rowcount != 1:
+            await db.rollback()
+            print("refused: handoff changed before orphan recovery")
+            return False
+
+        if claim_session_id is not None:
+            recovered_at = (
+                clock.now()
+                .astimezone(UTC)
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z")
+            )
+            cursor = await db.execute(
+                """
+                UPDATE handoff_session_capabilities
+                SET recovered_at = ?
+                WHERE handoff_id = ? AND session_id = ?
+                  AND consumed_at IS NULL AND recovered_at IS NULL
+                """,
+                (recovered_at, handoff_id, claim_session_id),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                print("refused: capability changed before orphan recovery")
+                return False
+
+        await db.execute(
+            """
+            INSERT INTO handoff_orphan_recovery_receipts (
+                handoff_id, reason, recovery_basis, previous_status,
+                previous_claimant, claim_session_id, capability_expires_at,
+                reviewed_row_sha256, recovered_by
+            ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, 'operator-cli')
+            """,
+            (
+                handoff_id,
+                clean_reason,
+                recovery_basis,
+                previous_claimant,
+                claim_session_id,
+                capability_expires_at,
+                reviewed_digest,
+            ),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    log_audit(
+        "handoff.operator_orphan_recovery",
+        "operator-cli",
+        project_name,
+        ok=True,
+        detail=(
+            f"handoff_id={handoff_id} previous_claimant={previous_claimant} "
+            f"claim_session_id={claim_session_id or 'legacy'} "
+            f"basis={recovery_basis} sha256={reviewed_digest}"
+        ),
+    )
+    print(f"recovered orphaned handoff {handoff_id}; durable receipt recorded")
+    return True
+
+
 async def run_quarantine_cleared_operator_handoffs() -> bool:
     """Relabel legacy cleared operator rows while preserving exact recovery images."""
     from bridge_db import config
@@ -1561,6 +1809,16 @@ def main() -> None:
         help="Required durable reason for --cancel-handoff",
     )
     parser.add_argument(
+        "--recover-orphaned-handoff",
+        metavar="ID",
+        type=int,
+        help=("Retire one exact expired or legacy active claim (operator TTY only)"),
+    )
+    parser.add_argument(
+        "--recovery-reason",
+        help="Required durable reason for --recover-orphaned-handoff",
+    )
+    parser.add_argument(
         "--quarantine-cleared-operator-handoffs",
         action="store_true",
         help="Preserve and relabel cleared legacy operator handoffs (operator TTY only)",
@@ -1571,8 +1829,71 @@ def main() -> None:
         type=int,
         help="Restore one exact quarantined handoff recovery image (operator TTY only)",
     )
+    parser.add_argument(
+        "--shared-runtime-status",
+        action="store_true",
+        help="Print a read-only shared-runtime broker/client inventory as JSON",
+    )
+    parser.add_argument(
+        "--ensure-shared-broker",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--run-shared-broker",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--run-shared-relay",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--release-shared-client",
+        metavar="LEASE_PATH",
+        help=argparse.SUPPRESS,
+    )
     args, _ = parser.parse_known_args()
 
+    if args.shared_runtime_status:
+        from bridge_db.shared_runtime import shared_runtime_inventory
+
+        inventory = shared_runtime_inventory()
+        print(json.dumps(inventory, indent=2, sort_keys=True))
+        sys.exit(0 if inventory["state"] in ("observed", "missing") else 1)
+    if args.ensure_shared_broker:
+        from bridge_db.shared_runtime import ensure_shared_broker
+
+        binding = ensure_shared_broker()
+        print(binding.socket)
+        print(binding.client_lease)
+        print(binding.capability_file)
+        print(binding.release_launcher)
+        return
+    if args.run_shared_broker:
+        from bridge_db.shared_runtime import run_shared_broker
+
+        run_shared_broker()
+        return
+    if args.run_shared_relay:
+        from bridge_db.shared_runtime import (
+            SharedRuntimeContractError,
+            run_shared_relay,
+        )
+
+        try:
+            sys.exit(run_shared_relay())
+        except SharedRuntimeContractError as exc:
+            print(f"bridge_db.{exc.reason_code}", file=sys.stderr)
+            sys.exit(69)
+    if args.release_shared_client:
+        from pathlib import Path
+
+        from bridge_db.shared_runtime import release_shared_client
+
+        release_shared_client(Path(args.release_shared_client))
+        return
     if args.doctor:
         ok = asyncio.run(_run_doctor())
         sys.exit(0 if ok else 1)
@@ -1622,6 +1943,18 @@ def main() -> None:
         sys.exit(
             0
             if asyncio.run(run_cancel_handoff(args.cancel_handoff, args.cancel_reason))
+            else 1
+        )
+    if args.recover_orphaned_handoff is not None:
+        if not args.recovery_reason:
+            parser.error("--recover-orphaned-handoff requires --recovery-reason")
+        sys.exit(
+            0
+            if asyncio.run(
+                run_recover_orphaned_handoff(
+                    args.recover_orphaned_handoff, args.recovery_reason
+                )
+            )
             else 1
         )
     if args.quarantine_cleared_operator_handoffs:

@@ -21,6 +21,7 @@ from bridge_db.db import (
     insert_activity_row,
     upsert_fts_entry,
 )
+from bridge_db.execution_generation import RUNTIME_DEPENDENCY_STATE
 from bridge_db.tools import health as mod
 
 
@@ -57,6 +58,28 @@ async def patch_db_path(
     await db.commit()
     await _backup_db_file(db, "health-fixture")
     _replace_test_anchor(config.DB_PATH)
+    monkeypatch.setattr(
+        mod,
+        "tenancy_inventory",
+        lambda: {
+            "schema": "BridgeMcpTenancyInventoryV2",
+            "state": "observed",
+            "root": str(tmp_path / "tenancy"),
+            "active_count": 1,
+            "lease_count": 1,
+            "stale_lease_count": 0,
+            "unknown_process_count": 0,
+            "process_states": {
+                "same": 1,
+                "missing": 0,
+                "mismatch": 0,
+                "unknown": 0,
+            },
+            "owners": {"fixture": 1},
+            "generations": {"fixture": 1},
+            "active_request_count": 0,
+        },
+    )
 
 
 async def test_health_returns_ok_on_healthy_db(
@@ -75,6 +98,20 @@ async def test_health_returns_ok_on_healthy_db(
         result["evidence_lifecycle"]["acknowledgements"]["authority"]
         == "review_only_no_cleanup_authority"
     )
+    assert result["tenancy_readiness"] == {
+        "schema": "BridgeMcpTenancyReadinessV1",
+        "ready": True,
+        "state": "verified",
+        "reason_code": None,
+        "unknown_process_count": 0,
+        "stale_lease_count": 0,
+    }
+    assert result["shared_runtime"]["runtime_dependency_readiness"] == {
+        "schema": "BridgeRuntimeDependencyReadinessV1",
+        "ready": True,
+        "state": "not_required",
+        "reason_code": None,
+    }
     assert result["evidence_lifecycle"]["recovery_lifecycle_ready"] is False
     assert result["evidence_lifecycle"]["recovery_seals"]["state"] == "missing"
 
@@ -408,6 +445,37 @@ async def test_health_row_counts_reflect_data(
     assert result["fts_index"]["ok"] is False
     assert result["fts_index"]["missing"] == 1
     assert result["fts_index"]["orphaned"] == 0
+
+
+async def test_health_surfaces_unacknowledged_snapshot_refusal(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
+) -> None:
+    (tmp_path / "test.db").touch()
+    await db.execute(
+        """
+        INSERT INTO snapshot_refusals (
+            caller, system, snapshot_family, snapshot_date, reason_code,
+            retained_count, retention_limit, payload_sha256, next_state
+        ) VALUES (
+            'cc', 'cc', 'default', '2026-08-05',
+            'snapshot.retention_would_prune', 10, 10, ?,
+            'capacity_blocked_acknowledgement_required'
+        )
+        """,
+        ("a" * 64,),
+    )
+    await db.commit()
+
+    health = await fns["health"](ctx=make_ctx(db))
+    status = await fns["status"](ctx=make_ctx(db))
+
+    assert health["row_counts"]["snapshot_refusals"] == 1
+    assert health["unacknowledged_snapshot_refusals"] == 1
+    assert status["signals"]["unacknowledged_snapshot_refusals"] == 1
+    assert any(
+        action["action"] == "acknowledge_snapshot_refusal"
+        for action in status["freshness"]["next_actions"]
+    )
 
 
 async def test_health_source_trust_breakdown(
@@ -874,7 +942,8 @@ async def test_status_ignores_lifecycle_only_activity_for_snapshot_supersession(
     assert cc["state"] == "fresh"
     assert cc["superseding_activity_id"] is None
     assert cc["next_action"] == "none"
-    assert result["operating_state"] == "fresh"
+    assert result["operating_state"] == "attention"
+    assert result["signals"]["execution_generation_state"] == "mutable_direct_path"
 
 
 async def test_status_uses_latest_substantive_activity_despite_newer_lifecycle_row(
@@ -924,7 +993,12 @@ async def test_status_freshness_reports_stale_snapshots_without_degrading_health
             "action": "cc_refresh_snapshot",
             "owner": "cc",
             "reason": "cc snapshot freshness is stale.",
-        }
+        },
+        {
+            "action": "activate_reviewed_generation",
+            "owner": "operator",
+            "reason": "BridgeDB is not running from a verified immutable generation.",
+        },
     ]
 
 
@@ -1478,6 +1552,299 @@ async def test_health_reports_auth_block(
         "principals_file_exists": True,
         "principals_enrolled": 0,
     }
+
+
+@pytest.mark.parametrize(
+    ("inventory", "readiness_state", "reason_code"),
+    [
+        (
+            {
+                "schema": "BridgeMcpTenancyInventoryV2",
+                "state": "missing",
+                "root": "/tmp/missing-tenancy",
+                "active_count": 0,
+                "lease_count": 0,
+                "owners": {},
+                "generations": {},
+                "active_request_count": 0,
+            },
+            "missing",
+            "tenancy.inventory_missing",
+        ),
+        (
+            {
+                "schema": "BridgeMcpTenancyInventoryV2",
+                "state": "unverified",
+                "root": "/tmp/unverified-tenancy",
+                "active_count": None,
+                "reason_code": "tenancy.child_not_private",
+            },
+            "unverified",
+            "tenancy.child_not_private",
+        ),
+        (
+            {
+                "schema": "BridgeMcpTenancyInventoryV2",
+                "state": "observed",
+                "root": "/tmp/empty-tenancy",
+                "active_count": 0,
+                "lease_count": 0,
+                "stale_lease_count": 0,
+                "unknown_process_count": 0,
+                "process_states": {
+                    "same": 0,
+                    "missing": 0,
+                    "mismatch": 0,
+                    "unknown": 0,
+                },
+                "owners": {},
+                "generations": {},
+                "active_request_count": 0,
+            },
+            "missing",
+            "tenancy.live_process_evidence_missing",
+        ),
+        (
+            {
+                "schema": "BridgeMcpTenancyInventoryV2",
+                "state": "observed",
+                "root": "/tmp/stale-tenancy",
+                "active_count": 0,
+                "lease_count": 1,
+                "stale_lease_count": 1,
+                "unknown_process_count": 0,
+                "process_states": {
+                    "same": 0,
+                    "missing": 0,
+                    "mismatch": 1,
+                    "unknown": 0,
+                },
+                "owners": {},
+                "generations": {},
+                "active_request_count": 0,
+            },
+            "stale",
+            "tenancy.stale_lease_evidence",
+        ),
+        (
+            {
+                "schema": "BridgeMcpTenancyInventoryV2",
+                "state": "observed",
+                "root": "/tmp/unknown-tenancy",
+                "active_count": 0,
+                "lease_count": 1,
+                "stale_lease_count": 0,
+                "unknown_process_count": 1,
+                "process_states": {
+                    "same": 0,
+                    "missing": 0,
+                    "mismatch": 0,
+                    "unknown": 1,
+                },
+                "owners": {},
+                "generations": {},
+                "active_request_count": 0,
+            },
+            "unknown",
+            "tenancy.unknown_process_evidence",
+        ),
+        (
+            {
+                "schema": "BridgeMcpTenancyInventoryV2",
+                "state": "observed",
+                "root": "/tmp/inconsistent-tenancy",
+                "active_count": 0,
+                "lease_count": 1,
+                "stale_lease_count": 0,
+                "unknown_process_count": 0,
+                "process_states": {
+                    "same": 0,
+                    "missing": 0,
+                    "mismatch": 0,
+                    "unknown": 1,
+                },
+                "owners": {},
+                "generations": {},
+                "active_request_count": 0,
+            },
+            "unverified",
+            "tenancy.inventory_counters_invalid",
+        ),
+    ],
+)
+async def test_health_fails_closed_on_unverified_tenancy_evidence(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    inventory: dict[str, Any],
+    readiness_state: str,
+    reason_code: str,
+) -> None:
+    (tmp_path / "test.db").touch()
+    monkeypatch.setattr(mod, "tenancy_inventory", lambda: inventory)
+
+    result = await fns["health"](ctx=make_ctx(db))
+    status = await fns["status"](ctx=make_ctx(db))
+
+    assert result["tenancy_readiness"]["ready"] is False
+    assert result["tenancy_readiness"]["state"] == readiness_state
+    assert result["tenancy_readiness"]["reason_code"] == reason_code
+    assert result["storage_ok"] is False
+    assert result["ok"] is False
+    assert status["overall"] == "degraded"
+    assert status["storage_health"] == "degraded"
+    assert status["signals"]["tenancy_ready"] is False
+    assert status["signals"]["tenancy_readiness_state"] == readiness_state
+    assert status["signals"]["tenancy_readiness_reason_code"] == reason_code
+
+
+async def test_health_does_not_borrow_readiness_from_an_unrelated_active_group(
+    db: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bridge_db.tools import health as health_module
+
+    monkeypatch.setenv("BRIDGE_DB_TRANSPORT_MODE", "shared")
+    monkeypatch.setattr(
+        health_module,
+        "shared_runtime_inventory",
+        lambda: {
+            "schema": "BridgeSharedRuntimeInventoryV1",
+            "state": "observed",
+            "adoption_state": "active",
+            "ready_broker_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        health_module,
+        "shared_runtime_current_readiness",
+        lambda: {
+            "schema": "BridgeSharedRuntimeReadinessV1",
+            "state": "missing",
+            "ready": False,
+            "adoption_state": "inactive",
+            "reason_code": "shared_runtime.current_group_missing",
+        },
+    )
+
+    metrics = await health_module.collect_health_metrics(db)
+
+    assert metrics["shared_runtime"]["adoption_state"] == "active"
+    assert metrics["shared_runtime"]["required_for_current_process"] is True
+    assert metrics["shared_runtime"]["ready_for_current_process"] is False
+    assert metrics["shared_runtime"]["current_group"]["ready"] is False
+    assert metrics["storage_ok"] is False
+    assert metrics["ok"] is False
+
+
+async def test_shared_health_fails_closed_without_runtime_dependency_evidence(
+    db: aiosqlite.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRIDGE_DB_TRANSPORT_MODE", "shared")
+    monkeypatch.setattr(
+        mod,
+        "runtime_generation_identity",
+        lambda: {
+            "schema": "BridgeExecutionGenerationV1",
+            "state": "verified",
+            "generation_id": "fixture",
+            "dependency_environment_state": "external_unmanaged_lockfiles_only",
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "shared_runtime_inventory",
+        lambda: {
+            "schema": "BridgeSharedRuntimeInventoryV1",
+            "state": "observed",
+            "adoption_state": "active",
+            "ready_broker_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "shared_runtime_current_readiness",
+        lambda: {
+            "schema": "BridgeSharedRuntimeReadinessV1",
+            "state": "observed",
+            "ready": True,
+            "adoption_state": "active",
+        },
+    )
+
+    metrics = await mod.collect_health_metrics(db)
+
+    assert metrics["shared_runtime"]["current_group"]["ready"] is True
+    assert metrics["shared_runtime"]["runtime_dependency_readiness"] == {
+        "schema": "BridgeRuntimeDependencyReadinessV1",
+        "ready": False,
+        "state": "unverified",
+        "reason_code": "generation.runtime_dependency_claim_invalid",
+    }
+    assert (
+        metrics["shared_runtime"]["runtime_dependency_ready_for_current_process"]
+        is False
+    )
+    assert metrics["shared_runtime"]["ready_for_current_process"] is False
+    assert metrics["storage_ok"] is False
+    assert metrics["ok"] is False
+
+
+async def test_shared_health_accepts_verified_runtime_dependency_evidence(
+    db: aiosqlite.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "test.db").touch()
+    monkeypatch.setenv("BRIDGE_DB_TRANSPORT_MODE", "shared")
+    monkeypatch.setattr(
+        mod,
+        "runtime_generation_identity",
+        lambda: {
+            "schema": "BridgeExecutionGenerationV1",
+            "state": "verified",
+            "generation_id": "fixture",
+            "dependency_environment_state": RUNTIME_DEPENDENCY_STATE,
+            "runtime_dependency_state": "verified",
+            "runtime_dependency_sha256": "a" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "shared_runtime_inventory",
+        lambda: {
+            "schema": "BridgeSharedRuntimeInventoryV1",
+            "state": "observed",
+            "adoption_state": "active",
+            "ready_broker_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "shared_runtime_current_readiness",
+        lambda: {
+            "schema": "BridgeSharedRuntimeReadinessV1",
+            "state": "observed",
+            "ready": True,
+            "adoption_state": "active",
+        },
+    )
+
+    metrics = await mod.collect_health_metrics(db)
+
+    assert metrics["shared_runtime"]["runtime_dependency_readiness"] == {
+        "schema": "BridgeRuntimeDependencyReadinessV1",
+        "ready": True,
+        "state": "verified",
+        "reason_code": None,
+    }
+    assert (
+        metrics["shared_runtime"]["runtime_dependency_ready_for_current_process"]
+        is True
+    )
+    assert metrics["shared_runtime"]["ready_for_current_process"] is True
+    assert metrics["storage_ok"] is True
 
 
 async def test_health_reports_ledger_and_orphan_metrics(

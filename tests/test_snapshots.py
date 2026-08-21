@@ -13,6 +13,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 from bridge_db import config
 from bridge_db.db import open_db
+from bridge_db.audit import iter_jsonl
 from bridge_db.tools import cost as cost_mod
 from bridge_db.tools import snapshots as snap_mod
 
@@ -66,10 +67,14 @@ def cost_fns(db: aiosqlite.Connection) -> dict[str, Any]:
 # ── Snapshots ────────────────────────────────────────────────────────────────
 
 
-async def test_save_snapshot_cc(db: aiosqlite.Connection, snap_fns: dict[str, Any]) -> None:
+async def test_save_snapshot_cc(
+    db: aiosqlite.Connection, snap_fns: dict[str, Any]
+) -> None:
     ctx = make_ctx(db)
     result = await snap_fns["save_snapshot"](
-        caller="cc", data={"active_projects": "ink, bridge-db", "lessons": "- use WAL"}, ctx=ctx
+        caller="cc",
+        data={"active_projects": "ink, bridge-db", "lessons": "- use WAL"},
+        ctx=ctx,
     )
     assert result["ok"] is True
     assert result["system"] == "cc"
@@ -97,13 +102,17 @@ async def test_save_snapshot_persists_and_echoes_source_trust(
     asserted = await snap_fns["save_snapshot"](
         caller="cc", data={"v": "1"}, source_trust="operator", ctx=ctx
     )
-    defaulted = await snap_fns["save_snapshot"](caller="codex", data={"v": "2"}, ctx=ctx)
+    defaulted = await snap_fns["save_snapshot"](
+        caller="codex", data={"v": "2"}, ctx=ctx
+    )
 
     assert asserted["source_trust"] == "agent"
     assert asserted["source_trust_clamped"] is True
     assert defaulted["source_trust"] == "agent"
 
-    cursor = await db.execute("SELECT system, source_trust FROM system_snapshots ORDER BY id")
+    cursor = await db.execute(
+        "SELECT system, source_trust FROM system_snapshots ORDER BY id"
+    )
     rows: list[aiosqlite.Row] = await cursor.fetchall()  # type: ignore[assignment]
     trust = {r["system"]: r["source_trust"] for r in rows}
     assert trust["cc"] == "agent"
@@ -149,6 +158,7 @@ async def test_save_snapshot_auth_off_rejects_unbound_operator_forgery(
     count_row = await cursor.fetchone()
     assert count_row is not None
     assert count_row[0] == 0
+
 
 async def test_save_snapshot_claude_ai_raises(
     db: aiosqlite.Connection, snap_fns: dict[str, Any]
@@ -309,7 +319,11 @@ async def test_save_snapshot_preserve_existing_refuses_full_family_without_mutat
         "ok": False,
         "reason_code": "snapshot.retention_would_prune",
         "mutation_performed": False,
+        "evidence_mutation_performed": True,
         "snapshot_id": None,
+        "refusal_id": result["refusal_id"],
+        "acknowledgement_required": True,
+        "next_state": "capacity_blocked_acknowledgement_required",
         "system": "cc",
         "snapshot_family": "default",
         "snapshot_date": result["snapshot_date"],
@@ -318,6 +332,7 @@ async def test_save_snapshot_preserve_existing_refuses_full_family_without_mutat
         "retention_policy": "preserve_existing",
         "retention_limit": 2,
         "retained_count": 2,
+        "available_slots": 0,
         "would_prune_count": 1,
         "pruned_count": 0,
     }
@@ -326,6 +341,207 @@ async def test_save_snapshot_preserve_existing_refuses_full_family_without_mutat
     ]
     assert indexed is not None and indexed[0] == 2
     assert db.in_transaction is False
+
+    refusal = await (
+        await db.execute(
+            "SELECT caller, system, snapshot_family, acknowledgement_state, next_state "
+            "FROM snapshot_refusals WHERE id = ?",
+            (result["refusal_id"],),
+        )
+    ).fetchone()
+    assert refusal is not None
+    assert dict(refusal) == {
+        "caller": "cc",
+        "system": "cc",
+        "snapshot_family": "default",
+        "acknowledgement_state": None,
+        "next_state": "capacity_blocked_acknowledgement_required",
+    }
+
+
+async def test_save_snapshot_refusal_emits_audit_line(
+    db: aiosqlite.Connection,
+    snap_fns: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused write must leave a trace.
+
+    BD-INV-1's philosophy is that no prune is silent. A refusal is the same
+    class of event: it decides what the ledger will contain. Before this,
+    a saturated family produced ok=False and no audit line at all, so a
+    caller that ignored `ok` was indistinguishable after the fact from a
+    caller that never wrote.
+    """
+    monkeypatch.setattr(config, "SNAPSHOT_RETENTION_PER_SYSTEM", 2)
+    ctx = make_ctx(db)
+    for i in range(2):
+        await snap_fns["save_snapshot"](caller="cc", data={"i": i}, ctx=ctx)
+
+    result = await snap_fns["save_snapshot"](
+        caller="cc",
+        data={"i": "refused"},
+        retention_policy="preserve_existing",
+        ctx=ctx,
+    )
+    assert result["ok"] is False
+    assert result["mutation_performed"] is False
+
+    events = [
+        event
+        for event in iter_jsonl(config.AUDIT_LOG_PATH)
+        if event.get("tool") == "save_snapshot.refused"
+    ]
+    assert len(events) == 1, "a refused snapshot write must emit exactly one audit line"
+    refused = events[0]
+    assert refused.get("ok") is False
+    assert refused.get("caller") == "cc"
+    detail = str(refused.get("detail", ""))
+    assert "snapshot.retention_would_prune" in detail
+    assert "retained=2" in detail
+    assert "limit=2" in detail
+
+
+async def test_snapshot_capacity_is_visible_before_write(
+    db: aiosqlite.Connection,
+    snap_fns: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "SNAPSHOT_RETENTION_PER_SYSTEM", 1)
+    ctx = make_ctx(db, principal="codex")
+
+    before = await snap_fns["get_snapshot_capacity"](
+        caller="codex",
+        data={"consulted_node": {"latest_consultation": "CN-001"}},
+        ctx=ctx,
+    )
+    await snap_fns["save_snapshot"](
+        caller="codex",
+        data={"consulted_node": {"latest_consultation": "CN-001"}},
+        ctx=ctx,
+    )
+    after = await snap_fns["get_snapshot_capacity"](
+        caller="codex",
+        data={"consulted_node": {"latest_consultation": "CN-002"}},
+        ctx=ctx,
+    )
+
+    assert before == {
+        "ok": True,
+        "caller": "codex",
+        "system": "codex",
+        "snapshot_family": "consulted_node",
+        "retained_count": 0,
+        "retention_limit": 1,
+        "available_slots": 1,
+        "state": "available",
+        "next_state": "write_allowed",
+        "mutation_performed": False,
+    }
+    assert after["state"] == "full"
+    assert after["next_state"] == "capacity_blocked_owner_decision_required"
+
+
+async def test_snapshot_refusal_acknowledgement_is_owner_bound_and_idempotent(
+    db: aiosqlite.Connection,
+    snap_fns: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "SNAPSHOT_RETENTION_PER_SYSTEM", 1)
+    cc_ctx = make_ctx(db, principal="cc")
+    codex_ctx = make_ctx(db, principal="codex")
+    await snap_fns["save_snapshot"](caller="cc", data={"v": 1}, ctx=cc_ctx)
+    refusal = await snap_fns["save_snapshot"](
+        caller="cc", data={"v": 2}, ctx=cc_ctx
+    )
+
+    foreign = await snap_fns["acknowledge_snapshot_refusal"](
+        caller="codex",
+        refusal_id=refusal["refusal_id"],
+        decision="superseded",
+        ctx=codex_ctx,
+    )
+    accepted = await snap_fns["acknowledge_snapshot_refusal"](
+        caller="cc",
+        refusal_id=refusal["refusal_id"],
+        decision="retry_after_owner_action",
+        ctx=cc_ctx,
+    )
+    replay = await snap_fns["acknowledge_snapshot_refusal"](
+        caller="cc",
+        refusal_id=refusal["refusal_id"],
+        decision="retry_after_owner_action",
+        ctx=cc_ctx,
+    )
+    conflicting_replay = await snap_fns["acknowledge_snapshot_refusal"](
+        caller="cc",
+        refusal_id=refusal["refusal_id"],
+        decision="superseded",
+        ctx=cc_ctx,
+    )
+
+    assert foreign["reason_code"] == "snapshot.refusal_owner_mismatch"
+    assert accepted == {
+        "ok": True,
+        "refusal_id": refusal["refusal_id"],
+        "acknowledgement_state": "retry_after_owner_action",
+        "next_state": "retry_after_owner_capacity_change",
+        "mutation_performed": True,
+        "deletion_authorized": False,
+    }
+    assert replay["ok"] is True
+    assert replay["reason_code"] == "snapshot.refusal_acknowledgement_replayed"
+    assert replay["mutation_performed"] is False
+    assert conflicting_replay["ok"] is False
+    assert conflicting_replay["reason_code"] == "snapshot.refusal_already_acknowledged"
+
+
+async def test_snapshot_refusal_receipt_does_not_store_payload(
+    db: aiosqlite.Connection,
+    snap_fns: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "SNAPSHOT_RETENTION_PER_SYSTEM", 1)
+    ctx = make_ctx(db, principal="cc")
+    await snap_fns["save_snapshot"](caller="cc", data={"v": 1}, ctx=ctx)
+    marker = "fixture-sensitive-content-not-for-refusal-table"
+    refusal = await snap_fns["save_snapshot"](
+        caller="cc", data={"detail": marker}, ctx=ctx
+    )
+
+    row = await (
+        await db.execute(
+            "SELECT payload_sha256 FROM snapshot_refusals WHERE id = ?",
+            (refusal["refusal_id"],),
+        )
+    ).fetchone()
+    assert row is not None
+    assert len(row["payload_sha256"]) == 64
+    raw = await (
+        await db.execute(
+            "SELECT quote(payload_sha256) FROM snapshot_refusals WHERE id = ?",
+            (refusal["refusal_id"],),
+        )
+    ).fetchone()
+    assert raw is not None
+    assert marker not in str(raw[0])
+
+
+async def test_save_snapshot_accepted_write_emits_no_refusal_line(
+    db: aiosqlite.Connection,
+    snap_fns: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control: a write that succeeds must not look like a refusal."""
+    monkeypatch.setattr(config, "SNAPSHOT_RETENTION_PER_SYSTEM", 2)
+    ctx = make_ctx(db)
+    result = await snap_fns["save_snapshot"](caller="cc", data={"i": 1}, ctx=ctx)
+
+    assert result["ok"] is True
+    assert [
+        event
+        for event in iter_jsonl(config.AUDIT_LOG_PATH)
+        if event.get("tool") == "save_snapshot.refused"
+    ] == []
 
 
 async def test_save_snapshot_preserve_existing_accepts_under_limit_without_pruning(
@@ -466,10 +682,14 @@ async def test_save_snapshot_preserve_existing_serializes_capacity_admission(
 # ── Cost ─────────────────────────────────────────────────────────────────────
 
 
-async def test_record_cost_upsert(db: aiosqlite.Connection, cost_fns: dict[str, Any]) -> None:
+async def test_record_cost_upsert(
+    db: aiosqlite.Connection, cost_fns: dict[str, Any]
+) -> None:
     ctx = make_ctx(db)
     await cost_fns["record_cost"](caller="cc", month="2026-04", amount=55.0, ctx=ctx)
-    await cost_fns["record_cost"](caller="cc", month="2026-04", amount=75.0, ctx=ctx)  # update
+    await cost_fns["record_cost"](
+        caller="cc", month="2026-04", amount=75.0, ctx=ctx
+    )  # update
 
     cursor = await db.execute(
         "SELECT COUNT(*) FROM cost_records WHERE system='cc' AND month='2026-04'"
@@ -521,7 +741,9 @@ async def test_record_cost_bad_month_raises(
 ) -> None:
     ctx = make_ctx(db)
     with pytest.raises(ToolError, match="Invalid month"):
-        await cost_fns["record_cost"](caller="cc", month="April 2026", amount=10.0, ctx=ctx)
+        await cost_fns["record_cost"](
+            caller="cc", month="April 2026", amount=10.0, ctx=ctx
+        )
 
 
 async def test_record_cost_claude_ai_raises(
@@ -529,7 +751,9 @@ async def test_record_cost_claude_ai_raises(
 ) -> None:
     ctx = make_ctx(db)
     with pytest.raises(ToolError, match="cannot record costs"):
-        await cost_fns["record_cost"](caller="claude_ai", month="2026-04", amount=10.0, ctx=ctx)
+        await cost_fns["record_cost"](
+            caller="claude_ai", month="2026-04", amount=10.0, ctx=ctx
+        )
 
 
 async def test_get_cost_history_filter_by_system(
