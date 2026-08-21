@@ -140,7 +140,14 @@ process. Forward activation requires a private
 `BridgeMcpTenancyActivationEvidenceV1` bundle, recomputes the policy from its
 exact replay rows, and requires the documented client and lifecycle-scenario
 coverage for the exact requested generation before any pointer write. Rollback
-remains the safety path and does not require new replay evidence. Snapshot
+remains the safety path and does not require new replay evidence.
+
+An append-only owner-correction overlay may project one exact live
+`owner=unknown` lease to a required owner only after zero-active-request,
+PID/start identity, unchanged ancestry, and exact parent identity/command checks
+all pass twice. The raw lease remains unchanged; drift or malformed correction
+evidence fails inventory closed.
+
 Snapshot refusal storage stays an additive extension over core SQLite
 `user_version=23`, preserving open/read compatibility with exact previous
 merged generation `d7272d489873faa5ed84c81734636ffc8cecb095`; rollback loses
