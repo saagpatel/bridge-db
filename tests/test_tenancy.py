@@ -25,10 +25,12 @@ from bridge_db.server import (
 from bridge_db.tenancy import (
     TenancyContractError,
     TenancyTracker,
+    apply_owner_correction,
     apply_lifecycle_plan,
     build_lifecycle_activation_evidence,
     derive_lifecycle_policy,
     plan_lifecycle,
+    plan_owner_correction,
     read_active_leases,
     tenancy_inventory,
     validate_lifecycle_activation_evidence,
@@ -125,6 +127,97 @@ def test_explicit_close_refuses_active_request(tmp_path: Path) -> None:
 
     tracker.request_finished("save_snapshot", outcome="failed")
     tracker.close(reason="client_close_after_failure")
+
+
+def test_owner_correction_is_append_only_identity_bound_projection(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "tenancy"
+    tracker = TenancyTracker(
+        root=root,
+        owner="unknown",
+        principal=None,
+        generation="generation-one",
+        pid=os.getpid(),
+    )
+    raw = tracker.start()
+    ancestry = raw["pid_ancestry"]
+    parent_pid = raw["parent_pid"]
+    parent_identity = "fixture-parent-start"
+    parent_command = "/opt/homebrew/bin/node /verified/personal-ops/daemon.js"
+    plan = plan_owner_correction(
+        root=root,
+        lease_id=tracker.lease_id,
+        corrected_owner="personal_ops",
+        expected_parent_command=parent_command,
+        process_probe=lambda _pid, _identity: "same",
+        ancestry_probe=lambda _pid: ancestry,
+        identity_probe=lambda pid: parent_identity if pid == parent_pid else None,
+        command_probe=lambda pid: parent_command if pid == parent_pid else None,
+    )
+
+    receipt = apply_owner_correction(
+        root=root,
+        plan=plan,
+        process_probe=lambda _pid, _identity: "same",
+        ancestry_probe=lambda _pid: ancestry,
+        identity_probe=lambda pid: parent_identity if pid == parent_pid else None,
+        command_probe=lambda pid: parent_command if pid == parent_pid else None,
+    )
+
+    raw_after = json.loads(tracker.path.read_text())
+    projected = read_active_leases(root)[0][1]
+    assert raw_after["owner"] == "unknown"
+    assert projected["owner"] == "personal_ops"
+    assert projected["recorded_owner"] == "unknown"
+    assert receipt["source_lease_preserved"] is True
+    assert Path(receipt["correction_path"]).stat().st_mode & 0o777 == 0o400
+    assert tenancy_inventory(root)["owners"] == {"personal_ops": 1}
+
+    tracker.request_started("health")
+    tracker.request_finished("health", outcome="succeeded")
+    assert read_active_leases(root)[0][1]["owner"] == "personal_ops"
+    tracker.close()
+
+
+def test_owner_correction_refuses_parent_identity_drift(tmp_path: Path) -> None:
+    root = tmp_path / "tenancy"
+    tracker = TenancyTracker(
+        root=root,
+        owner="unknown",
+        principal=None,
+        generation="generation-one",
+        pid=os.getpid(),
+        process_identity="fixture-live-process",
+    )
+    raw = tracker.start()
+    ancestry = raw["pid_ancestry"]
+    parent_pid = raw["parent_pid"]
+    command = "/opt/homebrew/bin/node /verified/personal-ops/daemon.js"
+    plan = plan_owner_correction(
+        root=root,
+        lease_id=tracker.lease_id,
+        corrected_owner="personal_ops",
+        expected_parent_command=command,
+        process_probe=lambda _pid, _identity: "same",
+        ancestry_probe=lambda _pid: ancestry,
+        identity_probe=lambda _pid: "fixture-parent-start",
+        command_probe=lambda _pid: command,
+    )
+
+    with pytest.raises(TenancyContractError) as refused:
+        apply_owner_correction(
+            root=root,
+            plan=plan,
+            process_probe=lambda _pid, _identity: "same",
+            ancestry_probe=lambda _pid: ancestry,
+            identity_probe=lambda pid: "changed" if pid == parent_pid else None,
+            command_probe=lambda _pid: command,
+        )
+
+    assert refused.value.reason_code == "tenancy.owner_correction_identity_changed"
+    assert not (root / "owner-corrections").exists()
+    tracker.close()
 
 
 def test_abrupt_exit_orphan_plan_and_apply_have_exact_readback(tmp_path: Path) -> None:
