@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib.metadata as metadata
 import json
 import os
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -21,7 +23,7 @@ from bridge_db.execution_generation import (
     DEFAULT_RUNTIME_DEPENDENCY_DISTRIBUTIONS,
     GenerationContractError,
     RUNTIME_DEPENDENCY_CLAIM_CEILING,
-    RUNTIME_DEPENDENCY_EVIDENCE_SCHEMA,
+    RUNTIME_DEPENDENCY_BUNDLE_SCHEMA,
     RUNTIME_DEPENDENCY_STATE,
     activate_generation,
     read_activation,
@@ -49,9 +51,13 @@ def _source_repo(tmp_path: Path) -> tuple[Path, str]:
     (source / ".codex").mkdir()
     (source / "config").mkdir()
     (source / "src" / "bridge_db" / "tools").mkdir(parents=True)
+    lock_packages = "\n".join(
+        f'[[package]]\nname = "{name}"\nversion = "{metadata.version(name)}"\n'
+        for name in DEFAULT_RUNTIME_DEPENDENCY_DISTRIBUTIONS
+    )
     files = {
         "pyproject.toml": "[project]\nname='bridge-db-fixture'\nversion='1'\n",
-        "uv.lock": "version = 1\n",
+        "uv.lock": f"version = 1\nrevision = 1\n{lock_packages}",
         ".codex/verify.commands": "python -m pytest\n",
         "config/bridge-db-mcp-immutable": "#!/bin/sh\nexit 0\n",
         "config/com.saagar.bridge-db-checkpoint.plist": "<plist/>\n",
@@ -144,9 +150,7 @@ def _make_recovery_ready(db_path: Path) -> None:
 
 
 @pytest.fixture
-def _recovery_ready(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Path:
+def _recovery_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     db_path = tmp_path / "activation-bridge.db"
     _initialize_recovery_database(db_path)
     monkeypatch.setattr(config, "DB_PATH", db_path)
@@ -154,9 +158,7 @@ def _recovery_ready(
     return db_path
 
 
-def _commit_generation(
-    source: Path, root: Path, *, marker: str
-) -> tuple[str, str]:
+def _commit_generation(source: Path, root: Path, *, marker: str) -> tuple[str, str]:
     (source / "src" / "bridge_db" / "server.py").write_text(
         f"SERVER = {marker!r}\n", encoding="utf-8"
     )
@@ -243,7 +245,7 @@ def test_stage_is_content_addressed_immutable_and_idempotent(tmp_path: Path) -> 
     assert len(manifest["python_sha256"]) == 64
     assert len(manifest["runtime_dependency_sha256"]) == 64
     runtime_evidence = manifest["runtime_dependency_evidence"]
-    assert runtime_evidence["schema"] == RUNTIME_DEPENDENCY_EVIDENCE_SCHEMA
+    assert runtime_evidence["schema"] == RUNTIME_DEPENDENCY_BUNDLE_SCHEMA
     assert runtime_evidence["sha256"] == manifest["runtime_dependency_sha256"]
     assert [item["distribution"] for item in runtime_evidence["distributions"]] == [
         *DEFAULT_RUNTIME_DEPENDENCY_DISTRIBUTIONS
@@ -258,7 +260,7 @@ def test_stage_is_content_addressed_immutable_and_idempotent(tmp_path: Path) -> 
     assert first["dependency_environment_state"] == RUNTIME_DEPENDENCY_STATE
     assert first["claim_ceiling"] == RUNTIME_DEPENDENCY_CLAIM_CEILING
     assert first["claim_ceiling"] == (
-        "source_interpreter_and_runtime_dependencies_bound_external_os_unmanaged"
+        "source_interpreter_and_generation_immutable_runtime_dependencies_bound"
     )
     assert first["database_rollback_contract"] == {
         "core_user_version": 23,
@@ -298,16 +300,34 @@ def test_pre_shared_runtime_generation_remains_verified_and_rollbackable(
         contract_paths=legacy_contract_paths,
     )
     legacy_id = str(legacy["generation_id"])
-    legacy_manifest_path = (
-        root / "releases" / legacy_id / "generation-manifest.json"
-    )
+    legacy_manifest_path = root / "releases" / legacy_id / "generation-manifest.json"
     legacy_manifest_path.chmod(0o644)
     legacy_manifest = json.loads(legacy_manifest_path.read_text())
     del legacy_manifest["runtime_dependency_sha256"]
     del legacy_manifest["runtime_dependency_evidence"]
+    runtime_path = root / "releases" / legacy_id / "runtime"
+    for candidate in runtime_path.rglob("*"):
+        candidate.chmod(0o755 if candidate.is_dir() else 0o644)
+    runtime_path.chmod(0o755)
+    runtime_path.parent.chmod(0o755)
+    shutil.rmtree(runtime_path)
+    runtime_path.parent.chmod(0o555)
     legacy_manifest["dependency_environment_state"] = (
         execution_generation.LEGACY_RUNTIME_DEPENDENCY_STATE
     )
+    legacy_launcher = execution_generation._make_launcher(  # pyright: ignore[reportPrivateUsage]
+        release_path=runtime_path.parent,
+        python_executable=Path(legacy_manifest["python_executable"]),
+        python_resolved=Path(legacy_manifest["python_executable_resolved"]),
+        python_sha256=legacy_manifest["python_sha256"],
+        generation_id=legacy_id,
+        bundled_runtime=False,
+    )
+    launcher_path = runtime_path.parent / "bin" / "bridge-db-mcp"
+    launcher_path.chmod(0o755)
+    launcher_path.write_bytes(legacy_launcher)
+    launcher_path.chmod(0o555)
+    legacy_manifest["launcher_sha256"] = hashlib.sha256(legacy_launcher).hexdigest()
     legacy_manifest_path.write_text(
         json.dumps(legacy_manifest, sort_keys=True, indent=2) + "\n",
         encoding="utf-8",
@@ -385,9 +405,9 @@ def test_verify_rejects_legacy_contract_downgrade_with_shared_runtime(
     ]
     manifest["contract_paths"] = legacy_paths
     manifest["contract_sha256"] = hashlib.sha256(
-        json.dumps(
-            selected_entries, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
+        json.dumps(selected_entries, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
     ).hexdigest()
     manifest_path.write_text(
         json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
@@ -443,26 +463,18 @@ def test_verify_rejects_external_interpreter_digest_drift(tmp_path: Path) -> Non
     assert drift.value.reason_code == "generation.python_digest_mismatch"
 
 
-def test_verify_rejects_runtime_dependency_evidence_drift(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_verify_rejects_runtime_dependency_bundle_drift(tmp_path: Path) -> None:
     source, sha = _source_repo(tmp_path)
     root = tmp_path / "runtime"
     staged = _stage(source, root, sha)
     generation_id = str(staged["generation_id"])
     release = root / "releases" / generation_id
     manifest = json.loads((release / "generation-manifest.json").read_text())
-    runtime_evidence = dict(manifest["runtime_dependency_evidence"])
-    runtime_evidence["sha256"] = "0" * 64
-
-    def drifted_runtime_dependency_evidence(_python: Path) -> dict[str, object]:
-        return runtime_evidence
-
-    monkeypatch.setattr(
-        execution_generation,
-        "_runtime_dependency_evidence",
-        drifted_runtime_dependency_evidence,
-    )
+    runtime_evidence = manifest["runtime_dependency_evidence"]
+    bundled_file = release / runtime_evidence["files"][0]["path"]
+    bundled_file.chmod(0o644)
+    bundled_file.write_bytes(bundled_file.read_bytes() + b"drift")
+    bundled_file.chmod(0o555 if runtime_evidence["files"][0]["executable"] else 0o444)
 
     with pytest.raises(GenerationContractError) as drift:
         verify_generation(root, generation_id)
@@ -774,10 +786,7 @@ def test_activation_gate_refuses_mutable_or_tampered_tenancy_evidence(
     evidence_path.chmod(0o400)
     with pytest.raises(GenerationContractError) as tampered:
         activate_generation(root, generation_id)
-    assert (
-        tampered.value.reason_code
-        == "generation.tenancy_evidence_digest_mismatch"
-    )
+    assert tampered.value.reason_code == "generation.tenancy_evidence_digest_mismatch"
     assert not (root / "current").exists()
 
 
@@ -794,8 +803,7 @@ def test_activation_gate_refuses_replay_evidence_for_another_generation(
         activate_generation(root, first_id)
 
     assert (
-        refused.value.reason_code
-        == "generation.tenancy_evidence_generation_mismatch"
+        refused.value.reason_code == "generation.tenancy_evidence_generation_mismatch"
     )
     assert not (root / "current").exists()
 
