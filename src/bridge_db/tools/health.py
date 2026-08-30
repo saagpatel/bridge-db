@@ -445,8 +445,8 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
 
     cursor = await db.execute(
         "SELECT COUNT(*) FROM activity_log "
-        "WHERE EXISTS (SELECT 1 FROM json_each(tags) WHERE value = 'SHIPPED') "
-        "AND NOT EXISTS (SELECT 1 FROM json_each(tags) WHERE value = 'PROCESSED')"
+        "WHERE EXISTS (SELECT 1 FROM json_each(tags) WHERE upper(value) = 'SHIPPED') "
+        "AND NOT EXISTS (SELECT 1 FROM json_each(tags) WHERE upper(value) = 'PROCESSED')"
     )
     unprocessed_row = await cursor.fetchone()
     unprocessed_shipped_count: int = unprocessed_row[0] if unprocessed_row else 0
@@ -456,8 +456,8 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     # drops out here just as it did under the old dispositions subquery.
     cursor = await db.execute(
         "SELECT COUNT(*) FROM activity_log AS activity "
-        "WHERE EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE value = 'SHIPPED') "
-        "AND NOT EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE value = 'PROCESSED') "
+        "WHERE EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE upper(value) = 'SHIPPED') "
+        "AND NOT EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE upper(value) = 'PROCESSED') "
         "AND activity.sync_disposition IS NULL"
     )
     actionable_row = await cursor.fetchone()
@@ -470,8 +470,8 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     # policy value) counts as lacking downstream proof.
     cursor = await db.execute(
         "SELECT COUNT(*) FROM activity_log AS activity "
-        "WHERE EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE value = 'SHIPPED') "
-        "AND EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE value = 'PROCESSED') "
+        "WHERE EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE upper(value) = 'SHIPPED') "
+        "AND EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE upper(value) = 'PROCESSED') "
         "AND (activity.sync_disposition IS NULL OR activity.sync_disposition <> 'synced')"
     )
     receiptless_row = await cursor.fetchone()
@@ -518,7 +518,7 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "SELECT COUNT(*) FROM activity_log AS activity "
         "WHERE ("
         "  activity.sync_disposition IS NOT NULL "
-        "  AND NOT EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE value = 'SHIPPED')"
+        "  AND NOT EXISTS (SELECT 1 FROM json_each(activity.tags) WHERE upper(value) = 'SHIPPED')"
         ") OR ("
         "  activity.sync_disposition IN ("
         "    'unsynced_by_policy', 'no_durable_target', "

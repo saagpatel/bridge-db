@@ -231,6 +231,31 @@ async def test_health_surfaces_retained_backup_companions_without_degrading_anch
     assert status["signals"]["legacy_backup_companion_state"] == "mixed"
 
 
+async def test_health_surfaces_unverified_companion_without_crashing(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    companion = Path(f"{config.DB_PATH}.retired.bak-wal")
+    companion.symlink_to(tmp_path / "missing-wal")
+
+    result = await fns["health"](ctx=make_ctx(db))
+    inventory = result["evidence_lifecycle"]["migration_backups"]
+    status = await fns["status"](ctx=make_ctx(db))
+
+    assert result["storage_ok"] is True
+    assert result["evidence_lifecycle"]["current_recovery_ready"] is True
+    assert inventory["companion_count"] >= 1
+    assert inventory["companion_state"] == "unverified"
+    assert inventory["orphaned_companion_count"] == 0
+    assert inventory["missing_primary_count"] == 0
+    raced = next(
+        item for item in inventory["companions"] if item["path"] == str(companion)
+    )
+    assert raced["errors"] == ["companion_symlink"]
+    assert status["signals"]["legacy_backup_companion_state"] == "unverified"
+
+
 async def test_health_degrades_without_current_anchor_even_with_verified_legacy_backup(
     db: aiosqlite.Connection,
     fns: dict[str, Any],
@@ -655,6 +680,29 @@ async def test_health_unprocessed_shipped_count(
     ctx = make_ctx(db)
     result = await fns["health"](ctx=ctx)
     assert result["unprocessed_shipped_count"] == 1
+
+
+async def test_health_counts_historical_lowercase_lifecycle_tags(
+    db: aiosqlite.Connection, fns: dict[str, Any], tmp_path: Path
+) -> None:
+    (tmp_path / "test.db").touch()
+    await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary, tags) "
+        "VALUES ('cc', '2026-08-19', 'pending', 's', ?)",
+        (json.dumps(["shipped"]),),
+    )
+    await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary, tags) "
+        "VALUES ('cc', '2026-08-19', 'receiptless', 's', ?)",
+        (json.dumps(["shipped", "processed"]),),
+    )
+    await db.commit()
+
+    result = await fns["health"](ctx=make_ctx(db))
+
+    assert result["unprocessed_shipped_count"] == 1
+    assert result["actionable_unprocessed_shipped_count"] == 1
+    assert result["processed_shipped_without_receipt_count"] == 1
 
 
 async def test_health_actionable_unprocessed_excludes_dispositions(

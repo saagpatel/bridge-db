@@ -696,6 +696,21 @@ async def test_get_shipped_events(
     assert shipped[0]["delivery_state"]["dimensions"]["merged"] == "unknown"
 
 
+async def test_get_shipped_events_includes_historical_lowercase_tag(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary, tags) "
+        "VALUES ('cc', '2026-08-19', 'HistoricalLowerShip', 'shipped', ?)",
+        (json.dumps(["shipped"]),),
+    )
+    await db.commit()
+
+    shipped = await fns["get_shipped_events"](ctx=make_ctx(db))
+
+    assert [event["project_name"] for event in shipped] == ["HistoricalLowerShip"]
+
+
 async def test_get_shipped_events_since_includes_recently_created_prior_date(
     db: aiosqlite.Connection, fns: dict[str, Any]
 ) -> None:
@@ -1538,6 +1553,31 @@ async def test_record_disposition_rejects_non_shipped_event(
             downstream_ref="page-123",
             ctx=ctx,
         )
+
+
+async def test_record_disposition_accepts_historical_mixed_shape_shipped_tags(
+    db: aiosqlite.Connection, fns: dict[str, Any]
+) -> None:
+    cursor = await db.execute(
+        "INSERT INTO activity_log (source, timestamp, project_name, summary, tags) "
+        "VALUES ('codex', '2026-08-19', 'HistoricalLowerShip', 'shipped', ?) "
+        "RETURNING id",
+        (json.dumps([None, "shipped"]),),
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    await db.commit()
+
+    result = await fns["record_disposition"](
+        caller="codex",
+        activity_id=int(row["id"]),
+        disposition="no_durable_target",
+        reason="historical row has no downstream target",
+        ctx=make_ctx(db, principal="codex"),
+    )
+
+    assert result["ok"] is True
+    assert result["disposition"] == "no_durable_target"
 
 
 async def test_record_disposition_synced_records_proof_and_marks_processed(

@@ -273,3 +273,129 @@ def test_disposition_inventory_never_claims_clear_from_truncated_scan(
 
     assert inventory["scan_truncated"] is True
     assert inventory["state"] == "degraded"
+
+
+def test_migration_backup_inventory_surfaces_dangling_companion_symlink(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    companion = Path(f"{db_path}.retired.bak-wal")
+    companion.symlink_to(tmp_path / "missing-wal")
+
+    inventory = evidence_mod.migration_backup_inventory(db_path)
+
+    assert inventory["companion_count"] == 1
+    assert inventory["companion_state"] == "unverified"
+    assert inventory["orphaned_companion_count"] == 0
+    assert inventory["missing_primary_count"] == 0
+    assert inventory["companions"] == [
+        {
+            "path": str(companion),
+            "bytes": None,
+            "kind": "wal",
+            "primary_path": str(tmp_path / "bridge.db.retired.bak"),
+            "primary_exists": None,
+            "state": "unverified",
+            "retention_policy": "operator_acknowledgement_required",
+            "cleanup": "approval_required",
+            "errors": ["companion_symlink"],
+        }
+    ]
+
+
+def test_migration_backup_inventory_retains_candidate_that_disappears(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    companion = Path(f"{db_path}.retired.bak-shm")
+    companion.write_bytes(b"raced companion")
+    original_lstat = Path.lstat
+
+    def disappear_on_read(path: Path) -> Any:
+        if path == companion:
+            path.unlink()
+            raise FileNotFoundError(str(path))
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", disappear_on_read)
+
+    inventory = evidence_mod.migration_backup_inventory(db_path)
+
+    assert inventory["companion_count"] == 1
+    assert inventory["companion_state"] == "unverified"
+    assert inventory["orphaned_companion_count"] == 0
+    assert inventory["missing_primary_paths"] == []
+    assert inventory["companions"][0]["state"] == "unverified"
+    assert inventory["companions"][0]["bytes"] is None
+    assert inventory["companions"][0]["errors"] == [
+        "companion_disappeared_during_inventory"
+    ]
+
+
+def test_migration_backup_inventory_does_not_invent_unreadable_primary_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    companion = Path(f"{db_path}.retired.bak-wal")
+    companion.write_bytes(b"stable companion")
+    primary = tmp_path / "bridge.db.retired.bak"
+    original_lstat = Path.lstat
+
+    def refuse_primary(path: Path) -> Any:
+        if path == primary:
+            raise PermissionError(str(path))
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", refuse_primary)
+
+    inventory = evidence_mod.migration_backup_inventory(db_path)
+
+    assert inventory["companion_state"] == "unverified"
+    assert inventory["orphaned_companion_count"] == 0
+    assert inventory["missing_primary_count"] == 0
+    assert inventory["companions"][0]["bytes"] == len(b"stable companion")
+    assert inventory["companions"][0]["primary_exists"] is None
+    assert inventory["companions"][0]["errors"] == ["companion_primary_unreadable"]
+
+
+def test_migration_backup_inventory_surfaces_nonregular_companion(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    companion = Path(f"{db_path}.retired.bak-wal")
+    companion.mkdir()
+
+    inventory = evidence_mod.migration_backup_inventory(db_path)
+
+    assert inventory["companion_state"] == "unverified"
+    assert inventory["orphaned_companion_count"] == 0
+    assert inventory["missing_primary_count"] == 0
+    assert inventory["companions"][0]["bytes"] is None
+    assert inventory["companions"][0]["errors"] == ["companion_not_regular"]
+
+
+def test_migration_backup_inventory_surfaces_unreadable_companion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    companion = Path(f"{db_path}.retired.bak-shm")
+    companion.write_bytes(b"unreadable companion")
+    original_lstat = Path.lstat
+
+    def refuse_companion(path: Path) -> Any:
+        if path == companion:
+            raise PermissionError(str(path))
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", refuse_companion)
+
+    inventory = evidence_mod.migration_backup_inventory(db_path)
+
+    assert inventory["companion_state"] == "unverified"
+    assert inventory["orphaned_companion_count"] == 0
+    assert inventory["missing_primary_count"] == 0
+    assert inventory["companions"][0]["bytes"] is None
+    assert inventory["companions"][0]["errors"] == ["companion_unreadable"]

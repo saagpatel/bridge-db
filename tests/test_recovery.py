@@ -66,6 +66,51 @@ async def test_create_anchor_is_private_and_disposable_recovery_verifies(
         assert restored.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
 
 
+async def test_source_fingerprint_v2_includes_sqlite_user_version(
+    tmp_path: Path,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    before = recovery.recovery_source_fingerprint(db_path)
+
+    with sqlite3.connect(db_path) as changed:
+        changed.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+
+    after = recovery.recovery_source_fingerprint(db_path)
+
+    assert after != before
+    assert (
+        recovery.recovery_source_fingerprint_schema(
+            db_path,
+            before,
+            expected_schema_version=SCHEMA_VERSION,
+        )
+        is None
+    )
+
+
+async def test_anchor_inventory_is_stale_after_user_version_only_change(
+    tmp_path: Path,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    with sqlite3.connect(db_path) as changed:
+        changed.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+
+    inventory = recovery.recovery_anchor_inventory(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    assert inventory["state"] == "stale"
+    assert inventory["ready"] is False
+    assert inventory["source_current"] is False
+    assert inventory["errors"] == ["source_changed_since_anchor"]
+
+
 async def test_anchor_creation_preserves_existing_verified_bundle(
     tmp_path: Path,
 ) -> None:

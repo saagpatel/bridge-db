@@ -762,7 +762,9 @@ def register(mcp: FastMCP) -> None:
         """Return activity entries tagged SHIPPED, for Codex bridge-sync to sync to Notion."""
         db = get_db(ctx)
 
-        conditions = ["EXISTS (SELECT 1 FROM json_each(tags) WHERE value = 'SHIPPED')"]
+        conditions = [
+            "EXISTS (SELECT 1 FROM json_each(tags) WHERE upper(value) = 'SHIPPED')"
+        ]
         params: list[Any] = []
 
         if since:
@@ -775,7 +777,7 @@ def register(mcp: FastMCP) -> None:
             # The PROCESSED-tag clause additionally holds a legacy receiptless-
             # processed row (PROCESSED tag, no disposition) out of the feed.
             conditions.append(
-                "NOT EXISTS (SELECT 1 FROM json_each(tags) WHERE value = 'PROCESSED')"
+                "NOT EXISTS (SELECT 1 FROM json_each(tags) WHERE upper(value) = 'PROCESSED')"
             )
             conditions.append("a.sync_disposition IS NULL")
 
@@ -1057,7 +1059,8 @@ def register(mcp: FastMCP) -> None:
             raise ToolError(f"No activity entry found with id {activity_id}")
 
         current_tags: list[str] = json.loads(row["tags"])
-        if "SHIPPED" not in current_tags:
+        normalized_tags = {str(tag).upper() for tag in current_tags}
+        if "SHIPPED" not in normalized_tags:
             raise ToolError(f"Activity entry {activity_id} is not tagged SHIPPED")
 
         # Every disposition terminalizes the source owner's downstream
@@ -1143,7 +1146,7 @@ def register(mcp: FastMCP) -> None:
         # Tags ARE indexed in content_index (see fts_text_for_activity), so the
         # PROCESSED add re-indexes its row via reindex_activity_fts.
         processed_added = False
-        if is_synced and "PROCESSED" not in current_tags:
+        if is_synced and "PROCESSED" not in normalized_tags:
             current_tags.append("PROCESSED")
             await db.execute(
                 "UPDATE activity_log SET tags = ? WHERE id = ?",
