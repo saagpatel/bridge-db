@@ -74,6 +74,27 @@ current anchor and live source; stale historical success fails closed instead
 of being returned as current readiness. A different owner cannot reclaim an
 existing batch ID.
 
+## Source-fingerprint compatibility
+
+New attempts use `RecoverySourceFingerprintV2`, a domain-separated SHA-256
+digest over `PRAGMA user_version`, persisted SQLite schema, and user-table
+content. The digest remains stored in the existing
+`source_fingerprint_sha256` field, so immutable `RecoverySealAttemptV1` and
+`RecoverySealReceiptV1` field sets do not change.
+
+The prior content-only digest is frozen as `RecoverySourceFingerprintV1`.
+Health and exact sealed replay may accept a matching legacy terminal receipt
+only when the live `user_version` equals the runtime's expected schema version
+and the current anchor independently passes its V2 source-current readback.
+This preserves an unchanged valid terminal without allowing a V1 hash match to
+hide SQLite schema-header drift. Legacy receipt files are never rewritten.
+
+An incomplete legacy attempt is not resumed under V2 semantics. An exact-ID
+retry terminalizes it as `recovery_unsealed` with reason
+`source_fingerprint_schema_legacy`; a later write batch requires a new batch
+ID. A legacy terminal whose guarded match no longer holds is preserved as
+stale evidence.
+
 ## Readiness and preservation
 
 `health` and `status` keep physical anchor readiness and lifecycle proof

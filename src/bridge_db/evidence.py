@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -300,29 +301,54 @@ def migration_backup_inventory(db_path: Path) -> dict[str, Any]:
     companions: list[dict[str, Any]] = []
     for companion in companion_paths:
         primary = Path(str(companion).removesuffix("-wal").removesuffix("-shm"))
-        primary_exists = primary.is_file() and not primary.is_symlink()
-        companions.append(
-            {
-                "path": str(companion),
-                "bytes": companion.stat().st_size,
-                "kind": "wal" if companion.name.endswith("-wal") else "shm",
-                "primary_path": str(primary),
-                "primary_exists": primary_exists,
-                "state": (
-                    "attached_to_live_primary"
-                    if primary_exists
-                    else "retained_without_live_primary"
-                ),
-                "retention_policy": "operator_acknowledgement_required",
-                "cleanup": "approval_required",
-            }
-        )
-    orphaned_companion_count = sum(not item["primary_exists"] for item in companions)
+        item: dict[str, Any] = {
+            "path": str(companion),
+            "bytes": None,
+            "kind": "wal" if companion.name.endswith("-wal") else "shm",
+            "primary_path": str(primary),
+            "primary_exists": None,
+            "state": "unverified",
+            "retention_policy": "operator_acknowledgement_required",
+            "cleanup": "approval_required",
+        }
+        try:
+            companion_metadata = companion.lstat()
+        except FileNotFoundError:
+            item["errors"] = ["companion_disappeared_during_inventory"]
+        except OSError:
+            item["errors"] = ["companion_unreadable"]
+        else:
+            if stat.S_ISLNK(companion_metadata.st_mode):
+                item["errors"] = ["companion_symlink"]
+            elif not stat.S_ISREG(companion_metadata.st_mode):
+                item["errors"] = ["companion_not_regular"]
+            else:
+                item["bytes"] = companion_metadata.st_size
+                try:
+                    primary_metadata = primary.lstat()
+                except FileNotFoundError:
+                    primary_exists: bool | None = False
+                except OSError:
+                    primary_exists = None
+                    item["errors"] = ["companion_primary_unreadable"]
+                else:
+                    primary_exists = stat.S_ISREG(primary_metadata.st_mode)
+                item["primary_exists"] = primary_exists
+                if primary_exists is not None:
+                    item["state"] = (
+                        "attached_to_live_primary"
+                        if primary_exists
+                        else "retained_without_live_primary"
+                    )
+        companions.append(item)
+    orphaned_companion_count = sum(
+        item["state"] == "retained_without_live_primary" for item in companions
+    )
     missing_primary_paths = sorted(
         {
             item["primary_path"]
             for item in companions
-            if not item["primary_exists"]
+            if item["state"] == "retained_without_live_primary"
         }
     )
     return {
@@ -348,6 +374,8 @@ def migration_backup_inventory(db_path: Path) -> dict[str, Any]:
         "companion_state": (
             "none"
             if not companions
+            else "unverified"
+            if any(item["state"] == "unverified" for item in companions)
             else "attached"
             if not orphaned_companion_count
             else "retained_without_live_primary"

@@ -37,6 +37,23 @@ def _change_source(db_path: Path, summary: str) -> None:
         )
 
 
+def _legacy_source_fingerprint(path: Path) -> str:
+    _, fingerprints = recovery._sqlite_semantic_fingerprints(  # pyright: ignore[reportPrivateUsage]
+        path
+    )
+    return fingerprints[recovery.LEGACY_RECOVERY_SOURCE_FINGERPRINT_SCHEMA]
+
+
+def _treat_fixture_fingerprint_as_current(
+    _path: Path,
+    _fingerprint: str,
+    *,
+    expected_schema_version: int,
+) -> str:
+    assert expected_schema_version == SCHEMA_VERSION
+    return recovery.RECOVERY_SOURCE_FINGERPRINT_SCHEMA
+
+
 async def test_successful_seal_rotates_once_and_publishes_verified_receipt(
     tmp_path: Path,
 ) -> None:
@@ -212,6 +229,141 @@ async def test_replayed_sealed_receipt_rechecks_current_source(
     assert inventory["latest"]["receipt_sha256"] == first["receipt_sha256"]
 
 
+async def test_user_version_only_change_makes_v2_seal_stale(
+    tmp_path: Path,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    first = recovery_seal.seal_recovery_batch(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+        batch_id="schema-header-stale-001",
+        owner="codex",
+    )
+
+    with sqlite3.connect(db_path) as changed:
+        changed.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+
+    with pytest.raises(
+        recovery_seal.RecoverySealProtocolError,
+        match="source_changed_since_recovery_seal",
+    ):
+        recovery_seal.seal_recovery_batch(
+            db_path,
+            expected_schema_version=SCHEMA_VERSION,
+            batch_id="schema-header-stale-001",
+            owner="codex",
+        )
+
+    inventory = recovery_seal.recovery_seal_inventory(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    assert inventory["state"] == "stale"
+    assert inventory["ready"] is False
+    assert inventory["latest"]["receipt_sha256"] == first["receipt_sha256"]
+    assert "source_changed_since_recovery_seal" in inventory["errors"]
+
+
+async def test_unchanged_legacy_v1_seal_remains_guardedly_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            recovery_seal,
+            "recovery_source_fingerprint",
+            _legacy_source_fingerprint,
+        )
+        patch.setattr(
+            recovery_seal,
+            "recovery_source_fingerprint_schema",
+            _treat_fixture_fingerprint_as_current,
+        )
+        first = recovery_seal.seal_recovery_batch(
+            db_path,
+            expected_schema_version=SCHEMA_VERSION,
+            batch_id="legacy-current-001",
+            owner="codex",
+        )
+
+    inventory = recovery_seal.recovery_seal_inventory(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    replay = recovery_seal.seal_recovery_batch(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+        batch_id="legacy-current-001",
+        owner="codex",
+    )
+
+    assert inventory["state"] == "verified"
+    assert inventory["ready"] is True
+    assert replay["replayed"] is True
+    assert replay["receipt_sha256"] == first["receipt_sha256"]
+
+
+async def test_legacy_v1_seal_rejects_user_version_only_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            recovery_seal,
+            "recovery_source_fingerprint",
+            _legacy_source_fingerprint,
+        )
+        patch.setattr(
+            recovery_seal,
+            "recovery_source_fingerprint_schema",
+            _treat_fixture_fingerprint_as_current,
+        )
+        first = recovery_seal.seal_recovery_batch(
+            db_path,
+            expected_schema_version=SCHEMA_VERSION,
+            batch_id="legacy-header-stale-001",
+            owner="codex",
+        )
+
+    with sqlite3.connect(db_path) as changed:
+        changed.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+
+    with pytest.raises(
+        recovery_seal.RecoverySealProtocolError,
+        match="source_changed_since_recovery_seal",
+    ):
+        recovery_seal.seal_recovery_batch(
+            db_path,
+            expected_schema_version=SCHEMA_VERSION,
+            batch_id="legacy-header-stale-001",
+            owner="codex",
+        )
+
+    inventory = recovery_seal.recovery_seal_inventory(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    assert inventory["state"] == "stale"
+    assert inventory["ready"] is False
+    assert inventory["latest"]["receipt_sha256"] == first["receipt_sha256"]
+    assert "source_changed_since_recovery_seal" in inventory["errors"]
+
+
 async def test_concurrent_seals_serialize_and_rotate_once(tmp_path: Path) -> None:
     db_path = await _source_database(tmp_path)
     recovery.create_recovery_anchor(
@@ -337,6 +489,64 @@ async def test_incomplete_attempt_fails_closed_if_source_changes_before_retry(
 
     assert result["outcome"] == "recovery_unsealed"
     assert result["reason_code"] == "source_changed_since_seal_attempt"
+    assert result["ready"] is False
+    assert result["replayed"] is False
+
+
+async def test_incomplete_legacy_attempt_is_terminalized_without_v2_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = await _source_database(tmp_path)
+    recovery.create_recovery_anchor(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    original_publish = (
+        recovery_seal._publish_record  # pyright: ignore[reportPrivateUsage]
+    )
+
+    def fail_rotation(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("simulated legacy rotation interruption")
+
+    def refuse_terminal(path: Path, record: dict[str, Any]) -> None:
+        if path.name == recovery_seal.RECOVERY_SEAL_RECEIPT_NAME:
+            raise OSError("simulated terminal receipt outage")
+        original_publish(path, record)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            recovery_seal,
+            "recovery_source_fingerprint",
+            _legacy_source_fingerprint,
+        )
+        patch.setattr(
+            recovery_seal,
+            "recovery_source_fingerprint_schema",
+            _treat_fixture_fingerprint_as_current,
+        )
+        patch.setattr(recovery_seal, "rotate_recovery_anchor", fail_rotation)
+        patch.setattr(recovery_seal, "_publish_record", refuse_terminal)
+        with pytest.raises(
+            recovery_seal.RecoverySealProtocolError,
+            match="terminal_receipt_unavailable",
+        ):
+            recovery_seal.seal_recovery_batch(
+                db_path,
+                expected_schema_version=SCHEMA_VERSION,
+                batch_id="legacy-open-001",
+                owner="codex",
+            )
+
+    result = recovery_seal.seal_recovery_batch(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+        batch_id="legacy-open-001",
+        owner="codex",
+    )
+
+    assert result["outcome"] == "recovery_unsealed"
+    assert result["reason_code"] == "source_fingerprint_schema_legacy"
     assert result["ready"] is False
     assert result["replayed"] is False
 

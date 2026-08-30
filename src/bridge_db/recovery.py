@@ -20,6 +20,8 @@ from typing import Any, BinaryIO, cast
 from bridge_db import clock
 
 RECOVERY_ANCHOR_SCHEMA = "RecoveryAnchorV1"
+LEGACY_RECOVERY_SOURCE_FINGERPRINT_SCHEMA = "RecoverySourceFingerprintV1"
+RECOVERY_SOURCE_FINGERPRINT_SCHEMA = "RecoverySourceFingerprintV2"
 RECOVERY_ANCHOR_SUFFIX = ".recovery-anchor-v1"
 RECOVERY_DATABASE_NAME = "anchor.sqlite"
 RECOVERY_MANIFEST_NAME = "manifest.json"
@@ -86,26 +88,41 @@ def _semantic_value(value: object) -> list[object]:
     return [type(value).__name__, value]
 
 
-def _sqlite_semantic_fingerprint(path: Path) -> str:
-    """Hash all persisted user-table content without exposing stored values."""
-    digest = hashlib.sha256()
+def _sqlite_semantic_fingerprints(path: Path) -> tuple[int, dict[str, str]]:
+    """Return legacy and current semantic hashes from one read-only snapshot."""
+    legacy_digest = hashlib.sha256()
+    current_digest = hashlib.sha256()
     with sqlite3.connect(_sqlite_ro_uri(path), uri=True) as check:
+        check.execute("BEGIN")
+        version_row = check.execute("PRAGMA user_version").fetchone()
+        schema_version = int(version_row[0]) if version_row is not None else -1
+        current_digest.update(RECOVERY_SOURCE_FINGERPRINT_SCHEMA.encode("ascii"))
+        current_digest.update(b"\0")
+        current_digest.update(
+            json.dumps(
+                ["sqlite_user_version", schema_version],
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("ascii")
+        )
+        current_digest.update(b"\n")
+        digests = (legacy_digest, current_digest)
         schema_rows = check.execute(
             "SELECT type, name, tbl_name, sql FROM sqlite_schema "
             "WHERE name NOT LIKE 'sqlite_%' "
             "ORDER BY type, name, tbl_name, sql"
         )
         for row in schema_rows:
-            digest.update(b"schema\0")
-            digest.update(
-                json.dumps(
-                    [_semantic_value(value) for value in row],
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=True,
-                ).encode("utf-8")
-            )
-            digest.update(b"\n")
+            encoded = json.dumps(
+                [_semantic_value(value) for value in row],
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+            for digest in digests:
+                digest.update(b"schema\0")
+                digest.update(encoded)
+                digest.update(b"\n")
         tables = [
             str(row[0])
             for row in check.execute(
@@ -127,19 +144,48 @@ def _sqlite_semantic_fingerprint(path: Path) -> str:
                     ensure_ascii=True,
                 ).encode("utf-8")
                 row_hashes.append(hashlib.sha256(encoded).hexdigest())
-            digest.update(table.encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(json.dumps(columns, separators=(",", ":")).encode("utf-8"))
-            digest.update(b"\0")
-            for row_hash in sorted(row_hashes):
-                digest.update(row_hash.encode("ascii"))
-                digest.update(b"\n")
-    return digest.hexdigest()
+            encoded_columns = json.dumps(columns, separators=(",", ":")).encode("utf-8")
+            for digest in digests:
+                digest.update(table.encode("utf-8"))
+                digest.update(b"\0")
+                digest.update(encoded_columns)
+                digest.update(b"\0")
+                for row_hash in sorted(row_hashes):
+                    digest.update(row_hash.encode("ascii"))
+                    digest.update(b"\n")
+    return schema_version, {
+        LEGACY_RECOVERY_SOURCE_FINGERPRINT_SCHEMA: legacy_digest.hexdigest(),
+        RECOVERY_SOURCE_FINGERPRINT_SCHEMA: current_digest.hexdigest(),
+    }
+
+
+def _sqlite_semantic_fingerprint(path: Path) -> str:
+    """Hash schema version and persisted user-table content without exposing values."""
+    _, fingerprints = _sqlite_semantic_fingerprints(path)
+    return fingerprints[RECOVERY_SOURCE_FINGERPRINT_SCHEMA]
 
 
 def recovery_source_fingerprint(db_path: Path) -> str:
-    """Return a content-only digest for binding recovery lifecycle receipts."""
+    """Return the current versioned digest for binding recovery lifecycle receipts."""
     return _sqlite_semantic_fingerprint(db_path)
+
+
+def recovery_source_fingerprint_schema(
+    db_path: Path,
+    fingerprint: str,
+    *,
+    expected_schema_version: int,
+) -> str | None:
+    """Classify a current or guarded legacy digest from one SQLite snapshot."""
+    schema_version, fingerprints = _sqlite_semantic_fingerprints(db_path)
+    if fingerprint == fingerprints[RECOVERY_SOURCE_FINGERPRINT_SCHEMA]:
+        return RECOVERY_SOURCE_FINGERPRINT_SCHEMA
+    if (
+        schema_version == expected_schema_version
+        and fingerprint == fingerprints[LEGACY_RECOVERY_SOURCE_FINGERPRINT_SCHEMA]
+    ):
+        return LEGACY_RECOVERY_SOURCE_FINGERPRINT_SCHEMA
+    return None
 
 
 def _write_private_file(path: Path, content: bytes) -> None:

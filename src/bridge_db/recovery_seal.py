@@ -17,8 +17,11 @@ from typing import Any, cast
 
 from bridge_db import clock
 from bridge_db.recovery import (
+    LEGACY_RECOVERY_SOURCE_FINGERPRINT_SCHEMA,
+    RECOVERY_SOURCE_FINGERPRINT_SCHEMA,
     recovery_anchor_inventory,
     recovery_source_fingerprint,
+    recovery_source_fingerprint_schema,
     rotate_recovery_anchor,
 )
 
@@ -561,10 +564,14 @@ def _assert_current_sealed_receipt(
     if receipt["outcome"] != "recovery_sealed":
         return
     try:
-        source_fingerprint = recovery_source_fingerprint(db_path)
+        fingerprint_schema = recovery_source_fingerprint_schema(
+            db_path,
+            cast(str, receipt["source_fingerprint_sha256"]),
+            expected_schema_version=expected_schema_version,
+        )
     except BaseException as exc:
         raise RecoverySealProtocolError("source_fingerprint_unavailable") from exc
-    if source_fingerprint != receipt["source_fingerprint_sha256"]:
+    if fingerprint_schema is None:
         raise RecoverySealProtocolError("source_changed_since_recovery_seal")
     anchor = _best_effort_anchor(
         db_path,
@@ -629,21 +636,28 @@ def seal_recovery_batch(
             )
             _publish_record(attempt_path, attempt)
 
+        attempt_fingerprint_schema: str | None = None
         try:
-            current_fingerprint = recovery_source_fingerprint(db_path)
+            attempt_fingerprint_schema = recovery_source_fingerprint_schema(
+                db_path,
+                cast(str, attempt["source_fingerprint_sha256"]),
+                expected_schema_version=expected_schema_version,
+            )
         except BaseException as exc:
-            current_fingerprint = None
             initial_error: BaseException | None = exc
         else:
             initial_error = None
 
         if (
             initial_error is not None
-            or current_fingerprint != attempt["source_fingerprint_sha256"]
+            or attempt_fingerprint_schema != RECOVERY_SOURCE_FINGERPRINT_SCHEMA
         ):
             reason = (
                 "source_fingerprint_unavailable"
                 if initial_error is not None
+                else "source_fingerprint_schema_legacy"
+                if attempt_fingerprint_schema
+                == LEGACY_RECOVERY_SOURCE_FINGERPRINT_SCHEMA
                 else "source_changed_since_seal_attempt"
             )
             receipt = _receipt_record(
@@ -899,15 +913,19 @@ def recovery_seal_inventory(
             expected_schema_version=expected_schema_version,
         )
     try:
-        source_fingerprint = recovery_source_fingerprint(db_path)
+        fingerprint_schema = recovery_source_fingerprint_schema(
+            db_path,
+            cast(str, receipt["source_fingerprint_sha256"]),
+            expected_schema_version=expected_schema_version,
+        )
     except BaseException:
-        source_fingerprint = None
+        fingerprint_schema = None
     readiness_errors: list[str] = []
     if anchor is None or anchor.get("ready") is not True:
         readiness_errors.append("current_recovery_anchor_not_ready")
     if anchor is None or anchor.get("sha256") != receipt["anchor_sha256"]:
         readiness_errors.append("current_anchor_receipt_mismatch")
-    if source_fingerprint != receipt["source_fingerprint_sha256"]:
+    if fingerprint_schema is None:
         readiness_errors.append("source_changed_since_recovery_seal")
     if readiness_errors:
         return {
