@@ -1125,13 +1125,18 @@ def _copy_tracked_source(
 def _make_launcher(
     *,
     release_path: Path,
-    python_executable: Path,
+    shebang_python: Path,
     python_resolved: Path,
     python_sha256: str,
     generation_id: str,
     bundled_runtime: bool = True,
 ) -> bytes:
-    if any(character in str(python_executable) for character in ("\n", "\r", " ")):
+    # The shebang names the interpreter launchd/MCP clients exec. New
+    # generations bind it to the resolved interpreter (the uv-managed binary the
+    # launcher already verifies by hash) rather than the activating venv's
+    # symlink: a venv is working-tree state and can be pruned under a live
+    # release, which surfaces as posix_spawn ENOENT on the launcher itself.
+    if any(character in str(shebang_python) for character in ("\n", "\r", " ")):
         raise GenerationContractError("generation.python_path_not_shebang_safe")
     path_setup = (
         """os.environ.pop("PYTHONPATH", None)
@@ -1155,7 +1160,7 @@ sys.path[:] = [release + "/src", release + "/runtime/site-packages", *stdlib_pat
         else 'sys.path.insert(0, release + "/src")'
     )
     sysconfig_import = "import sysconfig\n" if bundled_runtime else ""
-    body = f"""#!{python_executable}
+    body = f"""#!{shebang_python}
 import hashlib
 import os
 from pathlib import Path
@@ -1571,18 +1576,31 @@ def verify_generation(root: Path, generation_id: str) -> dict[str, Any]:
     launcher = release / "bin" / "bridge-db-mcp"
     if not launcher.is_file() or launcher.is_symlink():
         raise GenerationContractError("generation.launcher_missing")
+    python_resolved = Path(str(manifest["python_executable_resolved"]))
     expected_launcher = _make_launcher(
         release_path=release,
-        python_executable=python_executable,
-        python_resolved=Path(str(manifest["python_executable_resolved"])),
+        shebang_python=python_resolved,
+        python_resolved=python_resolved,
         python_sha256=python_sha256,
         generation_id=generation_id,
         bundled_runtime=bool(runtime_bundle_entries),
     )
-    expected_launcher_sha256 = _sha256_bytes(expected_launcher)
-    if (
-        manifest.get("launcher_sha256") != expected_launcher_sha256
-        or launcher.read_bytes() != expected_launcher
+    # Generations staged before the durable-shebang change bound the launcher
+    # to the activating executable; accept exactly that legacy form too.
+    legacy_launcher = _make_launcher(
+        release_path=release,
+        shebang_python=python_executable,
+        python_resolved=python_resolved,
+        python_sha256=python_sha256,
+        generation_id=generation_id,
+        bundled_runtime=bool(runtime_bundle_entries),
+    )
+    observed_launcher = launcher.read_bytes()
+    recorded_launcher_sha256 = manifest.get("launcher_sha256")
+    if not any(
+        recorded_launcher_sha256 == _sha256_bytes(candidate)
+        and observed_launcher == candidate
+        for candidate in (expected_launcher, legacy_launcher)
     ):
         raise GenerationContractError("generation.launcher_digest_mismatch")
     return {
@@ -1696,7 +1714,7 @@ def stage_generation(
         )
         launcher_bytes = _make_launcher(
             release_path=release,
-            python_executable=executable,
+            shebang_python=executable_resolved,
             python_resolved=executable_resolved,
             python_sha256=python_sha256,
             generation_id=generation_id,
