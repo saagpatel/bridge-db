@@ -39,7 +39,7 @@ async def reconcile_canonical_keys(
     db: aiosqlite.Connection,
     *,
     audit: bool = True,
-    caller: str = "codex",
+    caller: str = "operator-cli",
     project: str = "bridge-db",
 ) -> CanonicalKeyReconcileResult:
     """Rewrite stored canonical_key values to GHRA repo_full_name values.

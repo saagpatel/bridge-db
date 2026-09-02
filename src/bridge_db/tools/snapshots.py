@@ -176,7 +176,15 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     async def acknowledge_snapshot_refusal(
-        caller: Annotated[CallerID, Field(description="Must own the refusal")],
+        caller: Annotated[
+            CallerID,
+            Field(
+                description=(
+                    "Must own the refusal or hold an active exact-resource "
+                    "operator delegation"
+                )
+            ),
+        ],
         refusal_id: Annotated[int, Field(ge=1, description="Exact durable refusal ID")],
         decision: Annotated[
             SnapshotRefusalDecision,
@@ -189,7 +197,11 @@ def register(mcp: FastMCP) -> None:
         ],
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
-        """Acknowledge an exact refusal and publish its next state."""
+        """Acknowledge an exact refusal and publish its next state.
+
+        An append-only exact-resource delegation may authorize a different
+        bound caller without changing the refusal's stored original owner.
+        """
         require_caller(ctx, caller, tool="acknowledge_snapshot_refusal")
         require_bound_caller(ctx, caller, tool="acknowledge_snapshot_refusal")
         try:

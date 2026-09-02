@@ -58,8 +58,29 @@ Expected result
   Lifecycle-only `session-boundary` rows remain visible in activity freshness
   and history but do not invalidate a state snapshot.
 - Dogfood prints the read-only post-sync observability summary: status signals, FTS index state, WAL state, recall usage, and shipped-sync audit details.
-- The `health` MCP tool should report `ok=True` only when the DB, schema, fallback bridge file, and FTS recall index are all healthy.
-- If `fts_missing` or `fts_orphaned` is nonzero, run `uv run python -m bridge_db --rebuild-content-index`, then rerun `--status` and `--dogfood`.
+- The `health` MCP tool should report `ok=True` only when the DB, schema, fallback bridge file, and FTS recall index are all healthy. FTS integrity includes exact recomputed indexed text, not only row IDs or counts.
+- If `fts_missing`, `fts_orphaned`, or `fts_content_mismatched` is nonzero, run `uv run python -m bridge_db --rebuild-content-index`, then rerun `--status` and `--dogfood`.
+
+## Exact owner delegation
+
+Use delegation only when a human operator has explicitly authorized a named
+principal to finish exact foreign-owner lifecycle rows. Generate and review a
+`BridgeOwnerDelegationManifestV1` containing only metadata-bound resources, then
+run the candidate's `--apply-owner-delegation-manifest ABSOLUTE_PATH` ceremony
+in a sole-writer window. Confirm the displayed resource count, delegate, and
+manifest digest before typing the exact phrase.
+
+After each delegated action, read back all three facts:
+
+- the source activity/refusal row still names its original owner;
+- the actual delegate is recorded in `sync_disposition_by` or
+  `acknowledged_by`; and
+- exactly one matching row exists in `owner_delegation_consumptions`.
+
+A delegation does not authorize snapshot creation/pruning, a different row,
+custody rewrite, or a fabricated downstream reference. Changed resource images
+must be re-reviewed and granted in a new operator decision; do not edit a stored
+grant.
 
 ## Claude.ai Registration Check
 
@@ -91,7 +112,7 @@ below remain from the earlier integration verification.
 - `uv run python -m bridge_db --dogfood` reports shipped-event, handoff, FTS,
   WAL, recall, and audit details. Use fresh output before claiming the shipped
   queue is clean.
-- Claude Code SessionEnd logging uses `uv run --directory ~/Projects/bridge-db python -m bridge_db --log-session-boundary <project>` rather than direct SQLite writes.
+- Claude Code SessionEnd logging uses the stable immutable launcher with the live `cc` binding and `--log-session-boundary <project>` rather than a mutable checkout or direct SQLite writes.
 - `claude mcp list` reports `bridge-db` connected through this repo.
 - Codex config includes the `mcp_servers.bridge-db` registration for this repo.
 - Claude Desktop config exists at `~/Library/Application Support/Claude/claude_desktop_config.json`.

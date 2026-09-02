@@ -19,6 +19,7 @@ logger = logging.getLogger("bridge_db.db")
 # Schema version — increment when adding migrations
 SCHEMA_VERSION = 23
 SNAPSHOT_REFUSAL_EXTENSION_SCHEMA = "BridgeSnapshotRefusalSchemaV1"
+OWNER_DELEGATION_EXTENSION_SCHEMA = "BridgeOwnerDelegationSchemaV1"
 
 # A migration post-hook runs after its DDL, before the version bump+commit
 # (e.g. FTS repopulation). Its return value is ignored.
@@ -271,6 +272,35 @@ CREATE TABLE IF NOT EXISTS snapshot_refusals (
 
 CREATE INDEX IF NOT EXISTS idx_snapshot_refusals_owner_state
     ON snapshot_refusals(caller, acknowledgement_state, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS owner_delegations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    resource_type TEXT NOT NULL
+        CHECK(resource_type IN ('activity_disposition', 'snapshot_refusal')),
+    resource_id INTEGER NOT NULL CHECK(resource_id >= 1),
+    original_owner TEXT NOT NULL
+        CHECK(original_owner IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+    delegated_to TEXT NOT NULL
+        CHECK(delegated_to IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+    resource_sha256 TEXT NOT NULL CHECK(length(resource_sha256) = 64),
+    authorization_reason TEXT NOT NULL CHECK(length(trim(authorization_reason)) > 0),
+    authorization_ref TEXT NOT NULL CHECK(length(trim(authorization_ref)) > 0),
+    delegated_by TEXT NOT NULL CHECK(delegated_by = 'operator-cli'),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE(resource_type, resource_id)
+);
+
+CREATE TABLE IF NOT EXISTS owner_delegation_consumptions (
+    delegation_id INTEGER PRIMARY KEY REFERENCES owner_delegations(id),
+    actor TEXT NOT NULL
+        CHECK(actor IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+    action TEXT NOT NULL CHECK(length(trim(action)) > 0),
+    result_sha256 TEXT NOT NULL CHECK(length(result_sha256) = 64),
+    consumed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_owner_delegations_target
+    ON owner_delegations(delegated_to, resource_type, resource_id);
 
 CREATE TABLE IF NOT EXISTS pending_handoffs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -786,6 +816,41 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_refusals_owner_state
     ON snapshot_refusals(caller, acknowledgement_state, created_at DESC);
 """
 
+# BridgeOwnerDelegationSchemaV1 is additive over core v23. It preserves the
+# original resource owner and records operator-approved, exact-resource grants
+# plus separate one-time consumption receipts. Previous v23 runtimes ignore and
+# preserve these tables; they do not gain delegated write authority.
+_OWNER_DELEGATION_EXTENSION_DDL = """
+CREATE TABLE IF NOT EXISTS owner_delegations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    resource_type TEXT NOT NULL
+        CHECK(resource_type IN ('activity_disposition', 'snapshot_refusal')),
+    resource_id INTEGER NOT NULL CHECK(resource_id >= 1),
+    original_owner TEXT NOT NULL
+        CHECK(original_owner IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+    delegated_to TEXT NOT NULL
+        CHECK(delegated_to IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+    resource_sha256 TEXT NOT NULL CHECK(length(resource_sha256) = 64),
+    authorization_reason TEXT NOT NULL CHECK(length(trim(authorization_reason)) > 0),
+    authorization_ref TEXT NOT NULL CHECK(length(trim(authorization_ref)) > 0),
+    delegated_by TEXT NOT NULL CHECK(delegated_by = 'operator-cli'),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE(resource_type, resource_id)
+);
+
+CREATE TABLE IF NOT EXISTS owner_delegation_consumptions (
+    delegation_id INTEGER PRIMARY KEY REFERENCES owner_delegations(id),
+    actor TEXT NOT NULL
+        CHECK(actor IN ('cc', 'codex', 'claude_ai', 'notion_os', 'personal_ops')),
+    action TEXT NOT NULL CHECK(length(trim(action)) > 0),
+    result_sha256 TEXT NOT NULL CHECK(length(result_sha256) = 64),
+    consumed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_owner_delegations_target
+    ON owner_delegations(delegated_to, resource_type, resource_id);
+"""
+
 # Column definitions for the v14 ADD COLUMN step. Kept character-identical to the
 # activity_log block in _SCHEMA_DDL so a fresh install and a migrated DB converge
 # (see tests/test_schema_convergence_concurrency.py). NOTE: the synced/policy
@@ -1192,6 +1257,9 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
     # Exact previous merged generation d7272d4 safely ignores and preserves it.
     if not await _table_exists(db, "snapshot_refusals"):
         await db.executescript(_SNAPSHOT_REFUSAL_EXTENSION_DDL)
+        await db.commit()
+    if not await _table_exists(db, "owner_delegations"):
+        await db.executescript(_OWNER_DELEGATION_EXTENSION_DDL)
         await db.commit()
     logger.debug("Schema at v%d", current_version)
 
@@ -1744,13 +1812,66 @@ _FTS_SOURCE_TABLES = {
 }
 
 
+async def _expected_fts_texts(
+    db: aiosqlite.Connection, source_type: str
+) -> dict[str, str | None]:
+    """Recompute canonical FTS text for one closed source-table class."""
+    if source_type == "section":
+        cursor = await db.execute(
+            "SELECT section_name, content FROM context_sections"
+        )
+        return {
+            str(row["section_name"]): fts_text_for_section(
+                row["section_name"], row["content"]
+            )
+            for row in await cursor.fetchall()
+        }
+    if source_type == "activity":
+        cursor = await db.execute(
+            "SELECT id, project_name, summary, branch, tags FROM activity_log"
+        )
+        expected: dict[str, str | None] = {}
+        for row in await cursor.fetchall():
+            try:
+                tags = _activity_tags_from_json(row["tags"])
+            except (json.JSONDecodeError, TypeError):
+                expected[str(row["id"])] = None
+                continue
+            expected[str(row["id"])] = fts_text_for_activity(
+                row["project_name"], row["summary"], row["branch"], tags
+            )
+        return expected
+    if source_type == "snapshot":
+        cursor = await db.execute("SELECT id, data FROM system_snapshots")
+        return {
+            str(row["id"]): fts_text_for_snapshot(row["data"])
+            for row in await cursor.fetchall()
+        }
+    if source_type == "handoff":
+        cursor = await db.execute(
+            "SELECT id, project_name, project_path, roadmap_file, phase "
+            "FROM pending_handoffs"
+        )
+        return {
+            str(row["id"]): fts_text_for_handoff(
+                row["project_name"],
+                row["project_path"],
+                row["roadmap_file"],
+                row["phase"],
+            )
+            for row in await cursor.fetchall()
+        }
+    raise ValueError(f"unsupported FTS source type: {source_type}")
+
+
 async def collect_fts_index_metrics(db: aiosqlite.Connection) -> dict[str, Any]:
-    """Return source-vs-FTS consistency metrics for the recall content index."""
+    """Return exact source-vs-FTS identity and content consistency metrics."""
     sources: dict[str, dict[str, int | bool]] = {}
     total_expected = 0
     total_indexed = 0
     total_missing = 0
     total_orphaned = 0
+    total_content_mismatched = 0
 
     for source_type, (table, pk) in _FTS_SOURCE_TABLES.items():
         cursor = await db.execute(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
@@ -1793,12 +1914,30 @@ async def collect_fts_index_metrics(db: aiosqlite.Connection) -> dict[str, Any]:
         orphaned_row = await cursor.fetchone()
         orphaned = orphaned_row[0] if orphaned_row else 0
 
-        ok = expected == indexed and missing == 0 and orphaned == 0
+        expected_texts = await _expected_fts_texts(db, source_type)
+        cursor = await db.execute(
+            "SELECT source_id, text FROM content_index WHERE source_type = ?",
+            (source_type,),
+        )
+        content_mismatched = sum(
+            1
+            for row in await cursor.fetchall()
+            if row["source_id"] in expected_texts
+            and row["text"] != expected_texts[row["source_id"]]
+        )
+
+        ok = (
+            expected == indexed
+            and missing == 0
+            and orphaned == 0
+            and content_mismatched == 0
+        )
         sources[source_type] = {
             "expected": expected,
             "indexed": indexed,
             "missing": missing,
             "orphaned": orphaned,
+            "content_mismatched": content_mismatched,
             "ok": ok,
         }
 
@@ -1806,6 +1945,7 @@ async def collect_fts_index_metrics(db: aiosqlite.Connection) -> dict[str, Any]:
         total_indexed += indexed
         total_missing += missing
         total_orphaned += orphaned
+        total_content_mismatched += content_mismatched
 
     return {
         "ok": all(source["ok"] for source in sources.values()),
@@ -1813,6 +1953,7 @@ async def collect_fts_index_metrics(db: aiosqlite.Connection) -> dict[str, Any]:
         "indexed": total_indexed,
         "missing": total_missing,
         "orphaned": total_orphaned,
+        "content_mismatched": total_content_mismatched,
         "sources": sources,
     }
 

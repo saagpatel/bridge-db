@@ -30,7 +30,12 @@ uv run pytest    # verify the install
 - Schema v22 adds append-only handoff cancellation receipts and exact-row trust quarantine images. Legacy cleared operator rows can be relabeled `ingested` without deletion and restored only while the captured row still matches.
 - Schema v23 adds one-time, 24-hour handoff completion capabilities and append-only orphan-recovery receipts. The database stores only capability hashes; the claiming session receives the sole bearer value.
 - The additive `BridgeSnapshotRefusalSchemaV1` extension over core v23 adds durable, owner-bound snapshot-capacity refusal receipts and explicit acknowledgement/next-state handling without advancing `user_version`. A refusal stores only a payload digest, never the rejected snapshot body.
-- FTS5 `content_index` mirrors all content tables; `health` and `status` verify source-row / FTS-row alignment.
+- The additive `BridgeOwnerDelegationSchemaV1` extension over core v23 records
+  operator-approved, exact-resource, one-time delegation without changing the
+  original activity/refusal owner. Successful delegated actions append a
+  separate consumption receipt in the same transaction.
+- FTS5 `content_index` mirrors all content tables; `health` and `status` verify
+  both source-row identity and the recomputed indexed text for every row.
 - `status` includes a native freshness block for owner-specific snapshot, activity, handoff, and shipped-event attention. Freshness attention is advisory: top-level `ok` / `overall` remain tied to DB, schema, fallback-file, FTS, evidence, and any selected shared-runtime readiness.
 - 26 MCP tools across 10 modules (activity, handoffs, context, snapshots, cost, export, health, recall, audit, conflicts).
 
@@ -137,6 +142,15 @@ with `--promote-section <section>`: the TTY ceremony displays and confirms the
 exact version and digest, then rechecks it under a write lock before granting
 operator trust.
 
+Each export acquires SQLite's writer slot before rendering and holds it through
+the atomic fallback-file replacement and receipt commit. This binds the file
+bytes to the database state that produced them. If a process stops after the
+file replacement but before the transaction commits, the resulting pending
+projection job is reconciled only by an authenticated, owner-bound retry that
+names the exact `projection_job_id`; a byte-for-byte match to a newly rendered
+locked snapshot makes that retry idempotent. Ordinary exports never claim or
+complete another job.
+
 The export result's `bytes` field and the durable
 `bridge_export_receipts.byte_count` value both report the exact UTF-8 byte count
 written to the fallback file.
@@ -168,8 +182,10 @@ uv run python -m bridge_db --doctor  # local environment diagnostics
 uv run python -m bridge_db --status  # compact operator summary
 uv run python -m bridge_db --dogfood # read-only observability dogfood pass
 uv run python -m bridge_db --rebuild-content-index  # repair FTS recall index drift
+uv run python -m bridge_db --rehearse-recovery      # disposable restore/export/rollback proof
 uv run python -m bridge_db --reconcile-canonical-keys  # backfill GHRA repo_full_name keys
-uv run python -m bridge_db --log-session-boundary bridge-db  # FTS-safe CC hook logging
+/path/to/candidate/bin/bridge-db-mcp --apply-owner-delegation-manifest /absolute/reviewed.json  # TTY exact-row grant
+/path/to/current/bin/bridge-db-mcp --log-session-boundary bridge-db  # principal-bound CC hook logging
 uv run python -m bridge_db --upgrade-principals-v2  # preserve v1 hashes; add 90-day scoped grants
 uv run python -m bridge_db --promote-handoff 42  # review/promote one pending handoff (TTY only)
 uv run python -m bridge_db --cancel-handoff 42 --cancel-reason "superseded"  # exact unclaimed cancellation
@@ -288,6 +304,14 @@ that a live client has reloaded them.
   unsupported atomic exchange, and post-exchange verification failures fail
   closed; a failed post-exchange verification rolls back to the previous
   current anchor.
+- Recovery rehearsal: `uv run python -m bridge_db --rehearse-recovery` requires
+  a current verified anchor, restores it to a private temporary directory, and
+  copies the project ownership registry through a no-symlink, stable-file
+  readback before resolving canonical source mappings. It verifies SQLite and
+  schema compatibility, exact FTS row identity and indexed text, owner/grant
+  preservation, projection reconstruction, export reconstruction, and rollback
+  isolation. The rehearsal does not modify the live database, registry, export,
+  or current anchor.
 - Evidence lifecycle: audit and recall JSONL active files rotate losslessly at
   configurable byte boundaries under an inter-process lock. All segments are
   preserved pending an approved retention policy. `health`/`status` expose
@@ -306,9 +330,11 @@ that a live client has reloaded them.
   telemetry record and its empty-query aggregate. Exact archive/count gates and
   prepared/completed receipts make interrupted work operator-visible. No
   command deletes records, segments, backups, archives, or recovery evidence.
-- FTS repair: `uv run python -m bridge_db --rebuild-content-index` rebuilds the local `content_index` from source tables when health reports recall-index drift
+- FTS repair: `uv run python -m bridge_db --rebuild-content-index` rebuilds the
+  local `content_index` from source tables when health reports missing,
+  orphaned, or text-mismatched recall-index rows.
 - Canonical-key reconcile: `uv run python -m bridge_db --reconcile-canonical-keys` rewrites stored `activity_log` and `pending_handoffs` `canonical_key` values through GithubRepoAuditor's registry, storing GHRA `repo_full_name` for repo-backed projects and leaving unresolvable rows `NULL`.
-- Session boundary logging: Claude Code's SessionEnd hook should call `uv run --directory /path/to/bridge-db python -m bridge_db --log-session-boundary <project>` rather than writing SQLite directly; this path adds the FTS row and does not run activity retention pruning
+- Session boundary logging: Claude Code's SessionEnd hook must use the stable immutable launcher with the live `cc` credential and call `--log-session-boundary <project>` rather than a mutable checkout or direct SQLite write. The CLI revalidates the `cc` principal and `log_activity` scope before opening the database; this path adds the FTS row and does not run activity retention pruning.
 - Migration: `uv run python -m bridge_db.migration` (idempotent — safe to re-run)
 
 The MCP `status` result separates storage integrity from operating freshness:
@@ -428,11 +454,11 @@ Activity rows preserve two time concepts:
 - `created_at` is the UTC insertion timestamp assigned by SQLite.
 
 For activity discovery APIs with `since` (`get_recent_activity`,
-`get_activity_signal`, and `get_shipped_events`), a row is visible when either
-`timestamp >= since` or `created_at >= since` (with date-only values interpreted
-as UTC midnight for `created_at`). This keeps closeouts created just after UTC
-midnight discoverable even when their logical activity date is the prior local
-day.
+`get_activity_signal`, and `get_shipped_events`), visibility is based only on
+`created_at >= since` (with date-only values interpreted as UTC midnight).
+Caller-supplied logical timestamps never control shared recency. This still
+keeps closeouts created just after UTC midnight discoverable when their logical
+activity date is the prior local day.
 
 For Notion reconciliation, treat each shipped event's `notion_sync` object as the
 machine-readable gate:
@@ -451,14 +477,15 @@ receipt-backed bridge facts (`downstream_sync_pending`, `downstream_synced`, or
 `policy_dispositioned`); Git, merge, default-branch, deploy, and production
 readback dimensions remain `unknown` unless another authority proves them.
 
-A `synced` disposition is source-owned terminal proof: the MCP connection must
-be bound to the same principal stored in the activity row's `source`. A
-different principal cannot finalize that event, even if it verified a
-downstream object. Cross-source verification requires a future explicit
-delegation contract; it must not be represented by borrowing the event owner's
-caller value. The same ownership rule applies to policy dispositions because
-they terminally waive the source's downstream obligation. Cross-source policy
-adjudication also requires an explicit delegation contract.
+A `synced` disposition is source-owned terminal proof: ordinarily the MCP
+connection must be bound to the same principal stored in the activity row's
+`source`. The narrow exception is an active `BridgeOwnerDelegationSchemaV1`
+grant for that exact row image and connected principal. The delegate still calls
+as itself; BridgeDB preserves the original `source`, records the delegate in
+`sync_disposition_by`, and consumes the grant in the same transaction. The same
+rule applies to policy dispositions because they terminally waive the source's
+downstream obligation. No grant may be inferred from identity metadata or
+represented by borrowing the event owner's caller value.
 
 For non-receipt handling, use `record_disposition` with a policy `disposition`
 (`unsynced_by_policy` / `no_durable_target` / `superseded_without_receipt` /

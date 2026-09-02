@@ -16,7 +16,7 @@ outside bridge-db itself.
 The fixed bypass was Claude Code's SessionEnd hook:
 
 - Old behavior: direct `sqlite3` insert into `activity_log`.
-- Current behavior: `uv run --directory ~/Projects/bridge-db python -m bridge_db --log-session-boundary <project>`.
+- Required behavior: the owner-private SessionEnd client invokes the stable immutable launcher with the live `cc` binding and `--log-session-boundary <project>`; the CLI revalidates that principal before writing.
 - Expected proof: newest `CC session ended` rows have matching `content_index`
   rows and `uv run python -m bridge_db --status` reports `fts_missing=0`.
 

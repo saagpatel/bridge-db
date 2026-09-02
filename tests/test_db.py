@@ -41,6 +41,8 @@ async def test_schema_creates_all_tables(db: aiosqlite.Connection) -> None:
         "handoff_orphan_recovery_receipts",
         "handoff_session_capabilities",
         "handoff_trust_quarantine",
+        "owner_delegation_consumptions",
+        "owner_delegations",
         "pending_handoffs",
         "session_classification",
         "session_costs",

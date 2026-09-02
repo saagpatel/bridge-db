@@ -26,6 +26,7 @@ from bridge_db.execution_generation import (
     RUNTIME_DEPENDENCY_BUNDLE_SCHEMA,
     RUNTIME_DEPENDENCY_STATE,
     activate_generation,
+    bootstrap_adopt_generation,
     read_activation,
     rollback_generation,
     runtime_generation_identity,
@@ -66,6 +67,7 @@ def _source_repo(tmp_path: Path) -> tuple[Path, str]:
         "src/bridge_db/client_rebinding.py": "REBINDING = 'fixture'\n",
         "src/bridge_db/db.py": "SCHEMA_VERSION = 23\n",
         "src/bridge_db/execution_generation.py": "GENERATION = 'fixture'\n",
+        "src/bridge_db/owner_delegation.py": "DELEGATION = 'fixture'\n",
         "src/bridge_db/secure_binding.py": "BINDING = 'fixture'\n",
         "src/bridge_db/server.py": "SERVER = 'fixture'\n",
         "src/bridge_db/shared_runtime.py": "SHARED_RUNTIME = 'fixture'\n",
@@ -84,12 +86,16 @@ def _source_repo(tmp_path: Path) -> tuple[Path, str]:
     return source, _git(source, "rev-parse", "HEAD")
 
 
+def _stage_python() -> Path:
+    return Path(os.environ.get("BRIDGE_DB_TEST_STAGE_PYTHON", sys.executable))
+
+
 def _stage(source: Path, root: Path, sha: str) -> dict[str, object]:
     result = stage_generation(
         source=source,
         root=root,
         reviewed_sha=sha,
-        python_executable=Path(sys.executable),
+        python_executable=_stage_python(),
     )
     _write_tenancy_activation_evidence(root, str(result["generation_id"]))
     return result
@@ -222,6 +228,36 @@ def _write_activation_state(
     path.chmod(0o400)
 
 
+def _break_generation_launcher(root: Path, generation_id: str) -> None:
+    launcher = root / "releases" / generation_id / "bin" / "bridge-db-mcp"
+    launcher.chmod(0o755)
+    launcher.write_bytes(launcher.read_bytes() + b"# legacy drift\n")
+    launcher.chmod(0o555)
+
+
+def _manifest_sha256(root: Path, generation_id: str) -> str:
+    return hashlib.sha256(
+        (root / "releases" / generation_id / "generation-manifest.json").read_bytes()
+    ).hexdigest()
+
+
+def _bootstrap_fixture(
+    tmp_path: Path,
+) -> tuple[Path, Path, str, str, str, str]:
+    source, first_sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    first_id = str(_stage(source, root, first_sha)["generation_id"])
+    activate_generation(root, first_id)
+    second_id, _ = _commit_generation(source, root, marker="fixture-two")
+    activate_generation(root, second_id)
+    third_id, _ = _commit_generation(source, root, marker="fixture-three")
+    fourth_id, _ = _commit_generation(source, root, marker="fixture-four")
+    _write_tenancy_activation_evidence(root, third_id)
+    _break_generation_launcher(root, first_id)
+    _break_generation_launcher(root, second_id)
+    return source, root, first_id, second_id, third_id, fourth_id
+
+
 def test_stage_is_content_addressed_immutable_and_idempotent(tmp_path: Path) -> None:
     source, sha = _source_repo(tmp_path)
     root = tmp_path / "runtime"
@@ -267,6 +303,49 @@ def test_stage_is_content_addressed_immutable_and_idempotent(tmp_path: Path) -> 
         "previous_merged_generation_user_version": 23,
         "previous_merged_generation_sha": "d7272d489873faa5ed84c81734636ffc8cecb095",
         "snapshot_refusal_extension": "BridgeSnapshotRefusalSchemaV1",
+        "owner_delegation_extension": "BridgeOwnerDelegationSchemaV1",
+        "compatibility": "additive_extensions_ignored_by_previous_runtime",
+    }
+
+
+def test_pre_owner_delegation_generation_retains_legacy_rollback_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, _ = _source_repo(tmp_path)
+    (source / "src" / "bridge_db" / "owner_delegation.py").unlink()
+    _git(source, "add", "-A")
+    _git(source, "commit", "-m", "fixture before owner delegation")
+    reviewed_sha = _git(source, "rev-parse", "HEAD")
+    root = tmp_path / "runtime"
+
+    legacy_contract_paths = tuple(
+        path
+        for path in execution_generation.DEFAULT_CONTRACT_PATHS
+        if path != "src/bridge_db/owner_delegation.py"
+    )
+    current_contract_paths = execution_generation.DEFAULT_CONTRACT_PATHS
+    monkeypatch.setattr(
+        execution_generation, "DEFAULT_CONTRACT_PATHS", legacy_contract_paths
+    )
+    staged = stage_generation(
+        source=source,
+        root=root,
+        reviewed_sha=reviewed_sha,
+        python_executable=Path(sys.executable),
+        contract_paths=legacy_contract_paths,
+    )
+    monkeypatch.setattr(
+        execution_generation, "DEFAULT_CONTRACT_PATHS", current_contract_paths
+    )
+    generation_id = str(staged["generation_id"])
+
+    assert verify_generation(root, generation_id)["state"] == "verified"
+    assert staged["database_rollback_contract"] == {
+        "core_user_version": 23,
+        "previous_merged_generation_user_version": 23,
+        "previous_merged_generation_sha": "d7272d489873faa5ed84c81734636ffc8cecb095",
+        "snapshot_refusal_extension": "BridgeSnapshotRefusalSchemaV1",
         "compatibility": "additive_extension_ignored_by_previous_runtime",
     }
 
@@ -296,7 +375,7 @@ def test_pre_shared_runtime_generation_remains_verified_and_rollbackable(
         source=source,
         root=root,
         reviewed_sha=legacy_sha,
-        python_executable=Path(sys.executable),
+        python_executable=_stage_python(),
         contract_paths=legacy_contract_paths,
     )
     legacy_id = str(legacy["generation_id"])
@@ -1004,6 +1083,178 @@ def test_activation_second_generation_and_rollback_have_exact_readback(
     assert read_activation(root)["tenancy_activation_evidence"] == {
         "state": "not_required_for_rollback"
     }
+
+
+def test_bootstrap_adoption_replaces_unverified_legacy_with_two_verified_peers(
+    tmp_path: Path, _recovery_ready: Path
+) -> None:
+    _, root, legacy_previous, legacy_current, target, rollback = _bootstrap_fixture(
+        tmp_path
+    )
+
+    with pytest.raises(GenerationContractError) as ordinary:
+        activate_generation(root, target)
+    assert ordinary.value.reason_code == "generation.launcher_digest_mismatch"
+
+    result = bootstrap_adopt_generation(
+        root,
+        target,
+        rollback,
+        expected_current_generation=legacy_current,
+        expected_previous_generation=legacy_previous,
+        expected_current_manifest_sha256=_manifest_sha256(root, legacy_current),
+        expected_previous_manifest_sha256=_manifest_sha256(root, legacy_previous),
+    )
+
+    assert result["outcome"] == "bootstrap_adopted"
+    assert result["legacy_generations_preserved"] is True
+    assert result["legacy_generations_rollback_eligible"] is False
+    assert read_activation(root)["current_generation"] == target
+    assert read_activation(root)["previous_generation"] == rollback
+    assert verify_generation(root, target)["state"] == "verified"
+    assert verify_generation(root, rollback)["state"] == "verified"
+    assert (root / "releases" / legacy_current).is_dir()
+    assert (root / "releases" / legacy_previous).is_dir()
+    evidence = result["legacy_pointer_evidence"]
+    assert [item["pointer"] for item in evidence] == ["current", "previous"]
+    assert all(
+        item["verification_state"] == "identity_preserved_integrity_unverified"
+        for item in evidence
+    )
+
+
+def test_bootstrap_adoption_refuses_wrong_legacy_digest_before_pointer_write(
+    tmp_path: Path, _recovery_ready: Path
+) -> None:
+    _, root, legacy_previous, legacy_current, target, rollback = _bootstrap_fixture(
+        tmp_path
+    )
+
+    with pytest.raises(GenerationContractError) as refused:
+        bootstrap_adopt_generation(
+            root,
+            target,
+            rollback,
+            expected_current_generation=legacy_current,
+            expected_previous_generation=legacy_previous,
+            expected_current_manifest_sha256="0" * 64,
+            expected_previous_manifest_sha256=_manifest_sha256(root, legacy_previous),
+        )
+
+    assert refused.value.reason_code == "generation.bootstrap_legacy_manifest_mismatch"
+    assert execution_generation._pointer_target(root, "current") == legacy_current  # pyright: ignore[reportPrivateUsage]
+    assert execution_generation._pointer_target(root, "previous") == legacy_previous  # pyright: ignore[reportPrivateUsage]
+    assert not (root / ".activation.pending.json").exists()
+
+
+def test_bootstrap_adoption_refuses_non_distinct_verified_rollback(
+    tmp_path: Path, _recovery_ready: Path
+) -> None:
+    _, root, legacy_previous, legacy_current, target, _ = _bootstrap_fixture(tmp_path)
+
+    with pytest.raises(GenerationContractError) as refused:
+        bootstrap_adopt_generation(
+            root,
+            target,
+            target,
+            expected_current_generation=legacy_current,
+            expected_previous_generation=legacy_previous,
+            expected_current_manifest_sha256=_manifest_sha256(root, legacy_current),
+            expected_previous_manifest_sha256=_manifest_sha256(root, legacy_previous),
+        )
+
+    assert refused.value.reason_code == "generation.bootstrap_rollback_not_distinct"
+
+
+def test_bootstrap_adoption_restores_legacy_map_on_state_write_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _recovery_ready: Path,
+) -> None:
+    _, root, legacy_previous, legacy_current, target, rollback = _bootstrap_fixture(
+        tmp_path
+    )
+    original_write = execution_generation._atomic_write  # pyright: ignore[reportPrivateUsage]
+    failed = False
+
+    def fail_state_once(path: Path, content: bytes, *, mode: int) -> None:
+        nonlocal failed
+        if path == root / "activation-state.json" and not failed:
+            failed = True
+            raise OSError("fixture state write failure")
+        original_write(path, content, mode=mode)
+
+    monkeypatch.setattr(execution_generation, "_atomic_write", fail_state_once)
+
+    with pytest.raises(OSError, match="fixture state write failure"):
+        bootstrap_adopt_generation(
+            root,
+            target,
+            rollback,
+            expected_current_generation=legacy_current,
+            expected_previous_generation=legacy_previous,
+            expected_current_manifest_sha256=_manifest_sha256(root, legacy_current),
+            expected_previous_manifest_sha256=_manifest_sha256(root, legacy_previous),
+        )
+
+    assert execution_generation._pointer_target(root, "current") == legacy_current  # pyright: ignore[reportPrivateUsage]
+    assert execution_generation._pointer_target(root, "previous") == legacy_previous  # pyright: ignore[reportPrivateUsage]
+    assert not (root / ".activation.pending.json").exists()
+    state = json.loads((root / "activation-state.json").read_text())
+    assert state["current_generation"] == legacy_current
+    assert state["previous_generation"] == legacy_previous
+
+
+def test_bootstrap_adoption_finalizes_committed_journal_on_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _recovery_ready: Path,
+) -> None:
+    _, root, legacy_previous, legacy_current, target, rollback = _bootstrap_fixture(
+        tmp_path
+    )
+    original_receipt = execution_generation._write_bootstrap_adoption_receipt  # pyright: ignore[reportPrivateUsage]
+
+    def fail_receipt(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise OSError("fixture receipt failure")
+
+    monkeypatch.setattr(
+        execution_generation, "_write_bootstrap_adoption_receipt", fail_receipt
+    )
+    with pytest.raises(GenerationContractError) as pending:
+        bootstrap_adopt_generation(
+            root,
+            target,
+            rollback,
+            expected_current_generation=legacy_current,
+            expected_previous_generation=legacy_previous,
+            expected_current_manifest_sha256=_manifest_sha256(root, legacy_current),
+            expected_previous_manifest_sha256=_manifest_sha256(root, legacy_previous),
+        )
+    assert (
+        pending.value.reason_code
+        == "generation.bootstrap_committed_post_actions_pending"
+    )
+    assert (root / ".activation.pending.json").is_file()
+
+    monkeypatch.setattr(
+        execution_generation, "_write_bootstrap_adoption_receipt", original_receipt
+    )
+    recovered = bootstrap_adopt_generation(
+        root,
+        target,
+        rollback,
+        expected_current_generation=legacy_current,
+        expected_previous_generation=legacy_previous,
+        expected_current_manifest_sha256=_manifest_sha256(root, legacy_current),
+        expected_previous_manifest_sha256=_manifest_sha256(root, legacy_previous),
+    )
+
+    assert recovered["outcome"] == "bootstrap_adopted_recovered"
+    assert recovered["recovery_disposition"] == "committed_finalized"
+    assert not (root / ".activation.pending.json").exists()
+    assert read_activation(root)["current_generation"] == target
+    assert read_activation(root)["previous_generation"] == rollback
 
 
 def test_rollback_gate_refuses_stale_recovery_without_pointer_change(

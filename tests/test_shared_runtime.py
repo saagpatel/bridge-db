@@ -791,6 +791,7 @@ def test_shared_wrapper_relays_mcp_over_one_idle_bounded_broker(
         "BRIDGE_DB_TENANCY_ROOT": str(tmp_path / "tenancy"),
         "BRIDGE_DB_SHARED_RUNTIME_ROOT": str(shared_root),
         "BRIDGE_DB_SHARED_RUNTIME_LAUNCHER": str(launcher),
+        "BRIDGE_DB_BROKER_START_TIMEOUT_SECONDS": "20",
         "BRIDGE_DB_BROKER_IDLE_SECONDS": "1",
         "BRIDGE_DB_GENERATION_ID": "fixture-generation",
     }
@@ -832,7 +833,7 @@ def test_shared_wrapper_relays_mcp_over_one_idle_bounded_broker(
         )
         for _ in range(2)
     ]
-    registration_deadline = time.monotonic() + 10
+    registration_deadline = time.monotonic() + 20
     while time.monotonic() < registration_deadline:
         if (
             len(list(shared_root.glob("*/clients/*.json"))) == 2

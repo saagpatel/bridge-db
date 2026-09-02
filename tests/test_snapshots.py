@@ -14,6 +14,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from bridge_db import config
 from bridge_db.db import open_db
 from bridge_db.audit import iter_jsonl
+from bridge_db.owner_delegation import owner_resource_snapshot
 from bridge_db.tools import cost as cost_mod
 from bridge_db.tools import snapshots as snap_mod
 
@@ -493,6 +494,76 @@ async def test_snapshot_refusal_acknowledgement_is_owner_bound_and_idempotent(
     assert replay["mutation_performed"] is False
     assert conflicting_replay["ok"] is False
     assert conflicting_replay["reason_code"] == "snapshot.refusal_already_acknowledged"
+
+
+async def test_snapshot_refusal_acknowledgement_accepts_exact_operator_delegation(
+    db: aiosqlite.Connection,
+    snap_fns: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "SNAPSHOT_RETENTION_PER_SYSTEM", 1)
+    cc_ctx = make_ctx(db, principal="cc")
+    await snap_fns["save_snapshot"](caller="cc", data={"v": 1}, ctx=cc_ctx)
+    refusal = await snap_fns["save_snapshot"](
+        caller="cc", data={"v": 2}, ctx=cc_ctx
+    )
+    refusal_id = int(refusal["refusal_id"])
+    snapshot = await owner_resource_snapshot(
+        db, resource_type="snapshot_refusal", resource_id=refusal_id
+    )
+    cursor = await db.execute(
+        """
+        INSERT INTO owner_delegations (
+            resource_type, resource_id, original_owner, delegated_to,
+            resource_sha256, authorization_reason, authorization_ref,
+            delegated_by
+        ) VALUES ('snapshot_refusal', ?, 'cc', 'codex', ?, ?, ?, 'operator-cli')
+        """,
+        (
+            refusal_id,
+            snapshot["resource_sha256"],
+            "Operator approved exact refusal handling",
+            "codex-task:test-delegated-refusal",
+        ),
+    )
+    assert cursor.lastrowid is not None
+    delegation_id = int(cursor.lastrowid)
+    await db.commit()
+
+    result = await snap_fns["acknowledge_snapshot_refusal"](
+        caller="codex",
+        refusal_id=refusal_id,
+        decision="retry_after_owner_action",
+        ctx=make_ctx(db, principal="codex"),
+    )
+
+    assert result["delegation_id"] == delegation_id
+    assert result["original_owner"] == "cc"
+    stored = await (
+        await db.execute(
+            "SELECT caller, acknowledgement_state, acknowledged_by "
+            "FROM snapshot_refusals WHERE id = ?",
+            (refusal_id,),
+        )
+    ).fetchone()
+    assert stored is not None
+    assert dict(stored) == {
+        "caller": "cc",
+        "acknowledgement_state": "retry_after_owner_action",
+        "acknowledged_by": "codex",
+    }
+    consumption = await (
+        await db.execute(
+            "SELECT actor, action FROM owner_delegation_consumptions "
+            "WHERE delegation_id = ?",
+            (delegation_id,),
+        )
+    ).fetchone()
+    assert consumption is not None
+    assert dict(consumption) == {
+        "actor": "codex",
+        "action": "acknowledge_snapshot_refusal:retry_after_owner_action",
+    }
 
 
 async def test_snapshot_refusal_receipt_does_not_store_payload(

@@ -15,6 +15,7 @@ import bridge_db.config as cfg
 import bridge_db.tools.recall as recall_tool
 from bridge_db import auth, config, recovery
 from bridge_db.__main__ import (
+    run_apply_owner_delegation_manifest,
     run_cancel_handoff,
     run_create_recovery_anchor,
     run_dogfood,
@@ -43,6 +44,10 @@ from bridge_db.db import (
     insert_activity_row,
     open_db,
     upsert_fts_entry,
+)
+from bridge_db.owner_delegation import (
+    DELEGATION_MANIFEST_SCHEMA,
+    owner_resource_snapshot,
 )
 
 FIXED_NOW = datetime(2026, 7, 7, 12, 0, tzinfo=UTC)
@@ -131,7 +136,7 @@ async def _seed_cli_activity(
         db,
         "activity",
         str(activity_id),
-        fts_text_for_activity("bridge-db", "checked operator status", None),
+        fts_text_for_activity("bridge-db", "checked operator status", None, tags),
     )
 
 
@@ -184,7 +189,9 @@ async def test_run_status_reports_healthy_summary(
             db,
             "activity",
             str(activity_id),
-            fts_text_for_activity("bridge-db", "checked operator status", None),
+            fts_text_for_activity(
+                "bridge-db", "checked operator status", None, ["SHIPPED"]
+            ),
         )
         await db.commit()
     finally:
@@ -813,6 +820,32 @@ async def test_log_session_boundary_uses_fts_safe_activity_path(
     monkeypatch.setattr(cfg, "DB_PATH", db_path)
     monkeypatch.setattr(cfg, "BRIDGE_FILE_PATH", bridge_path)
     monkeypatch.setattr(cfg, "AUDIT_LOG_PATH", audit_log_path)
+    token = "cc-session-boundary-token"
+    principals_path = tmp_path / "principals.json"
+    _write_cli_principal(
+        principals_path,
+        caller="cc",
+        token=token,
+        scopes=["log_activity"],
+    )
+    monkeypatch.setattr(cfg, "PRINCIPALS_PATH", principals_path)
+    monkeypatch.setenv("BRIDGE_DB_PRINCIPAL_TOKEN", token)
+    registry_path = tmp_path / "project-registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "canonical_key": "bridge-db",
+                        "display_name": "bridge-db",
+                        "repo_full_name": "example/bridge-db",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cfg, "PROJECT_REGISTRY_PATH", registry_path)
 
     db = await open_db(db_path)
     try:
@@ -850,7 +883,7 @@ async def test_log_session_boundary_uses_fts_safe_activity_path(
     db = await open_db(db_path)
     try:
         cursor = await db.execute(
-            "SELECT id, source, timestamp, project_name, summary, tags "
+            "SELECT id, source, timestamp, project_name, summary, tags, canonical_key "
             "FROM activity_log ORDER BY id DESC LIMIT 1"
         )
         row = await cursor.fetchone()
@@ -860,6 +893,7 @@ async def test_log_session_boundary_uses_fts_safe_activity_path(
         assert row["project_name"] == "bridge-db"
         assert row["summary"] == "CC session ended (7min)"
         assert json.loads(row["tags"]) == ["session-boundary"]
+        assert row["canonical_key"] == "example/bridge-db"
 
         metrics = await collect_fts_index_metrics(db)
         assert metrics["ok"] is True
@@ -884,6 +918,32 @@ async def test_log_session_boundary_uses_fts_safe_activity_path(
         assert match_row[0] == 1
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_log_session_boundary_rejects_non_cc_principal_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "bridge.db"
+    token = "codex-session-boundary-token"
+    principals_path = tmp_path / "principals.json"
+    _write_cli_principal(
+        principals_path,
+        caller="codex",
+        token=token,
+        scopes=["log_activity"],
+    )
+    monkeypatch.setattr(cfg, "DB_PATH", db_path)
+    monkeypatch.setattr(cfg, "PRINCIPALS_PATH", principals_path)
+    monkeypatch.setenv("BRIDGE_DB_PRINCIPAL_TOKEN", token)
+
+    ok = await run_log_session_boundary("bridge-db")
+
+    assert ok is False
+    assert "bound principal is 'codex', required 'cc'" in capsys.readouterr().out
+    assert not db_path.exists()
 
 
 @pytest.mark.parametrize(
@@ -1419,6 +1479,68 @@ async def test_quarantine_and_exact_restore_preserve_recovery_evidence(
         )
     ).fetchone()
     assert restored is not None and restored["source_trust"] == "operator"
+
+
+@pytest.mark.asyncio
+async def test_apply_owner_delegation_manifest_requires_exact_tty_ceremony(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cursor = await db.execute(
+        "INSERT INTO activity_log "
+        "(source, timestamp, project_name, summary, tags) "
+        "VALUES ('cc', '2026-08-23', 'DelegatedCLI', 'shipped', '[\"SHIPPED\"]')"
+    )
+    assert cursor.lastrowid is not None
+    activity_id = int(cursor.lastrowid)
+    await db.commit()
+    snapshot = await owner_resource_snapshot(
+        db, resource_type="activity_disposition", resource_id=activity_id
+    )
+    manifest_path = tmp_path / "delegation.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema": DELEGATION_MANIFEST_SCHEMA,
+                "delegated_to": "codex",
+                "authorization_reason": "Operator approved exact lifecycle takeover",
+                "authorization_ref": "codex-task:test-cli-delegation",
+                "resources": [
+                    {
+                        "resource_type": "activity_disposition",
+                        "resource_id": activity_id,
+                        "original_owner": "cc",
+                        "resource_sha256": snapshot["resource_sha256"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    def confirm_delegation(_prompt: str) -> str:
+        return "delegate 1 to codex"
+
+    monkeypatch.setattr("builtins.input", confirm_delegation)
+
+    assert await run_apply_owner_delegation_manifest(str(manifest_path)) is True
+    stored = await (
+        await db.execute(
+            "SELECT original_owner, delegated_to, resource_id "
+            "FROM owner_delegations"
+        )
+    ).fetchone()
+    assert stored is not None
+    assert dict(stored) == {
+        "original_owner": "cc",
+        "delegated_to": "codex",
+        "resource_id": activity_id,
+    }
+    source = await (
+        await db.execute("SELECT source FROM activity_log WHERE id = ?", (activity_id,))
+    ).fetchone()
+    assert source is not None and source["source"] == "cc"
 
 
 def test_enroll_refuses_without_tty(
