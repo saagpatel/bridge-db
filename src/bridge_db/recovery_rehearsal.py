@@ -137,7 +137,13 @@ async def _source_mapping_inventory(
 ) -> dict[str, Any]:
     registry_digest = _sha256_file(registry_snapshot)
     tables: dict[str, dict[str, int]] = {}
-    registry_present: bool | None = None
+    # Registry validity is decided once, from the snapshot itself. Folding it
+    # out of per-row resolutions left it unset on an empty or freshly
+    # bootstrapped database, which then failed the whole rehearsal with a
+    # valid registry and zero drift (PR #148).
+    registry_present = resolve_project(
+        "", registry_path=registry_snapshot
+    ).registry_present
     for table in ("activity_log", "pending_handoffs"):
         cursor = await db.execute(
             f"SELECT project_name, canonical_key FROM {table}"  # noqa: S608
@@ -160,10 +166,6 @@ async def _source_mapping_inventory(
             resolution = resolve_project(
                 str(row["project_name"]), registry_path=registry_snapshot
             )
-            if registry_present is None:
-                registry_present = resolution.registry_present
-            else:
-                registry_present = registry_present and resolution.registry_present
             expected = resolution.canonical_key
             if expected is not None:
                 metrics["resolvable"] += 1

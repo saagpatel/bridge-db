@@ -353,14 +353,6 @@ async def acknowledge_snapshot_refusal_record(
                     "refusal_id": refusal_id,
                     "mutation_performed": False,
                 }
-            if delegation["state"] != "active":
-                await db.rollback()
-                return {
-                    "ok": False,
-                    "reason_code": "delegation.already_consumed",
-                    "refusal_id": refusal_id,
-                    "mutation_performed": False,
-                }
 
         existing = row["acknowledgement_state"]
         next_state = _DECISION_NEXT_STATE[decision]
@@ -378,6 +370,18 @@ async def acknowledge_snapshot_refusal_record(
                 "next_state": row["next_state"],
                 "mutation_performed": False,
                 "deletion_authorized": False,
+            }
+        # Reached only with no acknowledgement on the row. A consumed grant
+        # here is a second use, not a replay: the replay case returned above,
+        # because the delegated acknowledgement and the consumption receipt
+        # are written in one transaction.
+        if delegation is not None and delegation["state"] != "active":
+            await db.rollback()
+            return {
+                "ok": False,
+                "reason_code": "delegation.already_consumed",
+                "refusal_id": refusal_id,
+                "mutation_performed": False,
             }
 
         await db.execute(

@@ -872,3 +872,64 @@ async def test_save_snapshot_clamps_operator_label_in_db(
     row = await cursor.fetchone()
     assert row is not None
     assert row["source_trust"] == "agent"
+
+
+async def test_snapshot_refusal_delegated_acknowledgement_replays_an_exact_retry(
+    db: aiosqlite.Connection,
+    snap_fns: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "SNAPSHOT_RETENTION_PER_SYSTEM", 1)
+    cc_ctx = make_ctx(db, principal="cc")
+    await snap_fns["save_snapshot"](caller="cc", data={"v": 1}, ctx=cc_ctx)
+    refusal = await snap_fns["save_snapshot"](
+        caller="cc", data={"v": 2}, ctx=cc_ctx
+    )
+    refusal_id = int(refusal["refusal_id"])
+    snapshot = await owner_resource_snapshot(
+        db, resource_type="snapshot_refusal", resource_id=refusal_id
+    )
+    await db.execute(
+        """
+        INSERT INTO owner_delegations (
+            resource_type, resource_id, original_owner, delegated_to,
+            resource_sha256, authorization_reason, authorization_ref,
+            delegated_by
+        ) VALUES ('snapshot_refusal', ?, 'cc', 'codex', ?, ?, ?, 'operator-cli')
+        """,
+        (
+            refusal_id,
+            snapshot["resource_sha256"],
+            "Operator approved exact refusal handling",
+            "codex-task:test-delegated-refusal-retry",
+        ),
+    )
+    await db.commit()
+
+    first = await snap_fns["acknowledge_snapshot_refusal"](
+        caller="codex",
+        refusal_id=refusal_id,
+        decision="retry_after_owner_action",
+        ctx=make_ctx(db, principal="codex"),
+    )
+    assert first["ok"] is True
+    assert first["mutation_performed"] is True
+
+    retry = await snap_fns["acknowledge_snapshot_refusal"](
+        caller="codex",
+        refusal_id=refusal_id,
+        decision="retry_after_owner_action",
+        ctx=make_ctx(db, principal="codex"),
+    )
+    assert retry["ok"] is True
+    assert retry["reason_code"] == "snapshot.refusal_acknowledgement_replayed"
+    assert retry["mutation_performed"] is False
+
+    conflicting = await snap_fns["acknowledge_snapshot_refusal"](
+        caller="codex",
+        refusal_id=refusal_id,
+        decision="superseded",
+        ctx=make_ctx(db, principal="codex"),
+    )
+    assert conflicting["ok"] is False
+    assert conflicting["reason_code"] == "snapshot.refusal_already_acknowledged"

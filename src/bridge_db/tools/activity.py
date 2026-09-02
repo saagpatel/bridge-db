@@ -1121,6 +1121,42 @@ def register(mcp: FastMCP) -> None:
             return idempotent_synced_result(row["project_name"])
 
         if delegation is not None and delegation["state"] != "active":
+            # The grant was consumed by an earlier call, and
+            # resolve_owner_delegation has proven the row still carries that
+            # call's result image. An identical policy decision is therefore
+            # a lost-response retry: return the recorded outcome. Anything
+            # else is a second, different use of a one-time grant.
+            if (
+                not is_synced
+                and delegation["consumed_action"] == f"record_disposition:{choice}"
+                and current_disposition == choice
+            ):
+                log_audit(
+                    "record_disposition",
+                    caller,
+                    row["project_name"],
+                    ok=True,
+                    detail=(
+                        f"activity_id={activity_id} disposition={choice} "
+                        "decision=idempotent_noop "
+                        f"delegation_id={delegation['delegation_id']}"
+                    ),
+                )
+                return {
+                    "ok": True,
+                    "activity_id": activity_id,
+                    "project_name": row["project_name"],
+                    "disposition": choice,
+                    "decided_by": row["sync_disposition_by"],
+                    "processed_added": False,
+                    "downstream_system": None,
+                    "downstream_ref": None,
+                    "policy_ref": row["sync_policy_ref"],
+                    "projection": None,
+                    "delegation_id": int(delegation["delegation_id"]),
+                    "original_owner": row["source"],
+                    "replayed": True,
+                }
             raise ToolError("delegation.already_consumed")
 
         if not is_synced and current_disposition == _SYNCED_DISPOSITION:
