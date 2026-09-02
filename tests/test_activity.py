@@ -2226,3 +2226,78 @@ def test_meta_policy_cache_is_mtime_keyed(
         "proj"
     )
     assert refreshed is not None and refreshed["reason"] == "second"
+
+
+async def test_record_disposition_replays_an_exact_delegated_policy_retry(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", "enforce")
+    await fns["log_activity"](
+        caller="cc",
+        project_name="DelegatedPolicyRetry",
+        summary="shipped",
+        tags=["SHIPPED"],
+        ctx=make_ctx(db, principal="cc"),
+    )
+    row = await (await db.execute("SELECT id FROM activity_log")).fetchone()
+    assert row is not None
+    activity_id = int(row["id"])
+    snapshot = await owner_resource_snapshot(
+        db, resource_type="activity_disposition", resource_id=activity_id
+    )
+    cursor = await db.execute(
+        """
+        INSERT INTO owner_delegations (
+            resource_type, resource_id, original_owner, delegated_to,
+            resource_sha256, authorization_reason, authorization_ref,
+            delegated_by
+        ) VALUES ('activity_disposition', ?, 'cc', 'codex', ?, ?, ?, 'operator-cli')
+        """,
+        (
+            activity_id,
+            snapshot["resource_sha256"],
+            "Operator approved exact lifecycle takeover",
+            "codex-task:test-delegated-retry",
+        ),
+    )
+    assert cursor.lastrowid is not None
+    delegation_id = int(cursor.lastrowid)
+    await db.commit()
+
+    call = dict(
+        caller="codex",
+        activity_id=activity_id,
+        disposition="no_durable_target",
+        reason="Reviewed metadata has no durable downstream target",
+        policy_ref="codex-task:test-delegated-retry",
+    )
+    first = await fns["record_disposition"](**call, ctx=make_ctx(db, principal="codex"))
+    assert first["ok"] is True
+    assert "replayed" not in first
+
+    # The response was lost; the same call arrives again.
+    retry = await fns["record_disposition"](**call, ctx=make_ctx(db, principal="codex"))
+    assert retry["ok"] is True
+    assert retry["replayed"] is True
+    assert retry["disposition"] == "no_durable_target"
+    assert retry["decided_by"] == "codex"
+    assert retry["delegation_id"] == delegation_id
+    assert retry["original_owner"] == "cc"
+
+    # A different decision is a second use of a one-time grant.
+    with pytest.raises(ToolError, match="delegation.already_consumed"):
+        await fns["record_disposition"](
+            **{**call, "disposition": "unsynced_by_policy", "reason": "changed my mind"},
+            ctx=make_ctx(db, principal="codex"),
+        )
+
+    consumptions = await (
+        await db.execute(
+            "SELECT COUNT(*) FROM owner_delegation_consumptions WHERE delegation_id = ?",
+            (delegation_id,),
+        )
+    ).fetchone()
+    assert consumptions is not None
+    assert consumptions[0] == 1

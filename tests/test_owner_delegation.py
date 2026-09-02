@@ -276,3 +276,89 @@ async def test_delegation_manifest_rejects_symlink(
         OwnerDelegationError, match="delegation.manifest_path_invalid"
     ):
         load_owner_delegation_manifest(linked)
+
+
+async def test_consumed_delegation_resolves_against_its_recorded_result_image(
+    db: aiosqlite.Connection,
+    tmp_path: Path,
+) -> None:
+    """A retry after the delegated write sees the consumed grant, not a change."""
+    activity_id = await _activity(db)
+    snapshot = await owner_resource_snapshot(
+        db, resource_type="activity_disposition", resource_id=activity_id
+    )
+    path = tmp_path / "delegation.json"
+    _write_manifest(
+        path,
+        resource_type="activity_disposition",
+        resource_id=activity_id,
+        resource_sha256=snapshot["resource_sha256"],
+    )
+    receipt = await apply_owner_delegation_manifest(
+        db, load_owner_delegation_manifest(path)
+    )
+    delegation_id = int(receipt["delegation_ids"][0])
+
+    # The delegated write itself changes the resource image ...
+    await db.execute(
+        "UPDATE activity_log SET sync_disposition = 'no_durable_target', "
+        "sync_disposition_by = 'codex' WHERE id = ?",
+        (activity_id,),
+    )
+    result_snapshot = await owner_resource_snapshot(
+        db, resource_type="activity_disposition", resource_id=activity_id
+    )
+    assert result_snapshot["resource_sha256"] != snapshot["resource_sha256"]
+    # ... and records the new image on the consumption receipt.
+    await consume_owner_delegation(
+        db,
+        delegation_id=delegation_id,
+        actor="codex",
+        action="record_disposition:no_durable_target",
+        result_sha256=result_snapshot["resource_sha256"],
+    )
+    await db.commit()
+
+    consumed = await resolve_owner_delegation(
+        db,
+        resource_type="activity_disposition",
+        resource_id=activity_id,
+        original_owner="cc",
+        delegated_to="codex",
+    )
+    assert consumed is not None
+    assert consumed["state"] == "consumed"
+    assert consumed["consumed_action"] == "record_disposition:no_durable_target"
+
+    # Any change after the consumption still fails closed.
+    await db.execute(
+        "UPDATE activity_log SET canonical_key = 'changed/key' WHERE id = ?",
+        (activity_id,),
+    )
+    await db.commit()
+    with pytest.raises(OwnerDelegationError, match="delegation.resource_changed"):
+        await resolve_owner_delegation(
+            db,
+            resource_type="activity_disposition",
+            resource_id=activity_id,
+            original_owner="cc",
+            delegated_to="codex",
+        )
+
+
+async def test_owner_resource_snapshot_accepts_lowercase_shipped_tag(
+    db: aiosqlite.Connection,
+) -> None:
+    cursor = await db.execute(
+        """
+        INSERT INTO activity_log (source, timestamp, project_name, summary, tags)
+        VALUES ('cc', '2026-08-23', 'Legacy', 'pre-normalization row', '["shipped"]')
+        """
+    )
+    assert cursor.lastrowid is not None
+    await db.commit()
+
+    snapshot = await owner_resource_snapshot(
+        db, resource_type="activity_disposition", resource_id=int(cursor.lastrowid)
+    )
+    assert snapshot["image"]["tags"] == ["shipped"]

@@ -1583,3 +1583,22 @@ async def test_migration_v11_to_v12_is_idempotent(tmp_path: Path) -> None:
         assert index_row is not None
     finally:
         await second.close()
+
+
+async def test_extension_ddl_repairs_a_partial_upgrade(tmp_path: Path) -> None:
+    """A run that created owner_delegations but not the rest must self-heal."""
+    path = tmp_path / "partial.db"
+    db = await open_db(path)
+    await db.execute("DROP TABLE owner_delegation_consumptions")
+    await db.execute("DROP INDEX idx_owner_delegations_target")
+    await db.commit()
+    await db.close()
+
+    db = await open_db(path)
+    cursor = await db.execute("SELECT name FROM sqlite_master")
+    names = {row[0] for row in await cursor.fetchall()}
+    await db.close()
+
+    assert "owner_delegations" in names
+    assert "owner_delegation_consumptions" in names
+    assert "idx_owner_delegations_target" in names

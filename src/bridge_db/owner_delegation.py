@@ -98,7 +98,9 @@ async def owner_resource_snapshot(
         if not all(isinstance(tag, str) for tag in parsed_tag_list):
             raise OwnerDelegationError("delegation.resource_invalid")
         tags = cast(list[str], parsed_tag_list)
-        if "SHIPPED" not in tags:
+        # Same case rule as record_disposition: protected tags are
+        # uppercased on write, but rows that predate that still count.
+        if "SHIPPED" not in {tag.upper() for tag in tags}:
             raise OwnerDelegationError("delegation.resource_not_shipped")
         image = {
             "resource_type": resource_type,
@@ -371,8 +373,18 @@ async def resolve_owner_delegation(
         row["original_owner"] != original_owner
         or observed["image"]["original_owner"] != original_owner
         or row["delegated_to"] != delegated_to
-        or row["resource_sha256"] != observed["resource_sha256"]
     ):
+        raise OwnerDelegationError("delegation.resource_changed")
+    # An active grant must still see the exact image it was issued against.
+    # A consumed grant has normally changed that image by design (the
+    # delegated write is part of the resource), so it may also match the
+    # result image its consumption receipt recorded. That keeps an exact
+    # retry after a lost response resolvable, while any third state of the
+    # resource still fails closed.
+    accepted = {row["resource_sha256"]}
+    if row["consumed_at"] is not None:
+        accepted.add(row["result_sha256"])
+    if observed["resource_sha256"] not in accepted:
         raise OwnerDelegationError("delegation.resource_changed")
     return {
         "delegation_id": int(row["id"]),

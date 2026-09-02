@@ -45,6 +45,7 @@ async def _current_anchor(
     corrupt_fts: bool = False,
     canonical_key: str = "example/bridge-db",
     pending_projection: bool = False,
+    include_activity: bool = True,
 ) -> Path:
     registry = tmp_path / "project-registry.json"
     _write_registry(registry)
@@ -61,20 +62,23 @@ async def _current_anchor(
         "career",
         fts_text_for_section("career", "rehearsal fixture"),
     )
-    activity = await insert_activity_row(
-        db,
-        source="codex",
-        timestamp="2026-08-23",
-        project_name="BridgeDB",
-        summary="rehearsal fixture",
-        canonical_key=canonical_key,
-    )
-    assert activity.activity_id > 0
+    activity_id = 0
+    if include_activity:
+        activity = await insert_activity_row(
+            db,
+            source="codex",
+            timestamp="2026-08-23",
+            project_name="BridgeDB",
+            summary="rehearsal fixture",
+            canonical_key=canonical_key,
+        )
+        activity_id = activity.activity_id
+        assert activity_id > 0
     if corrupt_fts:
         await db.execute(
             "UPDATE content_index SET text = 'corrupt but identity-preserving' "
             "WHERE source_type = 'activity' AND source_id = ?",
-            (str(activity.activity_id),),
+            (str(activity_id),),
         )
     content = await build_markdown(db)
     await db.execute(
@@ -236,3 +240,21 @@ async def test_recovery_rehearsal_rejects_pending_projection_job(
     assert result["ready"] is False
     assert result["projection_export_reconstruction"]["pending_projection_jobs"] == 1
     assert result["projection_export_reconstruction"]["ready"] is False
+
+
+async def test_recovery_rehearsal_passes_with_empty_source_tables(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid registry and no rows to map is ready, not a failed rehearsal."""
+    db_path = await _current_anchor(tmp_path, monkeypatch, include_activity=False)
+
+    result = await rehearse_recovery(
+        db_path,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+
+    assert result["source_mappings"]["registry_present"] is True
+    assert result["source_mappings"]["drift_count"] == 0
+    assert result["source_mappings"]["ready"] is True
+    assert result["ready"] is True, result

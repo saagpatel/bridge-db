@@ -1255,12 +1255,14 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
         )
     # Snapshot refusals are an additive v1 extension over the v23 core schema.
     # Exact previous merged generation d7272d4 safely ignores and preserves it.
-    if not await _table_exists(db, "snapshot_refusals"):
-        await db.executescript(_SNAPSHOT_REFUSAL_EXTENSION_DDL)
-        await db.commit()
-    if not await _table_exists(db, "owner_delegations"):
-        await db.executescript(_OWNER_DELEGATION_EXTENSION_DDL)
-        await db.commit()
+    # Both extension scripts are IF NOT EXISTS throughout, so they run on
+    # every open. Gating them on their first table would freeze a partial
+    # upgrade: a script interrupted after creating owner_delegations but
+    # before its consumption table or index would never be repaired, and
+    # health collection would fail on a missing table instead (PR #148).
+    await db.executescript(_SNAPSHOT_REFUSAL_EXTENSION_DDL)
+    await db.executescript(_OWNER_DELEGATION_EXTENSION_DDL)
+    await db.commit()
     logger.debug("Schema at v%d", current_version)
 
 
