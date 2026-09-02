@@ -258,6 +258,70 @@ def _bootstrap_fixture(
     return source, root, first_id, second_id, third_id, fourth_id
 
 
+def test_stage_binds_launcher_shebang_to_resolved_interpreter(tmp_path: Path) -> None:
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    resolved = _stage_python().resolve(strict=True)
+
+    staged = _stage(source, root, sha)
+    generation_id = str(staged["generation_id"])
+    release = root / "releases" / generation_id
+    manifest = json.loads((release / "generation-manifest.json").read_text())
+
+    shebang = (
+        (release / "bin" / "bridge-db-mcp").read_text(encoding="utf-8").splitlines()[0]
+    )
+    assert shebang == f"#!{resolved}"
+    assert manifest["python_executable_resolved"] == str(resolved)
+    assert verify_generation(root, generation_id)["state"] == "verified"
+
+
+def test_verify_accepts_legacy_launcher_bound_to_activating_executable(
+    tmp_path: Path,
+) -> None:
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    executable = _stage_python()
+    if executable == executable.resolve(strict=True):
+        pytest.skip("legacy form is only distinct when the stage python is a symlink")
+
+    staged = _stage(source, root, sha)
+    generation_id = str(staged["generation_id"])
+    release = root / "releases" / generation_id
+    launcher = release / "bin" / "bridge-db-mcp"
+    manifest_path = release / "generation-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    legacy = execution_generation._make_launcher(  # pyright: ignore[reportPrivateUsage]
+        release_path=release,
+        shebang_python=executable,
+        python_resolved=executable.resolve(strict=True),
+        python_sha256=str(manifest["python_sha256"]),
+        generation_id=generation_id,
+    )
+    assert legacy != launcher.read_bytes()
+    manifest["launcher_sha256"] = hashlib.sha256(legacy).hexdigest()
+    for path, mode in (
+        (release, 0o755),
+        (release / "bin", 0o755),
+        (launcher, 0o755),
+        (manifest_path, 0o644),
+    ):
+        path.chmod(mode)
+    launcher.write_bytes(legacy)
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    for path, mode in (
+        (manifest_path, 0o444),
+        (launcher, 0o555),
+        (release / "bin", 0o555),
+        (release, 0o555),
+    ):
+        path.chmod(mode)
+
+    assert launcher.read_text(encoding="utf-8").splitlines()[0] == f"#!{executable}"
+    assert verify_generation(root, generation_id)["state"] == "verified"
+
+
 def test_stage_is_content_addressed_immutable_and_idempotent(tmp_path: Path) -> None:
     source, sha = _source_repo(tmp_path)
     root = tmp_path / "runtime"
@@ -396,7 +460,7 @@ def test_pre_shared_runtime_generation_remains_verified_and_rollbackable(
     )
     legacy_launcher = execution_generation._make_launcher(  # pyright: ignore[reportPrivateUsage]
         release_path=runtime_path.parent,
-        python_executable=Path(legacy_manifest["python_executable"]),
+        shebang_python=Path(legacy_manifest["python_executable"]),
         python_resolved=Path(legacy_manifest["python_executable_resolved"]),
         python_sha256=legacy_manifest["python_sha256"],
         generation_id=legacy_id,
