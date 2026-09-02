@@ -397,6 +397,7 @@ async def test_export_bootstrap_round_trips_legacy_nested_h2_sections(
     )
     bridge_path = tmp_path / "claude_ai_context.md"
     bridge_path.write_text(legacy, encoding="utf-8")
+    await db.execute("BEGIN IMMEDIATE")
     snapshot: list[exp_mod.ContextExportSnapshot] = []
     rendered = await exp_mod.build_markdown(db, context_snapshot=snapshot)
 
@@ -452,6 +453,7 @@ async def test_export_receipt_uses_rendered_section_snapshot(
             ctx=ctx,
         )
 
+        await db.execute("BEGIN IMMEDIATE")
         await exp_mod.export_bridge_file(
             db,
             rendered,
@@ -478,6 +480,197 @@ async def test_export_receipt_uses_rendered_section_snapshot(
         assert stored["content"] == "committed v2"
     finally:
         cfg.BRIDGE_FILE_PATH = original_path
+
+
+async def test_manual_export_does_not_complete_pending_projection_jobs(
+    db: aiosqlite.Connection,
+    all_fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(exp_mod.config, "BRIDGE_FILE_PATH", tmp_path / "bridge.md")
+    await db.execute(
+        "INSERT INTO bridge_projection_jobs (reason, target_key) VALUES (?, ?)",
+        ("shipped_disposition", "123"),
+    )
+    await db.commit()
+
+    transaction_states: list[bool] = []
+    original_build = exp_mod.build_markdown
+
+    async def observe_transaction(*args: Any, **kwargs: Any) -> str:
+        transaction_states.append(db.in_transaction)
+        return await original_build(*args, **kwargs)
+
+    monkeypatch.setattr(exp_mod, "build_markdown", observe_transaction)
+    result = await all_fns["export_bridge_markdown"](
+        ctx=make_ctx(db, principal="codex")
+    )
+
+    job = await (
+        await db.execute(
+            "SELECT status, attempts FROM bridge_projection_jobs"
+        )
+    ).fetchone()
+    assert result["projection_job_id"] is None
+    assert transaction_states == [True]
+    assert job is not None
+    assert dict(job) == {"status": "pending", "attempts": 0}
+
+
+async def test_projection_retry_is_exact_and_owner_bound(
+    db: aiosqlite.Connection,
+    all_fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(exp_mod.config, "BRIDGE_FILE_PATH", tmp_path / "bridge.md")
+    activity = await insert_activity_row(
+        db,
+        source="cc",
+        timestamp="2026-08-23",
+        project_name="OwnerBoundProjection",
+        summary="shipped",
+        tags=["SHIPPED"],
+    )
+    job_cursor = await db.execute(
+        "INSERT INTO bridge_projection_jobs (reason, target_key) VALUES (?, ?)",
+        ("shipped_disposition", str(activity.activity_id)),
+    )
+    assert job_cursor.lastrowid is not None
+    job_id = int(job_cursor.lastrowid)
+    await db.commit()
+
+    with pytest.raises(ToolError, match="belongs to 'cc', not 'codex'"):
+        await all_fns["export_bridge_markdown"](
+            projection_job_id=job_id,
+            ctx=make_ctx(db, principal="codex"),
+        )
+
+    transaction_states: list[bool] = []
+    original_build = exp_mod.build_markdown
+
+    async def observe_transaction(*args: Any, **kwargs: Any) -> str:
+        transaction_states.append(db.in_transaction)
+        return await original_build(*args, **kwargs)
+
+    monkeypatch.setattr(exp_mod, "build_markdown", observe_transaction)
+    result = await all_fns["export_bridge_markdown"](
+        projection_job_id=job_id,
+        ctx=make_ctx(db, principal="cc"),
+    )
+    job = await (
+        await db.execute(
+            "SELECT status, attempts FROM bridge_projection_jobs WHERE id = ?",
+            (job_id,),
+        )
+    ).fetchone()
+    assert result["projection_job_id"] == job_id
+    assert transaction_states == [True]
+    assert job is not None
+    assert dict(job) == {"status": "completed", "attempts": 1}
+
+
+async def test_export_bridge_file_requires_lock_before_render(
+    db: aiosqlite.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge_path = tmp_path / "bridge.md"
+    monkeypatch.setattr(exp_mod.config, "BRIDGE_FILE_PATH", bridge_path)
+    snapshot: list[exp_mod.ContextExportSnapshot] = []
+    content = await exp_mod.build_markdown(db, context_snapshot=snapshot)
+
+    with pytest.raises(
+        exp_mod.BridgeExportSafetyError,
+        match="transaction acquired before rendering",
+    ):
+        await exp_mod.export_bridge_file(
+            db,
+            content,
+            snapshot,
+            principal="codex",
+            trigger="manual",
+        )
+
+    assert not bridge_path.exists()
+
+
+async def test_projection_retry_reconciles_file_written_before_db_commit(
+    db: aiosqlite.Connection,
+    all_fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge_path = tmp_path / "bridge.md"
+    monkeypatch.setattr(exp_mod.config, "BRIDGE_FILE_PATH", bridge_path)
+
+    await db.execute("BEGIN IMMEDIATE")
+    baseline_snapshot: list[exp_mod.ContextExportSnapshot] = []
+    baseline = await exp_mod.build_markdown(db, context_snapshot=baseline_snapshot)
+    await exp_mod.export_bridge_file(
+        db,
+        baseline,
+        baseline_snapshot,
+        principal="codex",
+        trigger="manual",
+    )
+    await db.commit()
+
+    activity = await insert_activity_row(
+        db,
+        source="cc",
+        timestamp="2026-08-23",
+        project_name="CrashWindowProjection",
+        summary="shipped",
+        tags=["SHIPPED"],
+    )
+    job_cursor = await db.execute(
+        "INSERT INTO bridge_projection_jobs (reason, target_key) VALUES (?, ?)",
+        ("shipped_disposition", str(activity.activity_id)),
+    )
+    assert job_cursor.lastrowid is not None
+    job_id = int(job_cursor.lastrowid)
+    await db.commit()
+
+    await db.execute("BEGIN IMMEDIATE")
+    crash_snapshot: list[exp_mod.ContextExportSnapshot] = []
+    intended = await exp_mod.build_markdown(db, context_snapshot=crash_snapshot)
+    await exp_mod.export_bridge_file(
+        db,
+        intended,
+        crash_snapshot,
+        principal="cc",
+        trigger="shipped_disposition",
+        projection_job_id=job_id,
+    )
+    await db.rollback()
+
+    assert bridge_path.read_text(encoding="utf-8") == intended
+    pending = await (
+        await db.execute(
+            "SELECT status FROM bridge_projection_jobs WHERE id = ?", (job_id,)
+        )
+    ).fetchone()
+    assert pending is not None and pending["status"] == "pending"
+
+    result = await all_fns["export_bridge_markdown"](
+        projection_job_id=job_id,
+        ctx=make_ctx(db, principal="cc"),
+    )
+
+    completed = await (
+        await db.execute(
+            "SELECT status, attempts, projected_content_sha256 "
+            "FROM bridge_projection_jobs WHERE id = ?",
+            (job_id,),
+        )
+    ).fetchone()
+    assert result["projection_job_id"] == job_id
+    assert completed is not None
+    assert completed["status"] == "completed"
+    assert completed["attempts"] == 1
+    assert completed["projected_content_sha256"] == exp_mod.content_sha256(intended)
 
 
 async def test_export_frontmatter_present(db: aiosqlite.Connection) -> None:

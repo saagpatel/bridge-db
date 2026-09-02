@@ -22,6 +22,12 @@ from bridge_db.db import (
     gc_fts_orphans,
     upsert_fts_entry,
 )
+from bridge_db.owner_delegation import (
+    OwnerDelegationError,
+    consume_owner_delegation,
+    owner_resource_snapshot,
+    resolve_owner_delegation,
+)
 
 SnapshotRetentionPolicy = Literal["preserve_existing", "prune_oldest"]
 SnapshotRefusalDecision = Literal[
@@ -321,14 +327,40 @@ async def acknowledge_snapshot_refusal_record(
                 "refusal_id": refusal_id,
                 "mutation_performed": False,
             }
+        delegation: dict[str, Any] | None = None
         if row["caller"] != caller:
-            await db.rollback()
-            return {
-                "ok": False,
-                "reason_code": "snapshot.refusal_owner_mismatch",
-                "refusal_id": refusal_id,
-                "mutation_performed": False,
-            }
+            try:
+                delegation = await resolve_owner_delegation(
+                    db,
+                    resource_type="snapshot_refusal",
+                    resource_id=refusal_id,
+                    original_owner=str(row["caller"]),
+                    delegated_to=caller,
+                )
+            except OwnerDelegationError as exc:
+                await db.rollback()
+                return {
+                    "ok": False,
+                    "reason_code": exc.reason_code,
+                    "refusal_id": refusal_id,
+                    "mutation_performed": False,
+                }
+            if delegation is None:
+                await db.rollback()
+                return {
+                    "ok": False,
+                    "reason_code": "snapshot.refusal_owner_mismatch",
+                    "refusal_id": refusal_id,
+                    "mutation_performed": False,
+                }
+            if delegation["state"] != "active":
+                await db.rollback()
+                return {
+                    "ok": False,
+                    "reason_code": "delegation.already_consumed",
+                    "refusal_id": refusal_id,
+                    "mutation_performed": False,
+                }
 
         existing = row["acknowledgement_state"]
         next_state = _DECISION_NEXT_STATE[decision]
@@ -357,6 +389,28 @@ async def acknowledge_snapshot_refusal_record(
             """,
             (decision, caller, next_state, refusal_id),
         )
+        if delegation is not None:
+            result_snapshot = await owner_resource_snapshot(
+                db,
+                resource_type="snapshot_refusal",
+                resource_id=refusal_id,
+            )
+            try:
+                await consume_owner_delegation(
+                    db,
+                    delegation_id=int(delegation["delegation_id"]),
+                    actor=caller,
+                    action=f"acknowledge_snapshot_refusal:{decision}",
+                    result_sha256=str(result_snapshot["resource_sha256"]),
+                )
+            except OwnerDelegationError as exc:
+                await db.rollback()
+                return {
+                    "ok": False,
+                    "reason_code": exc.reason_code,
+                    "refusal_id": refusal_id,
+                    "mutation_performed": False,
+                }
         await db.commit()
     except Exception:
         await db.rollback()
@@ -369,4 +423,12 @@ async def acknowledge_snapshot_refusal_record(
         "next_state": next_state,
         "mutation_performed": True,
         "deletion_authorized": False,
+        **(
+            {
+                "delegation_id": int(delegation["delegation_id"]),
+                "original_owner": row["caller"],
+            }
+            if delegation is not None
+            else {}
+        ),
     }

@@ -76,6 +76,28 @@ fails closed before a pending journal or pointer is written. Rollback remains
 the safety path and does not require new replay evidence; its activation state
 records `not_required_for_rollback` rather than implying replay-policy proof.
 
+### One-shot bootstrap adoption
+
+`bootstrap-adopt` is a separate migration boundary for an installed pointer map
+whose legacy generations can still be identified exactly but no longer pass the
+current full verifier. It does not weaken `activate`, `rollback`, `verify`, or
+normal pending-journal recovery. The operator must bind both existing pointers
+to exact generation IDs and exact manifest SHA-256 values. Those legacy releases
+remain untouched and are recorded in an append-only
+`BridgeExecutionBootstrapAdoptionReceiptV1` as preserved, integrity-unverified
+evidence; neither is claimed as executable rollback.
+
+Before writing a journal, the command fully verifies two distinct, non-legacy
+generations: the requested current generation and a separately staged rollback
+generation. It also requires target-bound tenancy activation evidence and the
+same current recovery anchor and seal used by ordinary activation. The atomic
+transition sets `current` to the requested generation and `previous` to the
+verified rollback generation. Its extended activation journal recognizes only
+the exact before map, the one in-order partial map, or the exact committed map.
+A retry restores the exact legacy pointer map after a before/partial transition,
+or finalizes the receipt after a committed transition; arbitrary maps fail
+closed with the journal retained.
+
 ## Commands
 
 Run from the exact clean reviewed checkout, with an existing dependency
@@ -95,6 +117,16 @@ python -m bridge_db.execution_generation verify \
 python -m bridge_db.execution_generation activate \
   --root /absolute/private/path/to/bridge-db-runtime \
   --generation-id <generation-id> \
+  --tenancy-evidence /absolute/private/path/to/tenancy-activation-evidence.json
+
+python -m bridge_db.execution_generation bootstrap-adopt \
+  --root /absolute/private/path/to/bridge-db-runtime \
+  --generation-id <fully-verified-new-current-generation> \
+  --rollback-generation-id <distinct-fully-verified-rollback-generation> \
+  --expected-current-generation <legacy-current-generation> \
+  --expected-previous-generation <legacy-previous-generation> \
+  --expected-current-manifest-sha256 <legacy-current-manifest-sha256> \
+  --expected-previous-manifest-sha256 <legacy-previous-manifest-sha256> \
   --tenancy-evidence /absolute/private/path/to/tenancy-activation-evidence.json
 
 python -m bridge_db.execution_generation readback \
@@ -227,16 +259,6 @@ is bracketed by request accounting. Representative Codex, Claude, and Personal
 Ops replay rows derive per-owner process-count, lifetime, RSS, and idle-review
 budgets; pooling is deliberately not introduced without live evidence that
 lifecycle cleanup is insufficient.
-
-An already-live lease recorded as `owner=unknown` can be corrected only through
-the separate `plan-owner-correction` and `apply-owner-correction` commands. The
-plan binds the exact lease identity, zero-active-request guard, PID/start
-identity, unchanged recorded ancestry, and the exact parent process identity
-and command. Apply rechecks every binding and writes a mode-`0400`, append-only
-owner projection under `owner-corrections`; it never rewrites the source lease
-or terminates a process. Inventory and lifecycle policy use the verified
-projection while retaining the recorded owner for audit. Any drift or malformed
-projection fails closed.
 
 The 2026-08-05 live selection snapshot observed approximately 30 concurrent
 stdio server pairs: the ChatGPT app-server parent (PID 15780 at observation

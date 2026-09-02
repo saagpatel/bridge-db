@@ -39,7 +39,9 @@ clients and for any Claude.ai workflow that has not moved to direct MCP calls.
 
 - Direct MCP writes update SQLite first.
 - Consumers call `export_bridge_markdown` after DB writes to keep the fallback file
-  current.
+  current. Export takes SQLite's writer slot before rendering and holds it
+  through atomic file publication and the database receipt commit, so the file
+  bytes and recorded versions come from one locked database state.
 - Exports delimit each editable section with explicit
   `bridge-db:owned-section` HTML markers, so nested `##` headings remain section
   content instead of being mistaken for document boundaries.
@@ -57,6 +59,13 @@ whole-file export state is absent, even if the editable section text matches the
 DB. Do not run `sync_from_file` merely to clear that state: first verify that the
 DB and legacy file contain the same complete owned sections, then use
 `export_bridge_markdown` to establish the tracked projection.
+
+An interrupted export can leave an explicit pending projection job if the file
+was published before its transaction committed. Recovery must use the
+authenticated owner that created the job and name that exact
+`projection_job_id`. The retry re-renders under the writer lock and may
+reconcile an already-published byte-for-byte match idempotently. An ordinary
+export does not borrow an owner, claim a pending job, or silently complete one.
 
 **Current limitation:** fallback file edits are synchronized into the DB on the next
 Claude Code startup or explicit `sync_from_file` call, not continuously. That closes
@@ -140,14 +149,7 @@ process. Forward activation requires a private
 `BridgeMcpTenancyActivationEvidenceV1` bundle, recomputes the policy from its
 exact replay rows, and requires the documented client and lifecycle-scenario
 coverage for the exact requested generation before any pointer write. Rollback
-remains the safety path and does not require new replay evidence.
-
-An append-only owner-correction overlay may project one exact live
-`owner=unknown` lease to a required owner only after zero-active-request,
-PID/start identity, unchanged ancestry, and exact parent identity/command checks
-all pass twice. The raw lease remains unchanged; drift or malformed correction
-evidence fails inventory closed.
-
+remains the safety path and does not require new replay evidence. Snapshot
 Snapshot refusal storage stays an additive extension over core SQLite
 `user_version=23`, preserving open/read compatibility with exact previous
 merged generation `d7272d489873faa5ed84c81734636ffc8cecb095`; rollback loses
@@ -285,9 +287,10 @@ sources.
 
 Activity entries carry both `timestamp` and `created_at`. `timestamp` is the
 caller-supplied logical activity date or timestamp; `created_at` is the UTC
-insertion timestamp. For `since` filters on activity reads, bridge-db matches
-either field, so `since="YYYY-MM-DD"` includes rows inserted on that UTC date
-even when the logical activity date is the previous operator-local day.
+insertion timestamp. `since` filters on activity reads match only `created_at`,
+so caller-supplied event time cannot control shared recency. A
+`since="YYYY-MM-DD"` filter still includes rows inserted on that UTC date even
+when the logical activity date is the previous operator-local day.
 
 `record_disposition(caller, activity_id, disposition, ...)` writes a SHIPPED
 row's single terminal sync disposition onto the `activity_log` `sync_*` columns
@@ -297,12 +300,27 @@ row's single terminal sync disposition onto the `activity_log` `sync_*` columns
 path that claims a durable downstream sync. A policy `disposition`
 (`unsynced_by_policy` / `no_durable_target` / `superseded_without_receipt` /
 `declined_mapping`) also requires the bound source owner plus a `reason`, does
-not add `PROCESSED`, and does not claim sync. Cross-source receipt verification
-or policy adjudication requires a future explicit delegation contract and
-cannot claim the source caller. A row already carrying `synced` proof cannot be downgraded to a
-policy disposition. Dispositioned rows do not re-appear on repeat sync runs:
+not add `PROCESSED`, and does not claim sync. The exceptional cross-source path
+is `BridgeOwnerDelegationManifestV1`: an operator may grant one named principal
+one-time authority over an exact activity row image. The manifest binds resource
+type, ID, original owner, and SHA-256 of metadata-only current state. Applying it
+requires the TTY ceremony
+`--apply-owner-delegation-manifest ABSOLUTE_PATH`; any changed row, mismatched
+owner, reused target, non-private/symlink manifest, or replay conflict fails the
+whole transaction. A delegated disposition keeps `activity_log.source`
+unchanged, records the real delegate in `sync_disposition_by`, and appends one
+`owner_delegation_consumptions` receipt in the same transaction. It never lets
+the delegate claim the source caller. A row already carrying `synced` proof
+cannot be downgraded to a policy disposition. Dispositioned rows do not
+re-appear on repeat sync runs:
 `get_shipped_events(unprocessed_only=True)` excludes both `PROCESSED` rows and
 any row with a `sync_disposition`.
+
+The same exact-resource contract can authorize acknowledgement of one
+`snapshot_refusals` row. The refusal's `caller` remains unchanged,
+`acknowledged_by` records the delegate, and the acknowledgement never grants
+snapshot deletion. Delegation does not extend to snapshot creation, retention
+pruning, arbitrary activity writes, or any resource omitted from the manifest.
 
 `get_shipped_events` also takes a `limit` param (default 200, max 1000, newest
 first) alongside `since` and `unprocessed_only`, so a client passing its own

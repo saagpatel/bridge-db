@@ -6,9 +6,11 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
+from pydantic import Field
 
 from bridge_db import clock, config
 from bridge_db.auth import require_bound_principal
@@ -437,16 +439,43 @@ async def export_bridge_file(
     projection_job_id: int | None = None,
 ) -> int:
     """CAS-protect and durably attribute one complete fallback-file export."""
+    if not db.in_transaction:
+        raise BridgeExportSafetyError(
+            "Bridge export requires a caller-held write transaction acquired "
+            "before rendering"
+        )
+    if projection_job_id is not None:
+        cursor = await db.execute(
+            "SELECT status FROM bridge_projection_jobs WHERE id = ?",
+            (projection_job_id,),
+        )
+        projection_job = await cursor.fetchone()
+        if projection_job is None:
+            await db.rollback()
+            raise BridgeExportSafetyError(
+                f"Projection job {projection_job_id} does not exist"
+            )
+        if projection_job["status"] != "pending":
+            await db.rollback()
+            raise BridgeExportSafetyError(
+                f"Projection job {projection_job_id} is not pending"
+            )
+
     path = config.BRIDGE_FILE_PATH
     current_content = path.read_text(encoding="utf-8") if path.exists() else None
+    current_hash = content_sha256(current_content) if current_content is not None else None
+    intended_hash = content_sha256(content)
     cursor = await db.execute(
         "SELECT exported_content_sha256 FROM bridge_file_export_state WHERE singleton = 1"
     )
     state = await cursor.fetchone()
     expected_hash = state["exported_content_sha256"] if state is not None else None
 
+    projection_already_rendered = (
+        projection_job_id is not None and current_hash == intended_hash
+    )
     if current_content is not None and expected_hash is not None:
-        if content_sha256(current_content) != expected_hash:
+        if current_hash != expected_hash and not projection_already_rendered:
             raise BridgeExportSafetyError(
                 "Refusing to overwrite the fallback bridge file because it changed "
                 "since the last export; import or merge the file edits first."
@@ -492,7 +521,8 @@ async def export_bridge_file(
                 "or merge its owned-section edits first."
             )
 
-    write_bridge_file(content)
+    if not projection_already_rendered:
+        write_bridge_file(content)
     exported_context_sections = await record_context_export_state(db, context_snapshot)
     await db.execute(
         """
@@ -503,20 +533,25 @@ async def export_bridge_file(
             exported_content_sha256 = excluded.exported_content_sha256,
             exported_at = excluded.exported_at
         """,
-        (content_sha256(content),),
+        (intended_hash,),
     )
-    await db.execute(
-        """
-        UPDATE bridge_projection_jobs SET
-            status = 'completed',
-            attempts = attempts + 1,
-            error_category = NULL,
-            projected_content_sha256 = ?,
-            completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-        WHERE status = 'pending'
-        """,
-        (content_sha256(content),),
-    )
+    if projection_job_id is not None:
+        projection_cursor = await db.execute(
+            """
+            UPDATE bridge_projection_jobs SET
+                status = 'completed',
+                attempts = attempts + 1,
+                error_category = NULL,
+                projected_content_sha256 = ?,
+                completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ? AND status = 'pending'
+            """,
+            (intended_hash, projection_job_id),
+        )
+        if projection_cursor.rowcount != 1:
+            raise BridgeExportSafetyError(
+                f"Projection job {projection_job_id} changed before completion"
+            )
     exported_context_sections = len(context_snapshot)
     await db.execute(
         """
@@ -529,8 +564,8 @@ async def export_bridge_file(
             principal,
             trigger,
             projection_job_id,
-            expected_hash,
-            content_sha256(content),
+            current_hash if projection_already_rendered else expected_hash,
+            intended_hash,
             exported_context_sections,
             _utf8_byte_count(content),
         ),
@@ -541,22 +576,69 @@ async def export_bridge_file(
 def register(mcp: FastMCP) -> None:
     @mcp.tool()
     async def export_bridge_markdown(
+        projection_job_id: Annotated[
+            int | None,
+            Field(
+                ge=1,
+                description=(
+                    "Exact pending shipped-disposition projection job to retry. "
+                    "Omit for a manual export that does not complete queued jobs."
+                ),
+            ),
+        ] = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         """Regenerate the markdown bridge file from the database. Call after any write operation."""
         principal = require_bound_principal(ctx, tool="export_bridge_markdown")
         db = get_db(ctx)
-        context_snapshot: list[ContextExportSnapshot] = []
-        content = await build_markdown(db, context_snapshot=context_snapshot)
-
-        exported_context_sections = await export_bridge_file(
-            db,
-            content,
-            context_snapshot,
-            principal=principal,
-            trigger="manual",
-        )
-        await db.commit()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            if projection_job_id is not None:
+                cursor = await db.execute(
+                    """
+                    SELECT job.status, job.reason, activity.source
+                    FROM bridge_projection_jobs AS job
+                    LEFT JOIN activity_log AS activity
+                      ON job.reason = 'shipped_disposition'
+                     AND job.target_key = CAST(activity.id AS TEXT)
+                    WHERE job.id = ?
+                    """,
+                    (projection_job_id,),
+                )
+                job = await cursor.fetchone()
+                if job is None:
+                    raise ToolError(
+                        f"Projection job {projection_job_id} does not exist"
+                    )
+                if job["status"] != "pending":
+                    raise ToolError(
+                        f"Projection job {projection_job_id} is not pending"
+                    )
+                if job["reason"] != "shipped_disposition" or job["source"] is None:
+                    raise ToolError(
+                        f"Projection job {projection_job_id} has no verifiable source owner"
+                    )
+                if job["source"] != principal:
+                    raise ToolError(
+                        f"Projection job {projection_job_id} belongs to "
+                        f"'{job['source']}', not '{principal}'"
+                    )
+            context_snapshot: list[ContextExportSnapshot] = []
+            content = await build_markdown(db, context_snapshot=context_snapshot)
+            exported_context_sections = await export_bridge_file(
+                db,
+                content,
+                context_snapshot,
+                principal=principal,
+                trigger=(
+                    "projection_retry" if projection_job_id is not None else "manual"
+                ),
+                projection_job_id=projection_job_id,
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
         bridge_path = config.BRIDGE_FILE_PATH
         byte_count = _utf8_byte_count(content)
 
@@ -566,4 +648,5 @@ def register(mcp: FastMCP) -> None:
             "path": str(bridge_path),
             "bytes": byte_count,
             "exported_context_sections": exported_context_sections,
+            "projection_job_id": projection_job_id,
         }

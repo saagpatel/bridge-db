@@ -112,7 +112,8 @@ def _fts_detail(fts_index: dict[str, Any]) -> str:
         f"expected={fts_index['expected']},"
         f" indexed={fts_index['indexed']},"
         f" missing={fts_index['missing']},"
-        f" orphaned={fts_index['orphaned']}"
+        f" orphaned={fts_index['orphaned']},"
+        f" content_mismatched={fts_index['content_mismatched']}"
     )
 
 
@@ -161,6 +162,7 @@ async def run_status(*, now: datetime | None = None) -> bool:
         f" handoffs={summary['row_counts']['pending_handoffs']},"
         f" snapshots={summary['row_counts']['system_snapshots']},"
         f" snapshot_refusals={summary['row_counts']['snapshot_refusals']},"
+        f" owner_delegations={summary['row_counts']['owner_delegations']},"
         f" costs={summary['row_counts']['cost_records']},"
         f" synced_shipped={summary['signals']['synced_shipped']}"
     )
@@ -175,9 +177,17 @@ async def run_status(*, now: datetime | None = None) -> bool:
         f"{summary['signals']['processed_shipped_without_receipt']},"
         f" fts_missing={summary['signals']['fts_missing']},"
         f" fts_orphaned={summary['signals']['fts_orphaned']},"
+        " fts_content_mismatched="
+        f"{summary['signals']['fts_content_mismatched']},"
         f" open_write_conflicts={summary['signals']['open_write_conflicts']},"
         " unacknowledged_snapshot_refusals="
         f"{summary['signals']['unacknowledged_snapshot_refusals']},"
+        " pending_projection_jobs="
+        f"{summary['signals']['pending_projection_job_count']},"
+        " active_owner_delegations="
+        f"{summary['signals']['active_owner_delegations']},"
+        " consumed_owner_delegations="
+        f"{summary['signals']['consumed_owner_delegations']},"
         f" audit_degraded={summary['signals']['audit_degraded']},"
         " evidence_disposition_degraded="
         f"{summary['signals']['evidence_disposition_degraded']},"
@@ -292,6 +302,10 @@ def _status_attention(summary: dict[str, Any]) -> str | None:
         notes.append(f"fts_missing={signals['fts_missing']}")
     if signals["fts_orphaned"]:
         notes.append(f"fts_orphaned={signals['fts_orphaned']}")
+    if signals["fts_content_mismatched"]:
+        notes.append(
+            f"fts_content_mismatched={signals['fts_content_mismatched']}"
+        )
     if signals["audit_degraded"]:
         notes.append("audit_degraded=true")
     if signals["evidence_disposition_degraded"]:
@@ -494,6 +508,20 @@ def run_verify_recovery_anchor() -> bool:
     return bool(result["ready"])
 
 
+async def run_recovery_rehearsal() -> bool:
+    """Run a disposable restore, reconstruction, and rollback rehearsal."""
+    from bridge_db import config
+    from bridge_db.db import SCHEMA_VERSION
+    from bridge_db.recovery_rehearsal import rehearse_recovery
+
+    result = await rehearse_recovery(
+        config.DB_PATH,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return bool(result["ready"])
+
+
 def run_rotate_recovery_anchor() -> bool:
     """Rotate a stale current anchor while preserving the superseded bundle."""
     from bridge_db import config
@@ -688,12 +716,32 @@ async def run_log_session_boundary(
     """Log a Claude Code session boundary through the normal activity + FTS path."""
     from bridge_db import config
     from bridge_db.audit import log_audit
+    from bridge_db.auth import require_cli_principal
     from bridge_db.db import collect_fts_index_metrics, insert_activity_row, open_db
+    from bridge_db.project_resolver import resolve as resolve_project
+
+    try:
+        owner = require_cli_principal("log_activity")
+    except PermissionError as exc:
+        print(f"session boundary refused: {exc}")
+        return False
+    if owner != "cc":
+        log_audit(
+            "log_session_boundary",
+            owner,
+            project_name,
+            ok=False,
+            detail="decision=refused reason=source_owner_mismatch required=cc",
+        )
+        print(f"session boundary refused: bound principal is '{owner}', required 'cc'")
+        return False
 
     ts = timestamp or clock.now().strftime("%Y-%m-%dT%H:%M:%SZ")
     summary = "CC session ended"
     if duration_minutes:
         summary = f"CC session ended ({duration_minutes}min)"
+    resolution = resolve_project(project_name)
+    canonical_key = resolution.canonical_key if resolution.matched else None
 
     db = await open_db(config.DB_PATH)
     try:
@@ -704,6 +752,7 @@ async def run_log_session_boundary(
             project_name=project_name,
             summary=summary,
             tags=["session-boundary"],
+            canonical_key=canonical_key,
         )
         activity_id = insert_result.activity_id
         await db.commit()
@@ -713,10 +762,13 @@ async def run_log_session_boundary(
 
     log_audit(
         "log_session_boundary",
-        "cc",
+        owner,
         project_name,
         ok=bool(metrics["ok"]),
-        detail=f"activity_id={activity_id} fts_missing={metrics['missing']}",
+        detail=(
+            f"activity_id={activity_id} fts_missing={metrics['missing']} "
+            f"canonical_key_recorded={canonical_key is not None}"
+        ),
     )
     print("bridge-db session boundary")
     print(f"  Logged: activity_id={activity_id}, project={project_name}")
@@ -1709,6 +1761,65 @@ async def run_restore_handoff_trust(handoff_id: int) -> bool:
     return True
 
 
+async def run_apply_owner_delegation_manifest(manifest_path: str) -> bool:
+    """Apply one exact-resource delegation manifest through an operator ceremony."""
+    from pathlib import Path
+
+    from bridge_db import config
+    from bridge_db.audit import log_audit
+    from bridge_db.db import open_db
+    from bridge_db.owner_delegation import (
+        OwnerDelegationError,
+        apply_owner_delegation_manifest,
+        load_owner_delegation_manifest,
+    )
+
+    if not _require_tty("apply-owner-delegation-manifest"):
+        return False
+    try:
+        manifest = load_owner_delegation_manifest(Path(manifest_path))
+    except OwnerDelegationError as exc:
+        print(f"refused: {exc.reason_code}")
+        return False
+    resource_count = len(manifest["resources"])
+    delegated_to = str(manifest["delegated_to"])
+    manifest_sha256 = str(manifest["manifest_sha256"])
+    print("BridgeDB exact-resource owner delegation")
+    print(f"  delegate: {delegated_to}")
+    print(f"  resources: {resource_count}")
+    print(f"  manifest_sha256: {manifest_sha256}")
+    print("  original custody will remain unchanged")
+    expected = f"delegate {resource_count} to {delegated_to}"
+    try:
+        confirmed = input(f"Type '{expected}' to grant one-time authority: ")
+    except EOFError:
+        confirmed = ""
+    if confirmed.strip() != expected:
+        print("delegation cancelled")
+        return False
+
+    db = await open_db(config.DB_PATH)
+    try:
+        receipt = await apply_owner_delegation_manifest(db, manifest)
+    except OwnerDelegationError as exc:
+        print(f"refused: {exc.reason_code}")
+        return False
+    finally:
+        await db.close()
+    log_audit(
+        "owner_delegation.apply_manifest",
+        "operator-cli",
+        None,
+        ok=True,
+        detail=(
+            f"manifest_sha256={manifest_sha256} resources={resource_count} "
+            f"delegated_to={delegated_to}"
+        ),
+    )
+    print(json.dumps(receipt, indent=2, sort_keys=True))
+    return True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="bridge-db")
     parser.add_argument(
@@ -1731,6 +1842,14 @@ def main() -> None:
         "--verify-recovery-anchor",
         action="store_true",
         help="Verify the current RecoveryAnchorV1 bundle using a disposable copy",
+    )
+    parser.add_argument(
+        "--rehearse-recovery",
+        action="store_true",
+        help=(
+            "Run a bounded disposable restore, ownership/FTS/mapping check, "
+            "bridge reconstruction, and rollback rehearsal"
+        ),
     )
     parser.add_argument(
         "--rotate-recovery-anchor",
@@ -1833,6 +1952,14 @@ def main() -> None:
         help="Restore one exact quarantined handoff recovery image (operator TTY only)",
     )
     parser.add_argument(
+        "--apply-owner-delegation-manifest",
+        metavar="ABSOLUTE_PATH",
+        help=(
+            "Grant one-time exact-resource authority from a reviewed manifest "
+            "without changing original custody (operator TTY only)"
+        ),
+    )
+    parser.add_argument(
         "--shared-runtime-status",
         action="store_true",
         help="Print a read-only shared-runtime broker/client inventory as JSON",
@@ -1910,6 +2037,8 @@ def main() -> None:
         sys.exit(0 if run_create_recovery_anchor() else 1)
     if args.verify_recovery_anchor:
         sys.exit(0 if run_verify_recovery_anchor() else 1)
+    if args.rehearse_recovery:
+        sys.exit(0 if asyncio.run(run_recovery_rehearsal()) else 1)
     if args.rotate_recovery_anchor:
         sys.exit(0 if run_rotate_recovery_anchor() else 1)
     if args.seal_recovery_batch:
@@ -1966,6 +2095,16 @@ def main() -> None:
         sys.exit(
             0
             if asyncio.run(run_restore_handoff_trust(args.restore_handoff_trust))
+            else 1
+        )
+    if args.apply_owner_delegation_manifest:
+        sys.exit(
+            0
+            if asyncio.run(
+                run_apply_owner_delegation_manifest(
+                    args.apply_owner_delegation_manifest
+                )
+            )
             else 1
         )
 

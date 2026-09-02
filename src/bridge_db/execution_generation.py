@@ -30,6 +30,7 @@ from bridge_db import clock
 GENERATION_SCHEMA = "BridgeExecutionGenerationV1"
 ACTIVATION_SCHEMA = "BridgeExecutionActivationV1"
 ACTIVATION_RECEIPT_SCHEMA = "BridgeExecutionActivationReceiptV1"
+BOOTSTRAP_ADOPTION_RECEIPT_SCHEMA = "BridgeExecutionBootstrapAdoptionReceiptV1"
 RUNTIME_DEPENDENCY_EVIDENCE_SCHEMA = "BridgeRuntimeDependencyEvidenceV1"
 RUNTIME_DEPENDENCY_BUNDLE_SCHEMA = "BridgeRuntimeDependencyBundleV1"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -97,6 +98,7 @@ DEFAULT_CONTRACT_PATHS = (
     "src/bridge_db/client_rebinding.py",
     "src/bridge_db/db.py",
     "src/bridge_db/execution_generation.py",
+    "src/bridge_db/owner_delegation.py",
     "src/bridge_db/secure_binding.py",
     "src/bridge_db/server.py",
     "src/bridge_db/shared_runtime.py",
@@ -105,10 +107,40 @@ DEFAULT_CONTRACT_PATHS = (
     "src/bridge_db/tools/__init__.py",
 )
 _SHARED_RUNTIME_CONTRACT_PATH = "src/bridge_db/shared_runtime.py"
+_OWNER_DELEGATION_SOURCE_PATH = "src/bridge_db/owner_delegation.py"
 _RUNTIME_BUNDLE_ROOT = Path("runtime/site-packages")
 _PRE_SHARED_RUNTIME_CONTRACT_PATHS = tuple(
     path for path in DEFAULT_CONTRACT_PATHS if path != _SHARED_RUNTIME_CONTRACT_PATH
 )
+_PRE_OWNER_DELEGATION_CONTRACT_PATHS = tuple(
+    path for path in DEFAULT_CONTRACT_PATHS if path != _OWNER_DELEGATION_SOURCE_PATH
+)
+_PRE_SHARED_AND_OWNER_DELEGATION_CONTRACT_PATHS = tuple(
+    path
+    for path in DEFAULT_CONTRACT_PATHS
+    if path not in {_SHARED_RUNTIME_CONTRACT_PATH, _OWNER_DELEGATION_SOURCE_PATH}
+)
+_LEGACY_DATABASE_ROLLBACK_CONTRACT = {
+    "core_user_version": 23,
+    "previous_merged_generation_user_version": 23,
+    "previous_merged_generation_sha": "d7272d489873faa5ed84c81734636ffc8cecb095",
+    "snapshot_refusal_extension": "BridgeSnapshotRefusalSchemaV1",
+    "compatibility": "additive_extension_ignored_by_previous_runtime",
+}
+
+
+def _database_rollback_contract(
+    entries: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    """Bind additive v23 extensions while preserving old-manifest verification."""
+    paths = {str(entry.get("path")) for entry in entries}
+    if _OWNER_DELEGATION_SOURCE_PATH not in paths:
+        return dict(_LEGACY_DATABASE_ROLLBACK_CONTRACT)
+    return {
+        **_LEGACY_DATABASE_ROLLBACK_CONTRACT,
+        "owner_delegation_extension": "BridgeOwnerDelegationSchemaV1",
+        "compatibility": "additive_extensions_ignored_by_previous_runtime",
+    }
 
 
 class GenerationContractError(RuntimeError):
@@ -1232,14 +1264,37 @@ def _verify_selected_digest(
     selected_paths = expected_paths
     if paths != list(expected_paths):
         source_paths = {str(entry["path"]) for entry in entries}
-        legacy_contract = (
-            kind == "contract"
-            and paths == list(_PRE_SHARED_RUNTIME_CONTRACT_PATHS)
-            and _SHARED_RUNTIME_CONTRACT_PATH not in source_paths
-        )
-        if not legacy_contract:
+        legacy_contract_paths: tuple[str, ...] | None = None
+        if kind == "contract":
+            candidates = (
+                (
+                    _PRE_SHARED_RUNTIME_CONTRACT_PATHS,
+                    {_SHARED_RUNTIME_CONTRACT_PATH},
+                ),
+                (
+                    _PRE_OWNER_DELEGATION_CONTRACT_PATHS,
+                    {_OWNER_DELEGATION_SOURCE_PATH},
+                ),
+                (
+                    _PRE_SHARED_AND_OWNER_DELEGATION_CONTRACT_PATHS,
+                    {
+                        _SHARED_RUNTIME_CONTRACT_PATH,
+                        _OWNER_DELEGATION_SOURCE_PATH,
+                    },
+                ),
+            )
+            legacy_contract_paths = next(
+                (
+                    candidate_paths
+                    for candidate_paths, absent_paths in candidates
+                    if paths == list(candidate_paths)
+                    and absent_paths.isdisjoint(source_paths)
+                ),
+                None,
+            )
+        if legacy_contract_paths is None:
             raise GenerationContractError(f"generation.{kind}_paths_mismatch")
-        selected_paths = _PRE_SHARED_RUNTIME_CONTRACT_PATHS
+        selected_paths = legacy_contract_paths
     selected = _selected_entries(entries, selected_paths, kind=kind)
     if _entries_digest(selected) != manifest.get(f"{kind}_sha256"):
         raise GenerationContractError(f"generation.{kind}_digest_mismatch")
@@ -1473,13 +1528,9 @@ def verify_generation(root: Path, generation_id: str) -> dict[str, Any]:
         != "external_executable_digest_verified_not_environment_immutable"
     ):
         raise GenerationContractError("generation.python_claim_invalid")
-    if manifest.get("database_rollback_contract") != {
-        "core_user_version": 23,
-        "previous_merged_generation_user_version": 23,
-        "previous_merged_generation_sha": ("d7272d489873faa5ed84c81734636ffc8cecb095"),
-        "snapshot_refusal_extension": "BridgeSnapshotRefusalSchemaV1",
-        "compatibility": "additive_extension_ignored_by_previous_runtime",
-    }:
+    if manifest.get("database_rollback_contract") != _database_rollback_contract(
+        entries
+    ):
         raise GenerationContractError("generation.database_rollback_claim_invalid")
     python_executable, python_sha256 = _verify_python_binding(manifest)
     if (
@@ -1670,15 +1721,7 @@ def stage_generation(
             "dependency_environment_state": RUNTIME_DEPENDENCY_STATE,
             "runtime_dependency_sha256": runtime_dependency_evidence["sha256"],
             "runtime_dependency_evidence": runtime_dependency_evidence,
-            "database_rollback_contract": {
-                "core_user_version": 23,
-                "previous_merged_generation_user_version": 23,
-                "previous_merged_generation_sha": (
-                    "d7272d489873faa5ed84c81734636ffc8cecb095"
-                ),
-                "snapshot_refusal_extension": "BridgeSnapshotRefusalSchemaV1",
-                "compatibility": "additive_extension_ignored_by_previous_runtime",
-            },
+            "database_rollback_contract": _database_rollback_contract(entries),
             "launcher_sha256": _sha256_bytes(launcher_bytes),
             "source_files": entries,
         }
@@ -1728,6 +1771,14 @@ def _activation_lock(root: Path) -> Generator[None, None, None]:
 
 
 def _pointer_generation(root: Path, name: str) -> str | None:
+    generation_id = _pointer_target(root, name)
+    if generation_id is not None:
+        verify_generation(root, generation_id)
+    return generation_id
+
+
+def _pointer_target(root: Path, name: str) -> str | None:
+    """Read only the syntactic pointer target without upgrading its integrity."""
     pointer = root / name
     if not pointer.exists() and not pointer.is_symlink():
         return None
@@ -1738,8 +1789,67 @@ def _pointer_generation(root: Path, name: str) -> str | None:
     if not target.startswith(expected_prefix) or "/" in target[len(expected_prefix) :]:
         raise GenerationContractError("generation.pointer_target_invalid")
     generation_id = target[len(expected_prefix) :]
-    verify_generation(root, generation_id)
+    if not _GENERATION_RE.fullmatch(generation_id):
+        raise GenerationContractError("generation.pointer_target_invalid")
     return generation_id
+
+
+def _replace_pointer_target(root: Path, name: str, generation_id: str | None) -> None:
+    """Restore an already digest-bound legacy pointer without claiming verification."""
+    pointer = root / name
+    if pointer.exists() and not pointer.is_symlink():
+        raise GenerationContractError("generation.pointer_not_symlink")
+    if generation_id is None:
+        pointer.unlink(missing_ok=True)
+        _fsync_directory(root)
+        return
+    if not _GENERATION_RE.fullmatch(generation_id):
+        raise GenerationContractError("generation.pointer_target_invalid")
+    temporary = root / f".{name}.pending-{os.getpid()}"
+    temporary.unlink(missing_ok=True)
+    os.symlink(f"releases/{generation_id}", temporary)
+    os.replace(temporary, pointer)
+    _fsync_directory(root)
+
+
+def _legacy_pointer_evidence(
+    root: Path, name: str, expected_generation: str, expected_manifest_sha256: str
+) -> dict[str, str]:
+    """Bind a legacy pointer as preserved evidence, never as executable rollback."""
+    if not _GENERATION_RE.fullmatch(expected_generation) or not _SHA256_RE.fullmatch(
+        expected_manifest_sha256
+    ):
+        raise GenerationContractError("generation.bootstrap_expected_identity_invalid")
+    if _pointer_target(root, name) != expected_generation:
+        raise GenerationContractError("generation.bootstrap_legacy_pointer_mismatch")
+    manifest_path = (
+        _release_path(root, expected_generation) / "generation-manifest.json"
+    )
+    try:
+        metadata = manifest_path.lstat()
+    except OSError as exc:
+        raise GenerationContractError(
+            "generation.bootstrap_legacy_manifest_invalid"
+        ) from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or manifest_path.is_symlink()
+        or _sha256_file(manifest_path) != expected_manifest_sha256
+    ):
+        raise GenerationContractError("generation.bootstrap_legacy_manifest_mismatch")
+    manifest = _read_manifest(manifest_path)
+    if (
+        manifest.get("schema") != GENERATION_SCHEMA
+        or manifest.get("generation_id") != expected_generation
+    ):
+        raise GenerationContractError("generation.bootstrap_legacy_manifest_invalid")
+    return {
+        "pointer": name,
+        "generation_id": expected_generation,
+        "manifest_sha256": expected_manifest_sha256,
+        "verification_state": "identity_preserved_integrity_unverified",
+    }
 
 
 def _replace_pointer(root: Path, name: str, generation_id: str | None) -> None:
@@ -1845,8 +1955,14 @@ def _pending_journal(root: Path) -> dict[str, Any] | None:
         "old_tenancy_activation_evidence",
         "new_tenancy_activation_evidence",
     }
+    bootstrap_fields = extended_fields | {
+        "new_previous",
+        "legacy_current_evidence",
+        "legacy_previous_evidence",
+        "old_activation_state",
+    }
     if (
-        set(journal) not in (legacy_fields, extended_fields)
+        set(journal) not in (legacy_fields, extended_fields, bootstrap_fields)
         or journal.get("schema") != ACTIVATION_SCHEMA
     ):
         raise GenerationContractError("generation.activation_journal_invalid")
@@ -1855,7 +1971,7 @@ def _pending_journal(root: Path) -> dict[str, Any] | None:
         _stable_json(body).encode("utf-8")
     ):
         raise GenerationContractError("generation.activation_journal_digest_mismatch")
-    if journal.get("operation") not in ("activate", "rollback"):
+    if journal.get("operation") not in ("activate", "rollback", "bootstrap_adopt"):
         raise GenerationContractError("generation.activation_journal_invalid")
     for field_name in ("old_current", "old_previous"):
         value = journal.get(field_name)
@@ -1866,7 +1982,7 @@ def _pending_journal(root: Path) -> dict[str, Any] | None:
     new_current = journal.get("new_current")
     if not isinstance(new_current, str) or not _GENERATION_RE.fullmatch(new_current):
         raise GenerationContractError("generation.activation_journal_invalid")
-    if set(journal) == extended_fields:
+    if set(journal) in (extended_fields, bootstrap_fields):
         old_evidence = _normalize_tenancy_evidence_summary(
             journal.get("old_tenancy_activation_evidence")
         )
@@ -1876,6 +1992,19 @@ def _pending_journal(root: Path) -> dict[str, Any] | None:
     else:
         old_evidence = {"state": "legacy_unverified"}
         new_evidence = {"state": "legacy_unverified"}
+    if set(journal) == bootstrap_fields:
+        new_previous = journal.get("new_previous")
+        if (
+            not isinstance(new_previous, str)
+            or not _GENERATION_RE.fullmatch(new_previous)
+            or new_previous == new_current
+            or not isinstance(journal.get("legacy_current_evidence"), dict)
+            or not isinstance(journal.get("legacy_previous_evidence"), dict)
+            or not isinstance(journal.get("old_activation_state"), dict)
+        ):
+            raise GenerationContractError("generation.activation_journal_invalid")
+    elif journal.get("operation") == "bootstrap_adopt":
+        raise GenerationContractError("generation.activation_journal_invalid")
     return {
         **journal,
         "old_tenancy_activation_evidence": old_evidence,
@@ -1950,6 +2079,125 @@ def _restore_activation_state(
     )
 
 
+def _restore_exact_activation_state(root: Path, state: dict[str, Any]) -> None:
+    _atomic_write(
+        root / "activation-state.json",
+        (json.dumps(state, sort_keys=True, indent=2) + "\n").encode("utf-8"),
+        mode=0o400,
+    )
+
+
+def _write_bootstrap_adoption_receipt(
+    root: Path,
+    *,
+    current: str,
+    previous: str,
+    legacy_current: dict[str, Any],
+    legacy_previous: dict[str, Any],
+) -> dict[str, Any]:
+    readback = _read_activation_without_pending(root)
+    receipt = {
+        "schema": BOOTSTRAP_ADOPTION_RECEIPT_SCHEMA,
+        "operation": "bootstrap_adopt",
+        "recorded_at": _utc_text(),
+        "requested_generation": current,
+        "rollback_generation": previous,
+        "legacy_pointer_evidence": [legacy_current, legacy_previous],
+        "legacy_generations_preserved": True,
+        "legacy_generations_rollback_eligible": False,
+        "readback": readback,
+        "outcome": (
+            "bootstrap_adopted"
+            if readback.get("state") == "active"
+            and readback.get("current_generation") == current
+            and readback.get("previous_generation") == previous
+            else "readback_failed"
+        ),
+    }
+    encoded = (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    path = _receipt_path(root, "bootstrap-adopt", current)
+    _atomic_write(path, encoded, mode=0o400)
+    return {
+        **receipt,
+        "receipt_path": str(path),
+        "receipt_sha256": _sha256_bytes(encoded),
+    }
+
+
+def _recover_pending_bootstrap_adoption(
+    root: Path, journal: dict[str, Any]
+) -> dict[str, Any]:
+    old_current = cast(str, journal["old_current"])
+    old_previous = cast(str, journal["old_previous"])
+    new_current = cast(str, journal["new_current"])
+    new_previous = cast(str, journal["new_previous"])
+    current = _pointer_target(root, "current")
+    previous = _pointer_target(root, "previous")
+    new_evidence = cast(dict[str, Any], journal["new_tenancy_activation_evidence"])
+
+    if (
+        current == new_current
+        and previous == new_previous
+        and _activation_state_matches(
+            root,
+            current=new_current,
+            previous=new_previous,
+            operation="bootstrap_adopt",
+            tenancy_evidence=new_evidence,
+        )
+    ):
+        receipt = _write_bootstrap_adoption_receipt(
+            root,
+            current=new_current,
+            previous=new_previous,
+            legacy_current=cast(dict[str, Any], journal["legacy_current_evidence"]),
+            legacy_previous=cast(dict[str, Any], journal["legacy_previous_evidence"]),
+        )
+        if receipt["outcome"] != "bootstrap_adopted":
+            raise GenerationContractError(
+                "generation.bootstrap_recovery_readback_failed"
+            )
+        removal_verified = _remove_pending_journal(root)
+        return {
+            **receipt,
+            "outcome": (
+                "bootstrap_adopted_recovered"
+                if removal_verified
+                else "bootstrap_adopted_recovered_journal_fsync_unverified"
+            ),
+            "recovery_disposition": "committed_finalized",
+            "journal_removal": "verified" if removal_verified else "fsync_unverified",
+        }
+
+    allowed_maps = {
+        (old_current, old_previous),
+        (new_current, old_previous),
+        (new_current, new_previous),
+    }
+    if (current, previous) not in allowed_maps:
+        raise GenerationContractError("generation.activation_journal_map_mismatch")
+    _replace_pointer_target(root, "current", old_current)
+    _replace_pointer_target(root, "previous", old_previous)
+    _restore_exact_activation_state(
+        root, cast(dict[str, Any], journal["old_activation_state"])
+    )
+    if (
+        _pointer_target(root, "current") != old_current
+        or _pointer_target(root, "previous") != old_previous
+    ):
+        raise GenerationContractError("generation.bootstrap_recovery_readback_failed")
+    removal_verified = _remove_pending_journal(root)
+    return {
+        "schema": BOOTSTRAP_ADOPTION_RECEIPT_SCHEMA,
+        "operation": "bootstrap_adopt",
+        "outcome": "before_map_restored",
+        "requested_generation": new_current,
+        "rollback_generation": new_previous,
+        "recovery_disposition": "before_map_restored",
+        "journal_removal": "verified" if removal_verified else "fsync_unverified",
+    }
+
+
 def _recover_pending_activation(root: Path) -> dict[str, Any] | None:
     """Recover only exact before/partial/committed maps under the activation lock."""
     journal = _pending_journal(root)
@@ -1958,13 +2206,17 @@ def _recover_pending_activation(root: Path) -> dict[str, Any] | None:
     old_current = cast(str | None, journal["old_current"])
     old_previous = cast(str | None, journal["old_previous"])
     new_current = cast(str, journal["new_current"])
-    operation = cast(Literal["activate", "rollback"], journal["operation"])
+    operation = cast(
+        Literal["activate", "rollback", "bootstrap_adopt"], journal["operation"]
+    )
     old_tenancy_evidence = cast(
         dict[str, Any], journal["old_tenancy_activation_evidence"]
     )
     new_tenancy_evidence = cast(
         dict[str, Any], journal["new_tenancy_activation_evidence"]
     )
+    if operation == "bootstrap_adopt":
+        return _recover_pending_bootstrap_adoption(root, journal)
     current = _pointer_generation(root, "current")
     previous = _pointer_generation(root, "previous")
 
@@ -2175,6 +2427,144 @@ def activate_generation(
         )
 
 
+def bootstrap_adopt_generation(
+    root: Path,
+    generation_id: str,
+    rollback_generation_id: str,
+    *,
+    expected_current_generation: str,
+    expected_previous_generation: str,
+    expected_current_manifest_sha256: str,
+    expected_previous_manifest_sha256: str,
+    tenancy_evidence_path: Path | None = None,
+) -> dict[str, Any]:
+    """One-shot migration from digest-bound legacy pointers to verified peers.
+
+    This intentionally does not make either legacy generation rollback eligible.
+    Both post-adoption pointers must name distinct generations that pass the full
+    current verifier before any mutation is journaled.
+    """
+    root = _guard_absolute_directory(root)
+    with _activation_lock(root):
+        recovery = _recover_pending_activation(root)
+        if recovery is not None and (
+            recovery.get("recovery_disposition") == "committed_finalized"
+            or recovery.get("journal_removal") != "verified"
+        ):
+            return recovery
+        if generation_id == rollback_generation_id:
+            raise GenerationContractError("generation.bootstrap_rollback_not_distinct")
+        verify_generation(root, generation_id)
+        verify_generation(root, rollback_generation_id)
+        if generation_id in (
+            expected_current_generation,
+            expected_previous_generation,
+        ) or (
+            rollback_generation_id
+            in (expected_current_generation, expected_previous_generation)
+        ):
+            raise GenerationContractError("generation.bootstrap_candidate_is_legacy")
+        legacy_current = _legacy_pointer_evidence(
+            root,
+            "current",
+            expected_current_generation,
+            expected_current_manifest_sha256,
+        )
+        legacy_previous = _legacy_pointer_evidence(
+            root,
+            "previous",
+            expected_previous_generation,
+            expected_previous_manifest_sha256,
+        )
+        old_state = _read_manifest(root / "activation-state.json")
+        if (
+            old_state.get("schema") != ACTIVATION_SCHEMA
+            or old_state.get("current_generation") != expected_current_generation
+            or old_state.get("previous_generation") != expected_previous_generation
+        ):
+            raise GenerationContractError("generation.bootstrap_legacy_state_mismatch")
+        tenancy_evidence = _load_tenancy_activation_evidence(
+            root, tenancy_evidence_path, generation_id
+        )
+        _assert_activation_recovery_ready()
+        pending_body = {
+            "schema": ACTIVATION_SCHEMA,
+            "operation": "bootstrap_adopt",
+            "old_current": expected_current_generation,
+            "old_previous": expected_previous_generation,
+            "new_current": generation_id,
+            "new_previous": rollback_generation_id,
+            "created_at": _utc_text(),
+            "old_tenancy_activation_evidence": _normalize_tenancy_evidence_summary(
+                old_state.get("tenancy_activation_evidence")
+            ),
+            "new_tenancy_activation_evidence": tenancy_evidence,
+            "legacy_current_evidence": legacy_current,
+            "legacy_previous_evidence": legacy_previous,
+            "old_activation_state": old_state,
+        }
+        pending = {
+            **pending_body,
+            "journal_sha256": _sha256_bytes(_stable_json(pending_body).encode("utf-8")),
+        }
+        pending_path = root / ".activation.pending.json"
+        if pending_path.exists() or pending_path.is_symlink():
+            raise GenerationContractError("generation.activation_pending_unrecovered")
+        _atomic_write(
+            pending_path,
+            (json.dumps(pending, sort_keys=True, indent=2) + "\n").encode("utf-8"),
+            mode=0o600,
+        )
+        try:
+            _replace_pointer(root, "current", generation_id)
+            _replace_pointer(root, "previous", rollback_generation_id)
+            state = {
+                "schema": ACTIVATION_SCHEMA,
+                "current_generation": generation_id,
+                "previous_generation": rollback_generation_id,
+                "activated_at": _utc_text(),
+                "operation": "bootstrap_adopt",
+                "tenancy_activation_evidence": tenancy_evidence,
+            }
+            _atomic_write(
+                root / "activation-state.json",
+                (json.dumps(state, sort_keys=True, indent=2) + "\n").encode("utf-8"),
+                mode=0o400,
+            )
+        except Exception:
+            try:
+                _replace_pointer_target(root, "current", expected_current_generation)
+                _replace_pointer_target(root, "previous", expected_previous_generation)
+                _restore_exact_activation_state(root, old_state)
+                pending_path.unlink(missing_ok=True)
+                _fsync_directory(root)
+            except Exception:
+                pass
+            raise
+        try:
+            receipt = _write_bootstrap_adoption_receipt(
+                root,
+                current=generation_id,
+                previous=rollback_generation_id,
+                legacy_current=legacy_current,
+                legacy_previous=legacy_previous,
+            )
+            if receipt["outcome"] != "bootstrap_adopted":
+                raise GenerationContractError("generation.bootstrap_readback_failed")
+            removal_verified = _remove_pending_journal(root)
+            if not removal_verified:
+                return {
+                    **receipt,
+                    "outcome": "bootstrap_adopted_journal_fsync_unverified",
+                    "journal_removal": "fsync_unverified",
+                }
+        except Exception as exc:
+            raise GenerationContractError(
+                "generation.bootstrap_committed_post_actions_pending"
+            ) from exc
+        return receipt
+
+
 def rollback_generation(root: Path) -> dict[str, Any]:
     root = _guard_absolute_directory(root)
     with _activation_lock(root):
@@ -2348,6 +2738,15 @@ def _parser() -> argparse.ArgumentParser:
     activate.add_argument("--root", type=Path, required=True)
     activate.add_argument("--generation-id", required=True)
     activate.add_argument("--tenancy-evidence", type=Path)
+    bootstrap = subparsers.add_parser("bootstrap-adopt")
+    bootstrap.add_argument("--root", type=Path, required=True)
+    bootstrap.add_argument("--generation-id", required=True)
+    bootstrap.add_argument("--rollback-generation-id", required=True)
+    bootstrap.add_argument("--expected-current-generation", required=True)
+    bootstrap.add_argument("--expected-previous-generation", required=True)
+    bootstrap.add_argument("--expected-current-manifest-sha256", required=True)
+    bootstrap.add_argument("--expected-previous-manifest-sha256", required=True)
+    bootstrap.add_argument("--tenancy-evidence", type=Path)
     readback = subparsers.add_parser("readback")
     readback.add_argument("--root", type=Path, required=True)
     rollback = subparsers.add_parser("rollback")
@@ -2371,6 +2770,21 @@ def main() -> None:
         elif args.command == "activate":
             result = activate_generation(
                 args.root, args.generation_id, args.tenancy_evidence
+            )
+        elif args.command == "bootstrap-adopt":
+            result = bootstrap_adopt_generation(
+                args.root,
+                args.generation_id,
+                args.rollback_generation_id,
+                expected_current_generation=args.expected_current_generation,
+                expected_previous_generation=args.expected_previous_generation,
+                expected_current_manifest_sha256=(
+                    args.expected_current_manifest_sha256
+                ),
+                expected_previous_manifest_sha256=(
+                    args.expected_previous_manifest_sha256
+                ),
+                tenancy_evidence_path=args.tenancy_evidence,
             )
         elif args.command == "readback":
             result = read_activation(args.root)

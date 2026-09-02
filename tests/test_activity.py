@@ -14,6 +14,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from bridge_db import config
 from bridge_db.db import collect_fts_index_metrics, insert_activity_row
 from bridge_db.invariants import sometimes_counts
+from bridge_db.owner_delegation import owner_resource_snapshot
 from bridge_db.tools import activity as mod
 
 
@@ -1244,7 +1245,15 @@ async def test_record_disposition_reports_and_recovers_failed_projection(
 
     monkeypatch.setattr(export_mod, "export_bridge_file", original_export)
     monkeypatch.setattr(config, "BRIDGE_FILE_PATH", tmp_path / "bridge.md")
+    other_job = await db.execute(
+        "INSERT INTO bridge_projection_jobs (reason, target_key) VALUES (?, ?)",
+        ("shipped_disposition", "999999"),
+    )
+    assert other_job.lastrowid is not None
+    other_job_id = int(other_job.lastrowid)
+    await db.commit()
     snapshot: list[export_mod.ContextExportSnapshot] = []
+    await db.execute("BEGIN IMMEDIATE")
     content = await export_mod.build_markdown(db, context_snapshot=snapshot)
     await export_mod.export_bridge_file(
         db,
@@ -1265,6 +1274,19 @@ async def test_record_disposition_reports_and_recovers_failed_projection(
     assert job is not None
     assert job["status"] == "completed"
     assert job["projected_content_sha256"]
+    unrelated = await (
+        await db.execute(
+            "SELECT status, attempts, projected_content_sha256 "
+            "FROM bridge_projection_jobs WHERE id = ?",
+            (other_job_id,),
+        )
+    ).fetchone()
+    assert unrelated is not None
+    assert dict(unrelated) == {
+        "status": "pending",
+        "attempts": 0,
+        "projected_content_sha256": None,
+    }
 
 
 async def test_record_disposition_synced_requires_bound_source_owner(
@@ -1363,6 +1385,81 @@ async def test_record_disposition_policy_rejects_cross_source_principal(
         unprocessed_only=True, ctx=make_ctx(db, principal="codex")
     )
     assert [event["id"] for event in events] == [row["id"]]
+
+
+async def test_record_disposition_policy_accepts_exact_operator_delegation(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "AUTH_MODE", "enforce")
+    await fns["log_activity"](
+        caller="cc",
+        project_name="DelegatedPolicyDecision",
+        summary="shipped",
+        tags=["SHIPPED"],
+        ctx=make_ctx(db, principal="cc"),
+    )
+    row = await (await db.execute("SELECT id FROM activity_log")).fetchone()
+    assert row is not None
+    activity_id = int(row["id"])
+    snapshot = await owner_resource_snapshot(
+        db, resource_type="activity_disposition", resource_id=activity_id
+    )
+    cursor = await db.execute(
+        """
+        INSERT INTO owner_delegations (
+            resource_type, resource_id, original_owner, delegated_to,
+            resource_sha256, authorization_reason, authorization_ref,
+            delegated_by
+        ) VALUES ('activity_disposition', ?, 'cc', 'codex', ?, ?, ?, 'operator-cli')
+        """,
+        (
+            activity_id,
+            snapshot["resource_sha256"],
+            "Operator approved exact lifecycle takeover",
+            "codex-task:test-delegated-policy",
+        ),
+    )
+    assert cursor.lastrowid is not None
+    delegation_id = int(cursor.lastrowid)
+    await db.commit()
+
+    result = await fns["record_disposition"](
+        caller="codex",
+        activity_id=activity_id,
+        disposition="no_durable_target",
+        reason="Reviewed metadata has no durable downstream target",
+        policy_ref="codex-task:test-delegated-policy",
+        ctx=make_ctx(db, principal="codex"),
+    )
+
+    assert result["delegation_id"] == delegation_id
+    assert result["original_owner"] == "cc"
+    stored = await (
+        await db.execute(
+            "SELECT source, tags, sync_disposition, sync_disposition_by "
+            "FROM activity_log WHERE id = ?",
+            (activity_id,),
+        )
+    ).fetchone()
+    assert stored is not None
+    assert stored["source"] == "cc"
+    assert json.loads(stored["tags"]) == ["SHIPPED"]
+    assert stored["sync_disposition"] == "no_durable_target"
+    assert stored["sync_disposition_by"] == "codex"
+    consumption = await (
+        await db.execute(
+            "SELECT actor, action FROM owner_delegation_consumptions "
+            "WHERE delegation_id = ?",
+            (delegation_id,),
+        )
+    ).fetchone()
+    assert consumption is not None
+    assert dict(consumption) == {
+        "actor": "codex",
+        "action": "record_disposition:no_durable_target",
+    }
 
 
 async def test_record_disposition_policy_allows_bound_source_owner(

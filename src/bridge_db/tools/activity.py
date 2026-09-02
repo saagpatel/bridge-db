@@ -33,6 +33,12 @@ from bridge_db.models import (
     SourceTrust,
     invalid_source_error,
 )
+from bridge_db.owner_delegation import (
+    OwnerDelegationError,
+    consume_owner_delegation,
+    owner_resource_snapshot,
+    resolve_owner_delegation,
+)
 from bridge_db.project_resolver import resolve as resolve_project
 
 logger = logging.getLogger("bridge_db.tools.activity")
@@ -305,6 +311,7 @@ async def _export_bridge_markdown_after_processing(
             export_bridge_file,
         )
 
+        await db.execute("BEGIN IMMEDIATE")
         context_snapshot: list[ContextExportSnapshot] = []
         content = await build_markdown(db, context_snapshot=context_snapshot)
         await export_bridge_file(
@@ -914,7 +921,7 @@ def register(mcp: FastMCP) -> None:
                     "downstream proof (requires downstream_system + "
                     "downstream_ref, a bound caller matching the event source, "
                     "and adds PROCESSED). A policy value also requires the bound "
-                    "event owner. "
+                    "event owner or an active exact-resource operator delegation. "
                     "(unsynced_by_policy, no_durable_target, "
                     "superseded_without_receipt, declined_mapping) = non-receipt "
                     "decision (requires reason, does not claim sync)."
@@ -964,9 +971,11 @@ def register(mcp: FastMCP) -> None:
           downstream reference. Only this path claims a durable downstream sync.
         - A policy ``disposition`` (unsynced_by_policy / no_durable_target /
           superseded_without_receipt / declined_mapping) is a non-receipt
-          decision: it REQUIRES a channel-bound caller matching the event source
-          and a ``reason``, does NOT add ``PROCESSED``, and does not claim sync —
-          it records why the event is not receipt-backed.
+          decision: it REQUIRES a channel-bound caller matching the event source,
+          or a one-time exact-resource operator delegation to that caller, plus a
+          ``reason``. It does NOT add ``PROCESSED`` and does not claim sync — it
+          records why the event is not receipt-backed. Delegation never changes
+          the source owner stored on the activity row.
 
         Guarantees carried over from the trio: a SHIPPED row can never be marked
         resolved without either downstream proof or an explicit reasoned policy
@@ -1053,25 +1062,40 @@ def register(mcp: FastMCP) -> None:
 
         # Every disposition terminalizes the source owner's downstream
         # obligation. Bind both receipt proof and policy waivers to that owner,
-        # even while lower-risk writes retain compatibility auth modes.
+        # or to one exact append-only operator delegation that preserves the
+        # stored source owner, even while lower-risk writes retain compatibility
+        # auth modes.
         require_bound_caller(ctx, caller, tool="record_disposition")
+        delegation: dict[str, Any] | None = None
         if row["source"] != caller:
-            log_audit(
-                "record_disposition",
-                caller,
-                row["project_name"],
-                ok=False,
-                detail=(
-                    f"activity_id={activity_id} disposition={choice} "
-                    f"decision=refused reason=source_owner_mismatch "
-                    f"event_source={row['source']}"
-                ),
-            )
-            action = "synced receipt" if is_synced else "policy disposition"
-            raise ToolError(
-                f"Activity entry {activity_id} is owned by '{row['source']}'; "
-                f"caller '{caller}' cannot record its {action}"
-            )
+            try:
+                delegation = await resolve_owner_delegation(
+                    db,
+                    resource_type="activity_disposition",
+                    resource_id=activity_id,
+                    original_owner=str(row["source"]),
+                    delegated_to=caller,
+                )
+            except OwnerDelegationError as exc:
+                raise ToolError(exc.reason_code) from exc
+            if delegation is None:
+                log_audit(
+                    "record_disposition",
+                    caller,
+                    row["project_name"],
+                    ok=False,
+                    detail=(
+                        f"activity_id={activity_id} disposition={choice} "
+                        f"decision=refused reason=source_owner_mismatch "
+                        f"event_source={row['source']} delegation=missing"
+                    ),
+                )
+                action = "synced receipt" if is_synced else "policy disposition"
+                raise ToolError(
+                    f"Activity entry {activity_id} is owned by '{row['source']}'; "
+                    f"caller '{caller}' cannot record its {action} without an "
+                    "active exact-resource delegation"
+                )
 
         current_disposition = row["sync_disposition"]
         if is_synced and current_disposition == _SYNCED_DISPOSITION:
@@ -1092,6 +1116,9 @@ def register(mcp: FastMCP) -> None:
                 )
 
             return idempotent_synced_result(row["project_name"])
+
+        if delegation is not None and delegation["state"] != "active":
+            raise ToolError("delegation.already_consumed")
 
         if not is_synced and current_disposition == _SYNCED_DISPOSITION:
             raise ToolError(
@@ -1182,6 +1209,23 @@ def register(mcp: FastMCP) -> None:
                 f"Activity entry {activity_id} already has immutable downstream "
                 "sync proof; a different synced receipt cannot replace it"
             )
+        if delegation is not None:
+            result_snapshot = await owner_resource_snapshot(
+                db,
+                resource_type="activity_disposition",
+                resource_id=activity_id,
+            )
+            try:
+                await consume_owner_delegation(
+                    db,
+                    delegation_id=int(delegation["delegation_id"]),
+                    actor=caller,
+                    action=f"record_disposition:{choice}",
+                    result_sha256=str(result_snapshot["resource_sha256"]),
+                )
+            except OwnerDelegationError as exc:
+                await db.rollback()
+                raise ToolError(exc.reason_code) from exc
         projection_job_id: int | None = None
         if is_synced:
             projection_cursor = await db.execute(
@@ -1211,6 +1255,8 @@ def register(mcp: FastMCP) -> None:
             )
         if superseded is not None:
             detail += f" {superseded}"
+        if delegation is not None:
+            detail += f" delegation_id={delegation['delegation_id']}"
         log_audit(
             "record_disposition", caller, row["project_name"], ok=True, detail=detail
         )
@@ -1231,4 +1277,12 @@ def register(mcp: FastMCP) -> None:
             "downstream_ref": clean_ref if is_synced else None,
             "policy_ref": None if is_synced else clean_policy_ref,
             "projection": projection,
+            **(
+                {
+                    "delegation_id": int(delegation["delegation_id"]),
+                    "original_owner": row["source"],
+                }
+                if delegation is not None
+                else {}
+            ),
         }

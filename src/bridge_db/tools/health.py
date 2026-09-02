@@ -11,7 +11,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
 from bridge_db import clock, config
-from bridge_db.auth import auth_mode, load_principals
+from bridge_db.auth import auth_mode, load_principal_grants, load_principals
 from bridge_db.db import (
     SCHEMA_VERSION,
     collect_fts_index_metrics,
@@ -45,6 +45,8 @@ _ROW_COUNT_TABLES = (
     "pending_handoffs",
     "system_snapshots",
     "snapshot_refusals",
+    "owner_delegations",
+    "owner_delegation_consumptions",
     "cost_records",
 )
 _ACTIVITY_SOURCES = ("cc", "codex", "claude_ai", "notion_os", "personal_ops")
@@ -239,6 +241,45 @@ def _age_hours(value: str | None, now: datetime) -> float | None:
     fixed_now = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
     age = (fixed_now.astimezone(UTC) - parsed).total_seconds() / 3600
     return round(max(age, 0.0), 1)
+
+
+def _owner_scope_readiness(owner: str, scope: str) -> dict[str, Any]:
+    grants = [
+        grant
+        for grant in load_principal_grants(config.PRINCIPALS_PATH).values()
+        if grant.caller == owner
+    ]
+    if not grants:
+        return {
+            "ready": False,
+            "state": "grant_missing",
+            "required_scope": scope,
+            "unblock": f"operator_reenroll_{owner}_and_restart_owner_client",
+        }
+    grant = max(grants, key=lambda candidate: candidate.generation)
+    if clock.now() >= grant.expires_at:
+        return {
+            "ready": False,
+            "state": "grant_expired",
+            "required_scope": scope,
+            "grant_generation": grant.generation,
+            "unblock": f"operator_reenroll_{owner}_and_restart_owner_client",
+        }
+    if scope not in grant.scopes:
+        return {
+            "ready": False,
+            "state": "scope_missing",
+            "required_scope": scope,
+            "grant_generation": grant.generation,
+            "unblock": f"operator_reenroll_{owner}_and_restart_owner_client",
+        }
+    return {
+        "ready": True,
+        "state": "owner_scope_ready",
+        "required_scope": scope,
+        "grant_generation": grant.generation,
+        "unblock": None,
+    }
 
 
 async def _source_trust_breakdown(db: Any) -> dict[str, dict[str, int]]:
@@ -513,6 +554,78 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     oldest_unacknowledged_snapshot_refusal_age_hours: float | None = _age_hours(
         refusal_row[1] if refusal_row else None, _utc_now()
     )
+    cursor = await db.execute(
+        """
+        SELECT id, caller, system, snapshot_family, snapshot_date, reason_code,
+               retained_count, retention_limit, payload_sha256, next_state, created_at
+        FROM snapshot_refusals
+        WHERE acknowledgement_state IS NULL
+        ORDER BY created_at, id
+        """
+    )
+    unacknowledged_refusal_rows = await cursor.fetchall()
+    snapshot_refusal_inventory = [
+        {
+            "refusal_id": int(row["id"]),
+            "owner": row["caller"],
+            "system": row["system"],
+            "snapshot_family": row["snapshot_family"],
+            "snapshot_date": row["snapshot_date"],
+            "reason_code": row["reason_code"],
+            "retained_count": int(row["retained_count"]),
+            "retention_limit": int(row["retention_limit"]),
+            "payload_sha256": row["payload_sha256"],
+            "next_state": row["next_state"],
+            "created_at": row["created_at"],
+            "owner_capability": _owner_scope_readiness(
+                str(row["caller"]), "acknowledge_snapshot_refusal"
+            ),
+        }
+        for row in unacknowledged_refusal_rows
+    ]
+
+    cursor = await db.execute(
+        """
+        SELECT
+            SUM(CASE WHEN consumption.delegation_id IS NULL THEN 1 ELSE 0 END),
+            SUM(CASE WHEN consumption.delegation_id IS NOT NULL THEN 1 ELSE 0 END)
+        FROM owner_delegations AS delegation
+        LEFT JOIN owner_delegation_consumptions AS consumption
+          ON consumption.delegation_id = delegation.id
+        """
+    )
+    delegation_row = await cursor.fetchone()
+    active_owner_delegations = int(delegation_row[0] or 0) if delegation_row else 0
+    consumed_owner_delegations = int(delegation_row[1] or 0) if delegation_row else 0
+
+    cursor = await db.execute(
+        """
+        SELECT job.id, job.reason, job.target_key, job.attempts,
+               job.error_category, job.created_at, activity.source AS owner
+        FROM bridge_projection_jobs AS job
+        LEFT JOIN activity_log AS activity
+          ON job.reason = 'shipped_disposition'
+         AND job.target_key = CAST(activity.id AS TEXT)
+        WHERE job.status = 'pending'
+        ORDER BY job.created_at, job.id
+        """
+    )
+    pending_projection_rows = await cursor.fetchall()
+    pending_projection_jobs = [
+        {
+            "job_id": int(row["id"]),
+            "reason": row["reason"],
+            "target_key": row["target_key"],
+            "owner": row["owner"],
+            "attempts": int(row["attempts"]),
+            "error_category": row["error_category"],
+            "created_at": row["created_at"],
+            "exact_retry_available": (
+                row["reason"] == "shipped_disposition" and row["owner"] is not None
+            ),
+        }
+        for row in pending_projection_rows
+    ]
 
     db_path = config.DB_PATH
     db_exists = db_path.exists()
@@ -657,6 +770,8 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     projection_health = claude_ai_section_drift["state"]
     if projection_health == "current" and not bridge_file_export_tracked:
         projection_health = "untracked"
+    if projection_health == "current" and pending_projection_jobs:
+        projection_health = "pending_jobs"
     ok = storage_ok and projection_health == "current"
 
     return {
@@ -684,6 +799,11 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
         "oldest_unacknowledged_snapshot_refusal_age_hours": (
             oldest_unacknowledged_snapshot_refusal_age_hours
         ),
+        "snapshot_refusal_inventory": snapshot_refusal_inventory,
+        "active_owner_delegations": active_owner_delegations,
+        "consumed_owner_delegations": consumed_owner_delegations,
+        "pending_projection_job_count": len(pending_projection_jobs),
+        "pending_projection_jobs": pending_projection_jobs,
         "wal_size_bytes": wal_size_bytes,
         "wal_warning": wal_warning,
         "fts_index": fts_index,
@@ -903,11 +1023,38 @@ def _freshness_next_actions(
             }
         )
     if health["unacknowledged_snapshot_refusals"] > 0:
+        for refusal in health["snapshot_refusal_inventory"]:
+            capability = refusal["owner_capability"]
+            actions.append(
+                {
+                    "action": (
+                        "acknowledge_snapshot_refusal"
+                        if capability["ready"]
+                        else capability["unblock"]
+                    ),
+                    "owner": refusal["owner"] if capability["ready"] else "operator",
+                    "refusal_id": refusal["refusal_id"],
+                    "reason": (
+                        "The exact owner must acknowledge this snapshot refusal."
+                        if capability["ready"]
+                        else (
+                            f"The {refusal['owner']} grant cannot acknowledge refusal "
+                            f"{refusal['refusal_id']}: {capability['state']}."
+                        )
+                    ),
+                }
+            )
+    for job in health["pending_projection_jobs"]:
         actions.append(
             {
-                "action": "acknowledge_snapshot_refusal",
-                "owner": "snapshot_owner",
-                "reason": "A snapshot write refusal has no owner next-state acknowledgement.",
+                "action": (
+                    "retry_bridge_projection"
+                    if job["exact_retry_available"]
+                    else "classify_bridge_projection_job"
+                ),
+                "owner": job["owner"] or "operator",
+                "projection_job_id": job["job_id"],
+                "reason": "A durable bridge projection job remains pending.",
             }
         )
     for owner in _SNAPSHOT_SYSTEMS:
@@ -1109,6 +1256,7 @@ async def collect_status_summary(
             "synced_shipped": health["synced_shipped_count"],
             "fts_missing": health["fts_index"]["missing"],
             "fts_orphaned": health["fts_index"]["orphaned"],
+            "fts_content_mismatched": health["fts_index"]["content_mismatched"],
             "claude_ai_unsynced_sections": len(
                 health["claude_ai_section_drift"]["drifted_sections"]
             ),
@@ -1119,6 +1267,10 @@ async def collect_status_summary(
             "oldest_unacknowledged_snapshot_refusal_age_hours": health[
                 "oldest_unacknowledged_snapshot_refusal_age_hours"
             ],
+            "snapshot_refusal_inventory": health["snapshot_refusal_inventory"],
+            "active_owner_delegations": health["active_owner_delegations"],
+            "consumed_owner_delegations": health["consumed_owner_delegations"],
+            "pending_projection_job_count": health["pending_projection_job_count"],
             "execution_generation_state": health["runtime_generation"]["state"],
             "execution_generation_id": health["runtime_generation"].get(
                 "generation_id"

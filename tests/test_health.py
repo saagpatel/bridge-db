@@ -473,7 +473,95 @@ async def test_health_surfaces_unacknowledged_snapshot_refusal(
     assert health["unacknowledged_snapshot_refusals"] == 1
     assert status["signals"]["unacknowledged_snapshot_refusals"] == 1
     assert any(
-        action["action"] == "acknowledge_snapshot_refusal"
+        action["action"]
+        in {"acknowledge_snapshot_refusal", "operator_reenroll_cc_and_restart_owner_client"}
+        for action in status["freshness"]["next_actions"]
+    )
+
+
+async def test_health_surfaces_refusal_owner_scope_drift(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    principals = tmp_path / "principals.json"
+    principals.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "principals": {
+                    "cc": {
+                        "token_sha256": "a" * 64,
+                        "issued_at": "2026-08-01T00:00:00Z",
+                        "expires_at": "2099-09-01T00:00:00Z",
+                        "generation": 7,
+                        "scopes": ["save_snapshot"],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "PRINCIPALS_PATH", principals)
+    await db.execute(
+        """
+        INSERT INTO snapshot_refusals (
+            caller, system, snapshot_family, snapshot_date, reason_code,
+            retained_count, retention_limit, payload_sha256, next_state
+        ) VALUES ('cc', 'cc', 'default', '2026-08-05',
+                  'snapshot.retention_would_prune', 10, 10, ?,
+                  'capacity_blocked_acknowledgement_required')
+        """,
+        ("b" * 64,),
+    )
+    await db.commit()
+
+    health = await fns["health"](ctx=make_ctx(db))
+    refusal = health["snapshot_refusal_inventory"][0]
+
+    assert refusal["owner"] == "cc"
+    assert refusal["owner_capability"] == {
+        "ready": False,
+        "state": "scope_missing",
+        "required_scope": "acknowledge_snapshot_refusal",
+        "grant_generation": 7,
+        "unblock": "operator_reenroll_cc_and_restart_owner_client",
+    }
+
+
+async def test_health_surfaces_pending_projection_job_without_completing_it(
+    db: aiosqlite.Connection,
+    fns: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "test.db").touch()
+    activity = await insert_activity_row(
+        db,
+        source="codex",
+        timestamp="2026-08-23",
+        project_name="PendingProjection",
+        summary="shipped",
+        tags=["SHIPPED"],
+    )
+    cursor = await db.execute(
+        "INSERT INTO bridge_projection_jobs (reason, target_key) VALUES (?, ?)",
+        ("shipped_disposition", str(activity.activity_id)),
+    )
+    assert cursor.lastrowid is not None
+    job_id = int(cursor.lastrowid)
+    await db.commit()
+
+    health = await fns["health"](ctx=make_ctx(db))
+    status = await fns["status"](ctx=make_ctx(db))
+
+    assert health["pending_projection_job_count"] == 1
+    assert health["projection_health"] == "pending_jobs"
+    assert health["pending_projection_jobs"][0]["owner"] == "codex"
+    assert any(
+        action.get("projection_job_id") == job_id
+        and action["action"] == "retry_bridge_projection"
+        and action["owner"] == "codex"
         for action in status["freshness"]["next_actions"]
     )
 
@@ -752,7 +840,9 @@ async def test_status_returns_compact_operator_summary(
         db,
         "activity",
         str(activity_row[0]),
-        fts_text_for_activity("bridge-db", "checked operator status", None),
+        fts_text_for_activity(
+            "bridge-db", "checked operator status", None, ["SHIPPED"]
+        ),
     )
     await db.commit()
     _replace_test_anchor(tmp_path / "test.db")

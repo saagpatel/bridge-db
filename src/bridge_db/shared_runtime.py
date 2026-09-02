@@ -147,6 +147,7 @@ def _launch_contract() -> dict[str, object]:
         "log_level": config.LOG_LEVEL,
         "audit_log_rotate_bytes": config.AUDIT_LOG_ROTATE_BYTES,
         "recall_log_rotate_bytes": config.RECALL_LOG_ROTATE_BYTES,
+        "broker_start_timeout_seconds": _broker_start_timeout_seconds(),
         "broker_idle_seconds": _idle_seconds(),
         "relay_capability_ttl_seconds": _capability_ttl_seconds(),
         "transport": "streamable_http_over_private_unix_socket",
@@ -1425,7 +1426,7 @@ def _start_broker(paths: SharedRuntimePaths) -> None:
     finally:
         os.close(log_descriptor)
 
-    deadline = time.monotonic() + 10.0
+    deadline = time.monotonic() + _broker_start_timeout_seconds()
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise SharedRuntimeContractError("shared_runtime.broker_start_failed")
@@ -1446,18 +1447,23 @@ def _start_broker(paths: SharedRuntimePaths) -> None:
 def ensure_shared_broker(*, owner_pid: int | None = None) -> SharedRuntimeBinding:
     """Register the parent relay and ensure exactly one matching broker is ready."""
     paths = shared_runtime_paths()
-    with _group_lifecycle_lock(paths):
-        lease, capability_file = _register_client(paths, owner_pid=owner_pid)
-        try:
+    # Client leases use unguessable, create-exclusive names and do not need the
+    # broker lifecycle lock. Register first so concurrent relays become visible
+    # immediately instead of serializing behind a potentially slow cold broker
+    # start. Broker creation remains exactly-once under the lifecycle lock.
+    lease, capability_file = _register_client(paths, owner_pid=owner_pid)
+    try:
+        with _group_lifecycle_lock(paths):
             if not _existing_broker_ready(paths):
                 _start_broker(paths)
-            return SharedRuntimeBinding(
-                socket=paths.socket,
-                client_lease=lease,
-                capability_file=capability_file,
-                release_launcher=_launcher_path(),
-            )
-        except Exception:
+        return SharedRuntimeBinding(
+            socket=paths.socket,
+            client_lease=lease,
+            capability_file=capability_file,
+            release_launcher=_launcher_path(),
+        )
+    except Exception:
+        with _group_lifecycle_lock(paths):
             if lease.exists():
                 _retire_client(
                     lease,
@@ -1465,7 +1471,7 @@ def ensure_shared_broker(*, owner_pid: int | None = None) -> SharedRuntimeBindin
                     reason="broker_ensure_failed",
                     expected_contract_sha256=_launch_contract_sha256(),
                 )
-            raise
+        raise
 
 
 def release_shared_client(path: Path, *, owner_pid: int | None = None) -> None:
@@ -1657,6 +1663,21 @@ def _idle_seconds() -> float:
     return value
 
 
+def _broker_start_timeout_seconds() -> float:
+    raw = os.environ.get("BRIDGE_DB_BROKER_START_TIMEOUT_SECONDS", "30")
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise SharedRuntimeContractError(
+            "shared_runtime.broker_start_timeout_seconds_invalid"
+        ) from exc
+    if value < 1 or value > 120:
+        raise SharedRuntimeContractError(
+            "shared_runtime.broker_start_timeout_seconds_invalid"
+        )
+    return value
+
+
 async def _monitor_idle_broker(
     paths: SharedRuntimePaths, server: Any, *, idle_seconds: float
 ) -> None:
@@ -1787,7 +1808,7 @@ async def _serve_broker(paths: SharedRuntimePaths) -> None:
     serve_task = asyncio.create_task(server.serve())
     monitors: set[asyncio.Task[None]] = set()
     try:
-        startup_deadline = time.monotonic() + 10.0
+        startup_deadline = time.monotonic() + _broker_start_timeout_seconds()
         while not server.started:
             if serve_task.done():
                 await serve_task
