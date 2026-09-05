@@ -12,6 +12,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
@@ -88,6 +89,20 @@ def _source_repo(tmp_path: Path) -> tuple[Path, str]:
 
 def _stage_python() -> Path:
     return Path(os.environ.get("BRIDGE_DB_TEST_STAGE_PYTHON", sys.executable))
+
+
+def _disposable_stage_python(tmp_path: Path) -> Path:
+    environment = tmp_path / "staging-venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(environment)],
+        check=True,
+    )
+    site_packages = next((environment / "lib").glob("python*/site-packages"))
+    outer_site_packages = Path(sysconfig.get_paths()["purelib"]).resolve(strict=True)
+    (site_packages / "bridge-db-test-environment.pth").write_text(
+        f"{outer_site_packages}\n", encoding="utf-8"
+    )
+    return environment / "bin" / "python"
 
 
 def _stage(source: Path, root: Path, sha: str) -> dict[str, object]:
@@ -274,6 +289,114 @@ def test_stage_binds_launcher_shebang_to_resolved_interpreter(tmp_path: Path) ->
     assert shebang == f"#!{resolved}"
     assert manifest["python_executable_resolved"] == str(resolved)
     assert verify_generation(root, generation_id)["state"] == "verified"
+
+
+def test_durable_launcher_survives_removed_activating_executable(
+    tmp_path: Path,
+) -> None:
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    activating_executable = _disposable_stage_python(tmp_path)
+
+    staged = stage_generation(
+        source=source,
+        root=root,
+        reviewed_sha=sha,
+        python_executable=activating_executable,
+    )
+    generation_id = str(staged["generation_id"])
+    activating_executable.unlink()
+
+    assert verify_generation(root, generation_id)["state"] == "verified"
+
+
+def test_legacy_launcher_requires_activating_executable(tmp_path: Path) -> None:
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    activating_executable = _disposable_stage_python(tmp_path)
+    staged = stage_generation(
+        source=source,
+        root=root,
+        reviewed_sha=sha,
+        python_executable=activating_executable,
+    )
+    generation_id = str(staged["generation_id"])
+    release = root / "releases" / generation_id
+    launcher = release / "bin" / "bridge-db-mcp"
+    manifest_path = release / "generation-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    legacy = execution_generation._make_launcher(  # pyright: ignore[reportPrivateUsage]
+        release_path=release,
+        shebang_python=activating_executable,
+        python_resolved=Path(manifest["python_executable_resolved"]),
+        python_sha256=str(manifest["python_sha256"]),
+        generation_id=generation_id,
+    )
+    manifest["launcher_sha256"] = hashlib.sha256(legacy).hexdigest()
+    for path, mode in (
+        (release, 0o755),
+        (release / "bin", 0o755),
+        (launcher, 0o755),
+        (manifest_path, 0o644),
+    ):
+        path.chmod(mode)
+    launcher.write_bytes(legacy)
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    for path, mode in (
+        (manifest_path, 0o444),
+        (launcher, 0o555),
+        (release / "bin", 0o555),
+        (release, 0o555),
+    ):
+        path.chmod(mode)
+    activating_executable.unlink()
+
+    with pytest.raises(GenerationContractError) as missing:
+        verify_generation(root, generation_id)
+
+    assert missing.value.reason_code == "generation.python_executable_missing"
+
+
+def test_verify_rejects_retargeted_activating_executable(tmp_path: Path) -> None:
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    activating_executable = _disposable_stage_python(tmp_path)
+    generation_id = str(
+        stage_generation(
+            source=source,
+            root=root,
+            reviewed_sha=sha,
+            python_executable=activating_executable,
+        )["generation_id"]
+    )
+    activating_executable.unlink()
+    activating_executable.symlink_to(Path("/bin/sh"))
+
+    with pytest.raises(GenerationContractError) as retargeted:
+        verify_generation(root, generation_id)
+
+    assert retargeted.value.reason_code == "generation.python_identity_mismatch"
+
+
+def test_verify_rejects_dangling_activating_executable(tmp_path: Path) -> None:
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    activating_executable = _disposable_stage_python(tmp_path)
+    generation_id = str(
+        stage_generation(
+            source=source,
+            root=root,
+            reviewed_sha=sha,
+            python_executable=activating_executable,
+        )["generation_id"]
+    )
+    activating_executable.unlink()
+    activating_executable.symlink_to(tmp_path / "missing-python")
+
+    with pytest.raises(GenerationContractError) as dangling:
+        verify_generation(root, generation_id)
+
+    assert dangling.value.reason_code == "generation.python_identity_mismatch"
 
 
 def test_verify_accepts_legacy_launcher_bound_to_activating_executable(
