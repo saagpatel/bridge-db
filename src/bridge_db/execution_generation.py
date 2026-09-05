@@ -1335,10 +1335,16 @@ def _verify_python_binding(manifest: dict[str, Any]) -> tuple[Path, Path, str, b
     if _sha256_file(expected_resolved) != expected_digest:
         raise GenerationContractError("generation.python_digest_mismatch")
     try:
-        observed_resolved = executable.resolve(strict=True)
-    except OSError:
+        executable.lstat()
+    except FileNotFoundError:
         activating_executable_available = False
+    except OSError as exc:
+        raise GenerationContractError("generation.python_executable_missing") from exc
     else:
+        try:
+            observed_resolved = executable.resolve(strict=True)
+        except OSError as exc:
+            raise GenerationContractError("generation.python_identity_mismatch") from exc
         if observed_resolved != expected_resolved:
             raise GenerationContractError("generation.python_identity_mismatch")
         activating_executable_available = True

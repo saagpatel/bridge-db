@@ -378,6 +378,27 @@ def test_verify_rejects_retargeted_activating_executable(tmp_path: Path) -> None
     assert retargeted.value.reason_code == "generation.python_identity_mismatch"
 
 
+def test_verify_rejects_dangling_activating_executable(tmp_path: Path) -> None:
+    source, sha = _source_repo(tmp_path)
+    root = tmp_path / "runtime"
+    activating_executable = _disposable_stage_python(tmp_path)
+    generation_id = str(
+        stage_generation(
+            source=source,
+            root=root,
+            reviewed_sha=sha,
+            python_executable=activating_executable,
+        )["generation_id"]
+    )
+    activating_executable.unlink()
+    activating_executable.symlink_to(tmp_path / "missing-python")
+
+    with pytest.raises(GenerationContractError) as dangling:
+        verify_generation(root, generation_id)
+
+    assert dangling.value.reason_code == "generation.python_identity_mismatch"
+
+
 def test_verify_accepts_legacy_launcher_bound_to_activating_executable(
     tmp_path: Path,
 ) -> None:
