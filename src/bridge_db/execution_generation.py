@@ -1305,7 +1305,7 @@ def _verify_selected_digest(
         raise GenerationContractError(f"generation.{kind}_digest_mismatch")
 
 
-def _verify_python_binding(manifest: dict[str, Any]) -> tuple[Path, str]:
+def _verify_python_binding(manifest: dict[str, Any]) -> tuple[Path, Path, str, bool]:
     executable_value = manifest.get("python_executable")
     resolved_value = manifest.get("python_executable_resolved")
     expected_digest = manifest.get("python_sha256")
@@ -1325,17 +1325,29 @@ def _verify_python_binding(manifest: dict[str, Any]) -> tuple[Path, str]:
     ):
         raise GenerationContractError("generation.python_binding_invalid")
     try:
-        observed_resolved = executable.resolve(strict=True)
-        metadata = observed_resolved.lstat()
+        metadata = expected_resolved.lstat()
     except OSError as exc:
         raise GenerationContractError("generation.python_executable_missing") from exc
-    if observed_resolved != expected_resolved or not stat.S_ISREG(metadata.st_mode):
+    if not stat.S_ISREG(metadata.st_mode):
         raise GenerationContractError("generation.python_identity_mismatch")
     if not metadata.st_mode & stat.S_IXUSR:
         raise GenerationContractError("generation.python_not_executable")
-    if _sha256_file(observed_resolved) != expected_digest:
+    if _sha256_file(expected_resolved) != expected_digest:
         raise GenerationContractError("generation.python_digest_mismatch")
-    return executable, expected_digest
+    try:
+        observed_resolved = executable.resolve(strict=True)
+    except OSError:
+        activating_executable_available = False
+    else:
+        if observed_resolved != expected_resolved:
+            raise GenerationContractError("generation.python_identity_mismatch")
+        activating_executable_available = True
+    return (
+        executable,
+        expected_resolved,
+        expected_digest,
+        activating_executable_available,
+    )
 
 
 def _verify_exact_release_tree(
@@ -1537,7 +1549,12 @@ def verify_generation(root: Path, generation_id: str) -> dict[str, Any]:
         entries
     ):
         raise GenerationContractError("generation.database_rollback_claim_invalid")
-    python_executable, python_sha256 = _verify_python_binding(manifest)
+    (
+        python_executable,
+        python_resolved,
+        python_sha256,
+        activating_executable_available,
+    ) = _verify_python_binding(manifest)
     if (
         runtime_dependency_evidence is not None
         and runtime_dependency_evidence["schema"] == RUNTIME_DEPENDENCY_EVIDENCE_SCHEMA
@@ -1576,7 +1593,6 @@ def verify_generation(root: Path, generation_id: str) -> dict[str, Any]:
     launcher = release / "bin" / "bridge-db-mcp"
     if not launcher.is_file() or launcher.is_symlink():
         raise GenerationContractError("generation.launcher_missing")
-    python_resolved = Path(str(manifest["python_executable_resolved"]))
     expected_launcher = _make_launcher(
         release_path=release,
         shebang_python=python_resolved,
@@ -1597,12 +1613,18 @@ def verify_generation(root: Path, generation_id: str) -> dict[str, Any]:
     )
     observed_launcher = launcher.read_bytes()
     recorded_launcher_sha256 = manifest.get("launcher_sha256")
-    if not any(
-        recorded_launcher_sha256 == _sha256_bytes(candidate)
-        and observed_launcher == candidate
-        for candidate in (expected_launcher, legacy_launcher)
-    ):
+    durable_launcher_matches = (
+        recorded_launcher_sha256 == _sha256_bytes(expected_launcher)
+        and observed_launcher == expected_launcher
+    )
+    legacy_launcher_matches = (
+        recorded_launcher_sha256 == _sha256_bytes(legacy_launcher)
+        and observed_launcher == legacy_launcher
+    )
+    if not durable_launcher_matches and not legacy_launcher_matches:
         raise GenerationContractError("generation.launcher_digest_mismatch")
+    if legacy_launcher_matches and not activating_executable_available:
+        raise GenerationContractError("generation.python_executable_missing")
     return {
         "ok": True,
         "state": "verified",

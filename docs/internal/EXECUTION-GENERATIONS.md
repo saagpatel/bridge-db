@@ -15,9 +15,13 @@ a content-addressed release. Each release binds:
 
 Verification walks the complete release tree. Extra files/directories,
 symlinks, special files, owner drift, mode drift, source digest drift, launcher
-drift, and external interpreter drift all fail closed. The generation ID is
-recomputed from the reviewed SHA prefix and full tracked-source digest. Staging
-also rechecks the clean reviewed checkout after copying, so a concurrent source
+drift, and external interpreter drift all fail closed. A durable launcher binds
+the recorded resolved interpreter directly, so removing the staging venv alias
+does not invalidate an otherwise unchanged generation. If that alias still
+exists, it must resolve to the recorded interpreter; legacy launchers whose
+shebang uses the alias continue to require it. The generation ID is recomputed
+from the reviewed SHA prefix and full tracked-source digest. Staging also
+rechecks the clean reviewed checkout after copying, so a concurrent source
 mutation cannot be published under the reviewed identity.
 
 Verification accepts the exact pre-shared-runtime contract path set only when
