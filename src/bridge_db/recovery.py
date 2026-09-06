@@ -12,7 +12,7 @@ import sqlite3
 import stat
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO, cast
@@ -675,6 +675,40 @@ def _recovery_anchor_inventory_at(
         "recovery_readback": "stale",
         "errors": sorted([*result["errors"], "source_changed_since_anchor"]),
     }
+
+
+#: The only error a still-sound anchor may carry. It means the live database
+#: advanced past the anchor, which every persisted write does by design.
+_SOURCE_MOVED_ON_ERRORS = frozenset({"source_changed_since_anchor"})
+
+
+def anchor_bytes_verified(anchor: Mapping[str, Any]) -> bool:
+    """Whether the anchor itself verifies, independent of how current it is.
+
+    ``ready`` answers a stricter question: the anchor verifies *and* the live
+    database has not advanced past it. Those are different properties with
+    different consequences. An anchor whose digest, SQLite integrity, semantic
+    readback, and permissions all pass is a usable restore point even when the
+    database has moved on; you would replay from it and lose the writes since.
+    An anchor that fails any of those checks is not a restore point at all.
+
+    Callers deciding whether recovery evidence is *intact* want this. Callers
+    deciding whether it is *up to date* want ``ready`` / ``source_current``,
+    which are unchanged. Fails closed: any unexpected error, or any failed
+    intrinsic check, is not verified.
+    """
+    if anchor.get("ready"):
+        return True
+    if anchor.get("state") != "stale":
+        return False
+    if not set(anchor.get("errors") or ()) <= _SOURCE_MOVED_ON_ERRORS:
+        return False
+    return bool(
+        anchor.get("digest_ok")
+        and anchor.get("integrity_ok")
+        and anchor.get("semantic_readback_ok")
+        and anchor.get("permissions") == "private"
+    )
 
 
 def recovery_anchor_inventory(
