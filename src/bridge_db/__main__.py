@@ -222,7 +222,7 @@ async def run_status(*, now: datetime | None = None) -> bool:
         "  Pending handoff trust:"
         f" operator={trust['operator']}, agent={trust['agent']}, ingested={trust['ingested']}"
     )
-    attention = _status_attention(summary)
+    attention = status_attention(summary)
     if attention:
         print(f"  Attention: {attention}")
     freshness_lines = _status_freshness_lines(summary)
@@ -270,49 +270,73 @@ def _status_freshness_lines(summary: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _status_attention(summary: dict[str, Any]) -> str | None:
-    """Return a short operator hint for status signals that need follow-up."""
-    notes: list[str] = []
+def status_attention(summary: dict[str, Any]) -> str | None:
+    """Return a short operator hint for status signals that need follow-up.
+
+    Each note is tagged with whether it is one of ``run_dogfood``'s pass/fail
+    gates. Only a gate note may carry the "dogfood will fail" claim: the
+    execution-generation, tenancy, and snapshot-refusal signals are advisory
+    and are reported by ``--status`` without ``--dogfood`` ever failing on
+    them. Emitting the claim unconditionally sent readers hunting for a
+    dogfood failure that a green run does not have.
+    """
+    # (note, is_dogfood_gate)
+    notes: list[tuple[str, bool]] = []
     if not summary["ok"]:
-        notes.append("bridge health is degraded")
+        notes.append(("bridge health is degraded", True))
     signals = summary["signals"]
     if signals["pending_handoffs"]:
-        notes.append(f"pending_handoffs={signals['pending_handoffs']}")
+        notes.append((f"pending_handoffs={signals['pending_handoffs']}", True))
     if signals["actionable_unprocessed_shipped"]:
         notes.append(
-            f"actionable_unprocessed_shipped={signals['actionable_unprocessed_shipped']}"
+            (
+                f"actionable_unprocessed_shipped={signals['actionable_unprocessed_shipped']}",
+                True,
+            )
         )
     if signals["processed_shipped_without_receipt"]:
         notes.append(
-            f"processed_shipped_without_receipt={signals['processed_shipped_without_receipt']}"
+            (
+                f"processed_shipped_without_receipt={signals['processed_shipped_without_receipt']}",
+                True,
+            )
         )
     if signals["unacknowledged_snapshot_refusals"]:
         notes.append(
-            "unacknowledged_snapshot_refusals="
-            f"{signals['unacknowledged_snapshot_refusals']}"
+            (
+                "unacknowledged_snapshot_refusals="
+                f"{signals['unacknowledged_snapshot_refusals']}",
+                False,
+            )
         )
     if signals["execution_generation_state"] != "verified":
         notes.append(
-            "execution_generation_state="
-            f"{signals['execution_generation_state']}"
+            (
+                "execution_generation_state="
+                f"{signals['execution_generation_state']}",
+                False,
+            )
         )
     if signals["tenancy_state"] == "unverified":
-        notes.append("tenancy_state=unverified")
+        notes.append(("tenancy_state=unverified", False))
     if signals["fts_missing"]:
-        notes.append(f"fts_missing={signals['fts_missing']}")
+        notes.append((f"fts_missing={signals['fts_missing']}", True))
     if signals["fts_orphaned"]:
-        notes.append(f"fts_orphaned={signals['fts_orphaned']}")
+        notes.append((f"fts_orphaned={signals['fts_orphaned']}", True))
     if signals["fts_content_mismatched"]:
         notes.append(
-            f"fts_content_mismatched={signals['fts_content_mismatched']}"
+            (f"fts_content_mismatched={signals['fts_content_mismatched']}", True)
         )
     if signals["audit_degraded"]:
-        notes.append("audit_degraded=true")
+        notes.append(("audit_degraded=true", True))
     if signals["evidence_disposition_degraded"]:
-        notes.append("evidence_disposition_degraded=true")
+        notes.append(("evidence_disposition_degraded=true", True))
     if not notes:
         return None
-    return "; ".join(notes) + " — dogfood will fail until cleared"
+    line = "; ".join(note for note, _ in notes)
+    if any(is_gate for _, is_gate in notes):
+        return line + " — dogfood will fail until cleared"
+    return line + " — advisory; dogfood does not gate on these"
 
 
 def _latest_detail(rows: list[dict[str, Any]]) -> str:
