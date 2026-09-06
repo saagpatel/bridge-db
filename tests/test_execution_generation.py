@@ -1731,3 +1731,27 @@ def test_runtime_identity_labels_mutable_direct_path(
     monkeypatch.delenv("BRIDGE_DB_GENERATION_MANIFEST", raising=False)
     monkeypatch.delenv("BRIDGE_DB_GENERATION_ID", raising=False)
     assert runtime_generation_identity()["state"] == "mutable_direct_path"
+
+
+@pytest.mark.parametrize(
+    "configured_manifest",
+    ["/nonexistent/release/generation-manifest.json", "relative/manifest.json"],
+)
+def test_runtime_identity_separates_a_missing_configured_manifest(
+    monkeypatch: pytest.MonkeyPatch, configured_manifest: str
+) -> None:
+    """A configured-but-unreadable manifest is a release needing recovery.
+
+    An immutable launcher always sets BRIDGE_DB_GENERATION_MANIFEST for the
+    release it launches, so a deleted or non-absolute manifest means the
+    running release cannot be verified. Reporting that as
+    'mutable_direct_path' would make it indistinguishable from an ordinary
+    developer checkout and would suppress the activation recovery action.
+    """
+    monkeypatch.setenv("BRIDGE_DB_GENERATION_MANIFEST", configured_manifest)
+    monkeypatch.delenv("BRIDGE_DB_GENERATION_ID", raising=False)
+
+    identity = runtime_generation_identity()
+
+    assert identity["state"] == "unverified"
+    assert identity["reason_code"] == "generation.configured_manifest_unreadable"
