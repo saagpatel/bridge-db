@@ -2052,3 +2052,128 @@ async def test_activation_action_only_for_a_release_that_failed_to_verify(
         action["action"] for action in result["freshness"]["next_actions"]
     }
     assert ("activate_reviewed_generation" in actions) is expects_activation_action
+
+
+@pytest.mark.asyncio
+async def test_a_write_after_the_anchor_does_not_degrade_storage_health(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale-but-verifying anchor is still a usable restore point.
+
+    RecoveryAnchorV1 goes stale after any persisted write by design. Treating
+    that as a storage fault reported a failure after every normal write, which
+    is the ordinary steady state on a machine running concurrent sessions.
+    """
+    await _make_status_health_ready(tmp_path, monkeypatch)
+    db_path = tmp_path / "test.db"
+    _replace_test_anchor(db_path)
+
+    before = await mod.collect_health_metrics(db)
+    assert before["evidence_lifecycle"]["current_recovery_anchor"]["state"] != "stale"
+
+    # cost_records is inside the anchor's semantic fingerprint but outside the
+    # FTS5 mirror, so this moves the source past the anchor without needing to
+    # reproduce the content_index write path.
+    await db.execute(
+        "INSERT INTO cost_records (system, month, amount) "
+        "VALUES ('cc', '2026-09', 1.0)"
+    )
+    await db.commit()
+
+    after = await mod.collect_health_metrics(db)
+    evidence = after["evidence_lifecycle"]
+
+    # Intact, so storage health stays green...
+    assert evidence["recovery_integrity_ok"] is True
+    assert after["ok"] is True
+    # ...while currency is still reported honestly and separately.
+    assert evidence["current_recovery_anchor"]["state"] == "stale"
+    assert evidence["current_recovery_anchor"]["source_current"] is False
+    assert evidence["current_recovery_ready"] is False
+    assert evidence["recovery_lifecycle_ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_corrupt_anchor_still_degrades_storage_health(
+    db: aiosqlite.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The safety property this must not weaken: broken evidence stays red."""
+    await _make_status_health_ready(tmp_path, monkeypatch)
+    db_path = tmp_path / "test.db"
+    _replace_test_anchor(db_path)
+
+    anchor_db = recovery.recovery_anchor_path(db_path) / recovery.RECOVERY_DATABASE_NAME
+    anchor_db.chmod(0o600)
+    anchor_db.write_bytes(b"not a sqlite database at all")
+
+    result = await mod.collect_health_metrics(db)
+    evidence = result["evidence_lifecycle"]
+
+    assert evidence["recovery_integrity_ok"] is False
+    assert result["ok"] is False
+
+
+@pytest.mark.parametrize(
+    ("anchor", "expected"),
+    [
+        ({"ready": True}, True),
+        # Stale for the one expected reason, with every intrinsic check passing.
+        (
+            {
+                "ready": False,
+                "state": "stale",
+                "errors": ["source_changed_since_anchor"],
+                "digest_ok": True,
+                "integrity_ok": True,
+                "semantic_readback_ok": True,
+                "permissions": "private",
+            },
+            True,
+        ),
+        # An additional error is not the expected-staleness case: fail closed.
+        (
+            {
+                "ready": False,
+                "state": "stale",
+                "errors": ["source_changed_since_anchor", "digest_mismatch"],
+                "digest_ok": True,
+                "integrity_ok": True,
+                "semantic_readback_ok": True,
+                "permissions": "private",
+            },
+            False,
+        ),
+        # Stale, one expected error, but an intrinsic check failed.
+        (
+            {
+                "ready": False,
+                "state": "stale",
+                "errors": ["source_changed_since_anchor"],
+                "digest_ok": False,
+                "integrity_ok": True,
+                "semantic_readback_ok": True,
+                "permissions": "private",
+            },
+            False,
+        ),
+        # World-readable recovery evidence is never treated as sound.
+        (
+            {
+                "ready": False,
+                "state": "stale",
+                "errors": ["source_changed_since_anchor"],
+                "digest_ok": True,
+                "integrity_ok": True,
+                "semantic_readback_ok": True,
+                "permissions": "world_readable",
+            },
+            False,
+        ),
+        ({"ready": False, "state": "invalid", "errors": []}, False),
+        ({"ready": False, "state": "missing", "errors": []}, False),
+    ],
+)
+def test_anchor_bytes_verified_fails_closed(
+    anchor: dict[str, Any], expected: bool
+) -> None:
+    assert recovery.anchor_bytes_verified(anchor) is expected

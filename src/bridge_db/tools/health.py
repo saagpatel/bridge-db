@@ -28,7 +28,7 @@ from bridge_db.execution_generation import (
     SUPPORTED_RUNTIME_DEPENDENCY_STATES,
     runtime_generation_identity,
 )
-from bridge_db.recovery import recovery_anchor_inventory
+from bridge_db.recovery import anchor_bytes_verified, recovery_anchor_inventory
 from bridge_db.recovery_seal import recovery_seal_inventory
 from bridge_db.shared_runtime import (
     shared_runtime_current_readiness,
@@ -712,7 +712,17 @@ async def collect_health_metrics(db: Any) -> dict[str, Any]:
     # Migration backups prove that a historical migration had a readable
     # rollback point. They are not compared with the live database after later
     # writes, so they cannot establish present-day recovery readiness.
-    recovery_integrity_ok = recovery_anchor["ready"]
+    #
+    # recovery_integrity_ok asks whether the recovery evidence is intact, not
+    # whether it is current. RecoveryAnchorV1 goes stale after *any* persisted
+    # write by design, so gating storage health on currency reported a fault
+    # every time a normal write landed — on a machine with several concurrent
+    # sessions that is close to always, which trains readers to ignore the
+    # signal. A stale-but-verifying anchor is still a usable restore point.
+    # Currency keeps its own separate, unchanged signals below:
+    # current_recovery_ready, recovery_lifecycle_ready, and the anchor's own
+    # state/source_current fields.
+    recovery_integrity_ok = anchor_bytes_verified(recovery_anchor)
     evidence_lifecycle = {
         "audit": audit_inventory,
         "recall": {
