@@ -1080,7 +1080,15 @@ def _freshness_next_actions(
                 "reason": "Pending or active handoffs exceeded freshness thresholds or have unknown age.",
             }
         )
-    if health["runtime_generation"]["state"] != "verified":
+    # 'mutable_direct_path' means this process has no generation manifest beside
+    # its source at all — the ordinary shape of a CLI run from a git checkout,
+    # which is exactly how docs/internal/POST-SYNC-REVIEW.md says to run
+    # --status and --dogfood. Activating a generation would not change it, so
+    # recommending activation there sends the reader after a non-problem. The
+    # state itself still ships in runtime_generation for anyone who wants it.
+    # 'unverified' and 'identity_mismatch' do describe a release that failed to
+    # read back, and those keep the recommendation.
+    if health["runtime_generation"]["state"] not in ("verified", "mutable_direct_path"):
         actions.append(
             {
                 "action": "activate_reviewed_generation",
