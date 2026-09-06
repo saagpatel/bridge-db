@@ -15,6 +15,7 @@ import bridge_db.config as cfg
 import bridge_db.tools.recall as recall_tool
 from bridge_db import auth, config, recovery
 from bridge_db.__main__ import (
+    status_attention,
     run_apply_owner_delegation_manifest,
     run_cancel_handoff,
     run_create_recovery_anchor,
@@ -1817,3 +1818,74 @@ def test_enroll_recovers_from_malformed_principals_file(
     assert "malformed principals file" in out
     data = json.loads(principals_path.read_text(encoding="utf-8"))
     assert "cc" in data["principals"]
+
+
+def _attention_summary(**signal_overrides: object) -> dict[str, object]:
+    """A green status summary; overrides switch on individual signals."""
+    signals: dict[str, object] = {
+        "pending_handoffs": 0,
+        "actionable_unprocessed_shipped": 0,
+        "processed_shipped_without_receipt": 0,
+        "unacknowledged_snapshot_refusals": 0,
+        "execution_generation_state": "verified",
+        "tenancy_state": "verified",
+        "fts_missing": 0,
+        "fts_orphaned": 0,
+        "fts_content_mismatched": 0,
+        "audit_degraded": False,
+        "evidence_disposition_degraded": False,
+    }
+    signals.update(signal_overrides)
+    return {"ok": True, "signals": signals}
+
+
+def teststatus_attention_is_none_when_every_signal_is_clear() -> None:
+    assert status_attention(_attention_summary()) is None
+
+
+def teststatus_attention_claims_dogfood_failure_only_for_a_real_gate() -> None:
+    attention = status_attention(
+        _attention_summary(actionable_unprocessed_shipped=2)
+    )
+
+    assert attention is not None
+    assert "actionable_unprocessed_shipped=2" in attention
+    assert attention.endswith("dogfood will fail until cleared")
+
+
+def teststatus_attention_does_not_claim_dogfood_failure_for_advisory_signals() -> None:
+    """Regression: --dogfood exits 0 with these set, so the claim was false.
+
+    execution_generation_state is not one of run_dogfood's gates. Running the
+    CLI from a git checkout rather than an immutable release reports
+    mutable_direct_path forever, which previously told every reader that
+    dogfood would fail when it exits 0.
+    """
+    attention = status_attention(
+        _attention_summary(
+            execution_generation_state="mutable_direct_path",
+            tenancy_state="unverified",
+            unacknowledged_snapshot_refusals=1,
+        )
+    )
+
+    assert attention is not None
+    assert "execution_generation_state=mutable_direct_path" in attention
+    assert "tenancy_state=unverified" in attention
+    assert "unacknowledged_snapshot_refusals=1" in attention
+    assert "dogfood will fail" not in attention
+    assert attention.endswith("advisory; dogfood does not gate on these")
+
+
+def teststatus_attention_prefers_the_gate_claim_when_signals_are_mixed() -> None:
+    attention = status_attention(
+        _attention_summary(
+            execution_generation_state="mutable_direct_path",
+            fts_missing=3,
+        )
+    )
+
+    assert attention is not None
+    assert "execution_generation_state=mutable_direct_path" in attention
+    assert "fts_missing=3" in attention
+    assert attention.endswith("dogfood will fail until cleared")

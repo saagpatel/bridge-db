@@ -2703,6 +2703,21 @@ def runtime_generation_identity() -> dict[str, Any]:
         else Path(__file__).resolve().parents[2] / "generation-manifest.json"
     )
     if not manifest_path.is_absolute() or not manifest_path.is_file():
+        # An immutable launcher always sets BRIDGE_DB_GENERATION_MANIFEST for
+        # the release it launches. If that configured manifest is missing or
+        # not absolute, this is a release that cannot be verified and needs
+        # recovery — not the manifest-less checkout that 'mutable_direct_path'
+        # describes. Collapsing the two hid a real recovery path behind the
+        # ordinary developer case.
+        if manifest_value:
+            return {
+                "schema": GENERATION_SCHEMA,
+                "state": "unverified",
+                "generation_id": None,
+                "reviewed_source_sha": None,
+                "manifest_path": str(manifest_path),
+                "reason_code": "generation.configured_manifest_unreadable",
+            }
         return {
             "schema": GENERATION_SCHEMA,
             "state": "mutable_direct_path",

@@ -1126,16 +1126,15 @@ async def test_status_freshness_reports_stale_snapshots_without_degrading_health
     assert result["freshness"]["overall"] == "stale"
     assert result["freshness"]["snapshots"]["cc"]["state"] == "stale"
     assert result["freshness"]["snapshots"]["cc"]["age_hours"] == 73.0
+    # The test process has no generation manifest beside its source, so
+    # runtime_generation is 'mutable_direct_path'. That is a direct-path
+    # invocation, not a release that failed to verify, so it must not
+    # recommend activating a generation.
     assert result["freshness"]["next_actions"] == [
         {
             "action": "cc_refresh_snapshot",
             "owner": "cc",
             "reason": "cc snapshot freshness is stale.",
-        },
-        {
-            "action": "activate_reviewed_generation",
-            "owner": "operator",
-            "reason": "BridgeDB is not running from a verified immutable generation.",
         },
     ]
 
@@ -2010,3 +2009,46 @@ async def test_health_counts_protected_rows(
     await db.commit()
     result = await fns["health"](ctx=make_ctx(db))
     assert result["ledger_protected_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("generation_state", "expects_activation_action"),
+    [
+        ("verified", False),
+        # A direct-path run has no generation manifest beside its source at
+        # all. That is how POST-SYNC-REVIEW.md tells operators to run --status
+        # and --dogfood, and activating a generation would not change it.
+        ("mutable_direct_path", False),
+        # These two describe a release that failed to read back, so the
+        # activation recommendation is real.
+        ("unverified", True),
+        ("identity_mismatch", True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_activation_action_only_for_a_release_that_failed_to_verify(
+    db: aiosqlite.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    generation_state: str,
+    expects_activation_action: bool,
+) -> None:
+    await _make_status_health_ready(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        mod,
+        "runtime_generation_identity",
+        lambda: {
+            "schema": "BridgeExecutionGenerationV1",
+            "state": generation_state,
+            "generation_id": None,
+            "reviewed_source_sha": None,
+            "manifest_path": None,
+        },
+    )
+
+    result = await mod.collect_status_summary(db, now=FIXED_NOW)
+
+    actions = {
+        action["action"] for action in result["freshness"]["next_actions"]
+    }
+    assert ("activate_reviewed_generation" in actions) is expects_activation_action
