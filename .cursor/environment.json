@@ -1,0 +1,5 @@
+{
+  "name": "bridge-db",
+  "disableAllMcpServers": true,
+  "install": "set -eu; python3 -m pip install --disable-pip-version-check --user 'uv==0.12.12'; export PATH=\"$(python3 -m site --user-base)/bin:$PATH\"; uv python install 3.12.13; uv sync --locked --dev --python 3.12.13; uv run pytest"
+}
