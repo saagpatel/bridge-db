@@ -1,0 +1,112 @@
+{
+  "schema_version": "proof-package.v1",
+  "package_id": "20260607-bridge-sync-steady-state",
+  "subject": {
+    "repo": "bridge-db",
+    "lane": "operational-sync-proof",
+    "claim": "bridge-db is healthy and shipped-event sync is receipt-backed at the checked steady-state."
+  },
+  "producer": {
+    "repo": "bridge-db",
+    "mode": "read-only",
+    "commands": [
+      "uv run python -m bridge_db --status",
+      "uv run python -m bridge_db --dogfood"
+    ]
+  },
+  "source_state": {
+    "generated_at": "2026-06-07T21:20:49Z",
+    "git_branch": "main",
+    "git_status": "clean",
+    "freshness_window_hours": 24
+  },
+  "claims": [
+    {
+      "id": "overall-health",
+      "statement": "bridge-db reports Overall: healthy with DB schema v6 and bridge fallback file present.",
+      "status": "passed",
+      "evidence": [
+        "status-receipt"
+      ]
+    },
+    {
+      "id": "receipt-backed-shipped-sync",
+      "statement": "Shipped-event sync has no unprocessed shipped events and no processed shipped events without receipts.",
+      "status": "passed",
+      "evidence": [
+        "status-receipt",
+        "dogfood-receipt",
+        "activity-tool-contract"
+      ]
+    },
+    {
+      "id": "recall-index-aligned",
+      "statement": "FTS recall index is aligned with expected source rows.",
+      "status": "passed",
+      "evidence": [
+        "status-receipt",
+        "dogfood-receipt"
+      ]
+    },
+    {
+      "id": "audit-observability-present",
+      "statement": "Dogfood checked recent audit rows and surfaced the latest confirm_shipped_sync detail.",
+      "status": "passed",
+      "evidence": [
+        "dogfood-receipt"
+      ]
+    }
+  ],
+  "verification": {
+    "overall": "passed",
+    "checks": [
+      {
+        "name": "status command",
+        "status": "passed"
+      },
+      {
+        "name": "dogfood command",
+        "status": "passed"
+      }
+    ],
+    "missing_receipts": [],
+    "known_gaps": [
+      "This package proves the checked local bridge state at command time; future bridge writes require fresh status/dogfood receipts."
+    ]
+  },
+  "safety": {
+    "redaction": "none",
+    "secrets_checked": true,
+    "live_write_performed": false
+  },
+  "artifacts": [
+    {
+      "id": "status-receipt",
+      "kind": "command-receipt",
+      "path": "status-receipt.txt",
+      "description": "Read-only bridge-db status output.",
+      "required": true
+    },
+    {
+      "id": "dogfood-receipt",
+      "kind": "command-receipt",
+      "path": "dogfood-receipt.txt",
+      "description": "Read-only bridge-db dogfood output.",
+      "required": true
+    },
+    {
+      "id": "readme-operating-contract",
+      "kind": "repo-doc",
+      "path": "../../../README.md",
+      "description": "bridge-db operating model and receipt guidance.",
+      "required": true
+    },
+    {
+      "id": "activity-tool-contract",
+      "kind": "source-contract",
+      "path": "../../../src/bridge_db/tools/activity.py",
+      "description": "confirm_shipped_sync and receipt-backed shipped-event lifecycle.",
+      "required": true
+    }
+  ]
+}

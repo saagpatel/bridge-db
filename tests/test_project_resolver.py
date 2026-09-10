@@ -1,0 +1,228 @@
+"""Tests for the canonical project-name resolver (consumer of the auditor registry)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from bridge_db.project_resolver import resolve
+
+
+def _entry(
+    key: str,
+    display: str,
+    repo: str | None = None,
+    aliases: list[str] | None = None,
+    bridge_project_names: list[str] | None = None,
+    notion_local_page_id: str | None = None,
+    notion_local_title: str | None = None,
+    supp_key: str | None = None,
+) -> dict[str, object]:
+    return {
+        "canonical_key": key,
+        "display_name": display,
+        "repo_full_name": repo,
+        "supp_key": supp_key,
+        "aliases": aliases or [],
+        "bridge_project_names": bridge_project_names or [],
+        "notion_local_page_id": notion_local_page_id,
+        "notion_local_title": notion_local_title,
+    }
+
+
+def _write_registry(
+    path: Path, entries: list[dict[str, object]], overrides: dict[str, str] | None = None
+) -> Path:
+    path.write_text(json.dumps({"entries": entries, "resolution_overrides": overrides or {}}))
+    return path
+
+
+def test_absent_registry_is_pass_through(tmp_path: Path) -> None:
+    result = resolve("MCPAudit", registry_path=tmp_path / "missing.json")
+    assert result.registry_present is False
+    assert result.matched is False
+    assert result.canonical_key is None
+
+
+def test_matches_display_and_alias_spellings(tmp_path: Path) -> None:
+    reg = _write_registry(
+        tmp_path / "r.json",
+        [
+            _entry(
+                "MCPAudit",
+                "MCPAudit",
+                repo="saagpatel/MCPAudit",
+                aliases=["notion:MCP Audit"],
+            )
+        ],
+    )
+    assert resolve("MCP Audit", registry_path=reg).canonical_key == "saagpatel/MCPAudit"
+    assert resolve("mcpaudit", registry_path=reg).canonical_key == "saagpatel/MCPAudit"
+
+
+def test_matches_bridge_project_names_and_exposes_notion_target(tmp_path: Path) -> None:
+    reg = _write_registry(
+        tmp_path / "r.json",
+        [
+            _entry(
+                "Fun:GamePrjs/LoreKeeper",
+                "LoreKeeper",
+                repo="saagpatel/LoreKeeper",
+                bridge_project_names=["lore-keeper-ship-lane"],
+                notion_local_page_id="326c21f1-caf0-81c3-8759-e5aa28dee730",
+                notion_local_title="LoreKeeper",
+            )
+        ],
+    )
+
+    result = resolve("lore-keeper-ship-lane", registry_path=reg)
+
+    assert result.canonical_key == "saagpatel/LoreKeeper"
+    assert result.notion_page_id == "326c21f1-caf0-81c3-8759-e5aa28dee730"
+    assert result.notion_title == "LoreKeeper"
+
+
+def test_override_resolves_hard_normalization_failure(tmp_path: Path) -> None:
+    reg = _write_registry(
+        tmp_path / "r.json",
+        [_entry("Notion", "Notion", repo="saagpatel/notion-operating-system")],
+        overrides={"notion_os": "Notion"},
+    )
+    assert resolve("notion_os", registry_path=reg).canonical_key == (
+        "saagpatel/notion-operating-system"
+    )
+
+
+def test_override_can_resolve_direct_ghra_alias_map_value(tmp_path: Path) -> None:
+    reg = _write_registry(
+        tmp_path / "r.json",
+        [_entry("operant-public", "operant-public", repo="saagpatel/operant")],
+        overrides={"OPERANT": "saagpatel/operant"},
+    )
+    assert resolve("OPERANT", registry_path=reg).canonical_key == "saagpatel/operant"
+
+
+def test_repo_less_entry_with_supp_key_resolves_to_supp_key(tmp_path: Path) -> None:
+    reg = _write_registry(
+        tmp_path / "r.json",
+        [_entry("supp:personal-ops", "personal-ops", repo=None, supp_key="supp:personal-ops")],
+    )
+    result = resolve("personal-ops", registry_path=reg)
+    assert result.registry_present is True
+    assert result.matched is True
+    assert result.canonical_key == "supp:personal-ops"
+
+
+def test_repo_less_entry_without_supp_key_stays_null(tmp_path: Path) -> None:
+    # Pre-supp_key registry format: a repo-less entry still resolves to
+    # matched=True / canonical_key=None so logging is unchanged on old output.
+    reg = _write_registry(
+        tmp_path / "r.json",
+        [_entry("supp:personal-ops", "personal-ops", repo=None)],
+    )
+    result = resolve("personal-ops", registry_path=reg)
+    assert result.registry_present is True
+    assert result.matched is True
+    assert result.canonical_key is None
+
+
+def test_repo_backed_entry_prefers_repo_full_name_over_supp_key(tmp_path: Path) -> None:
+    # Even if a registry entry carries both fields, repo_full_name wins.
+    reg = _write_registry(
+        tmp_path / "r.json",
+        [_entry("saagpatel/Recall", "Recall", repo="saagpatel/Recall", supp_key="supp:Recall")],
+    )
+    result = resolve("Recall", registry_path=reg)
+    assert result.matched is True
+    assert result.canonical_key == "saagpatel/Recall"
+
+
+def test_supp_key_without_supp_prefix_is_rejected(tmp_path: Path) -> None:
+    # A malformed supp_key that does not carry the supp: prefix is not adopted
+    # as a canonical key (bridge-db defends the keyspace contract on its side).
+    reg = _write_registry(
+        tmp_path / "r.json",
+        [_entry("junk-key", "junk", repo=None, supp_key="not-prefixed")],
+    )
+    result = resolve("junk", registry_path=reg)
+    assert result.matched is True
+    assert result.canonical_key is None
+
+
+def test_present_but_unmatched_is_flagged_not_passed_through(tmp_path: Path) -> None:
+    reg = _write_registry(tmp_path / "r.json", [_entry("MCPAudit", "MCPAudit")])
+    result = resolve("weekly-review", registry_path=reg)
+    assert result.registry_present is True
+    assert result.matched is False
+    assert result.canonical_key is None
+
+
+def test_lossy_collision_is_ambiguous_but_exact_identity_still_resolves(
+    tmp_path: Path,
+) -> None:
+    reg = _write_registry(
+        tmp_path / "r.json",
+        [
+            _entry(
+                "first",
+                "Foo-Bar",
+                repo="owner-a/Foo-Bar",
+                notion_local_page_id="page-a",
+            ),
+            _entry(
+                "second",
+                "foo_bar",
+                repo="owner-b/foo_bar",
+                notion_local_page_id="page-b",
+            ),
+        ],
+    )
+
+    ambiguous = resolve("foo bar", registry_path=reg)
+    assert ambiguous.registry_present is True
+    assert ambiguous.matched is False
+    assert ambiguous.ambiguous is True
+    assert ambiguous.canonical_key is None
+    assert ambiguous.notion_page_id is None
+
+    first = resolve("owner-a/Foo-Bar", registry_path=reg)
+    second = resolve("owner-b/foo_bar", registry_path=reg)
+    assert first.canonical_key == "owner-a/Foo-Bar"
+    assert first.notion_page_id == "page-a"
+    assert second.canonical_key == "owner-b/foo_bar"
+    assert second.notion_page_id == "page-b"
+
+
+def test_explicit_override_disambiguates_lossy_collision(tmp_path: Path) -> None:
+    reg = _write_registry(
+        tmp_path / "r.json",
+        [
+            _entry("first", "Foo-Bar", repo="owner-a/Foo-Bar"),
+            _entry("second", "foo_bar", repo="owner-b/foo_bar"),
+        ],
+        overrides={"foo bar": "second"},
+    )
+
+    result = resolve("foo bar", registry_path=reg)
+    assert result.matched is True
+    assert result.ambiguous is False
+    assert result.canonical_key == "owner-b/foo_bar"
+
+
+def test_reloads_when_registry_file_changes(tmp_path: Path) -> None:
+    reg = _write_registry(tmp_path / "r.json", [_entry("MCPAudit", "MCPAudit")])
+    assert resolve("Recall", registry_path=reg).matched is False
+    # Auditor re-runs and rewrites the registry; force a distinct mtime so the
+    # mtime-keyed cache reloads rather than serving the stale index.
+    bumped = reg.stat().st_mtime_ns + 1_000_000_000
+    _write_registry(
+        reg,
+        [
+            _entry("MCPAudit", "MCPAudit", repo="saagpatel/MCPAudit"),
+            _entry("Recall", "Recall", repo="saagpatel/Recall"),
+        ],
+    )
+    import os
+
+    os.utime(reg, ns=(bumped, bumped))
+    assert resolve("Recall", registry_path=reg).canonical_key == "saagpatel/Recall"

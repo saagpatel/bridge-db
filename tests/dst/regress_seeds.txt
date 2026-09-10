@@ -1,0 +1,27 @@
+# DST regression-seed corpus (R3 §2): every bug-finding or
+# behavior-pinning seed is committed here and replays forever.
+# Format: <scenario> <seed>  — loader: tests/dst/test_regress_seeds.py
+claim-race 0
+# clear-race: TAR-03 same-role ownership boundary. One Codex session's
+# capability-less clear races another Codex session's pickup; every schedule
+# refuses the clear and admits only the claim.
+clear-race 0
+# receipt-crash: WC-6 — Phase-3 INV-2 fix pin (crash still lands; TWO
+# concurrent retries converge the ledger to one durable stale_claim
+# receipt via the statement-atomic dedupe). Re-pinned 11 → 5 → 20 → 5 across
+# declared window changes as loser/winner transaction operations shifted.
+receipt-crash 5
+# cas-pingpong: RC-3 — the warn/enforce canary was cut 2026-07-12; missing_cas
+# is now unconditional (blind-vs-cas holds on any seed, pinned at 0).
+# stale-cas pins the still-live two-honest-CAS-writer race that replaces the
+# old warn-mode "blind wins the race, CAS goes stale" mechanism (dead now
+# that a blind write can never win against an existing row).
+cas-pingpong-missing-cas 0
+cas-pingpong-stale-cas 0
+# wal-starvation: WC-9 — red arm pins the leaked-tx wall (INV-10 fires,
+# checkpoint starved); control arm pins bounded-WAL liveness
+wal-starvation-red 0
+wal-starvation-control 0
+# trust-race: WC-8 — Phase-3 INV-8 fix pin (mid-window trust downgrade
+# makes the trust-bound CAS miss; claim refused, never stale-trust-active)
+trust-race 0

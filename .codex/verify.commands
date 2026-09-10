@@ -1,0 +1,4 @@
+# codex-os-managed
+uv run pytest
+uv run pyright
+uv run ruff check

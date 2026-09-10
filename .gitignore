@@ -1,0 +1,24 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv
+
+# OS/editor noise
+.DS_Store
+
+# Serena IDE state (local cache + memories)
+.serena/
+
+# Claude Code local runtime (auto-worktrees, session state)
+.claude/
+
+# Generated CLAUDE.md backup residue
+CLAUDE.md.bak

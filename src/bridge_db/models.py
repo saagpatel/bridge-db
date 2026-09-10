@@ -1,0 +1,90 @@
+"""Shared types, ownership maps, and validation helpers."""
+
+from typing import Literal
+
+# All systems that can interact with the bridge
+CallerID = Literal["cc", "codex", "claude_ai", "notion_os", "personal_ops"]
+
+# Systems that own activity/snapshot/cost records
+# claude_ai uses context_sections; notion_os/personal_ops log activity and costs
+SystemID = Literal["cc", "codex", "notion_os", "personal_ops"]
+
+# Provenance trust label on instruction-bearing rows (pending_handoffs,
+# activity_log, context_sections, system_snapshots). 'agent' is the conservative
+# write default; the Phase-2 pickup gate refuses non-'operator' handoffs on Codex.
+SourceTrust = Literal["operator", "agent", "ingested"]
+
+CALLER_IDS: tuple[CallerID, ...] = (
+    "cc",
+    "codex",
+    "claude_ai",
+    "notion_os",
+    "personal_ops",
+)
+
+SYSTEM_IDS: tuple[SystemID, ...] = (
+    "cc",
+    "codex",
+    "notion_os",
+    "personal_ops",
+)
+
+# notification-hub keeps hyphenated external source names on the wire. Keep
+# this map explicit so producers do not guess between `_` and `-` dialects.
+NOTIFICATION_SOURCE_ALIASES: dict[CallerID, str] = {
+    "cc": "cc",
+    "codex": "codex",
+    "claude_ai": "claude_ai",
+    "notion_os": "notion-os",
+    "personal_ops": "personal-ops",
+}
+
+# Known context sections and their authorized steward. update_section requires
+# the channel-bound caller to match this map; unknown names are rejected.
+SECTION_OWNERS: dict[str, CallerID] = {
+    "career": "claude_ai",
+    "speaking": "claude_ai",
+    "research": "claude_ai",
+    "capabilities": "claude_ai",
+    "portfolio": "cc",
+}
+
+# Callers allowed to log activity per source column value.
+# activity_log.source maps directly from caller.
+ACTIVITY_SOURCES: frozenset[CallerID] = frozenset(CALLER_IDS)
+
+# Callers allowed to save snapshots per system
+# Only cc/codex own full state snapshots; notion_os/personal_ops use activity log instead
+SNAPSHOT_SYSTEM_MAP: dict[str, SystemID] = {
+    "cc": "cc",
+    "codex": "codex",
+}
+
+# Callers allowed to record costs (maps caller → system column value)
+COST_SYSTEM_MAP: dict[str, SystemID] = {
+    "cc": "cc",
+    "codex": "codex",
+    "notion_os": "notion_os",
+    "personal_ops": "personal_ops",
+}
+
+READABLE_SYSTEMS: frozenset[SystemID] = frozenset(COST_SYSTEM_MAP.values())
+
+
+def snapshot_ownership_error(caller: str) -> str:
+    return f"Caller '{caller}' cannot save snapshots. Only 'cc' and 'codex' own snapshot data."
+
+
+def cost_ownership_error(caller: str) -> str:
+    allowed = ", ".join(f"'{k}'" for k in COST_SYSTEM_MAP)
+    return f"Caller '{caller}' cannot record costs. Allowed callers: {allowed}."
+
+
+def invalid_source_error(source: str) -> str:
+    allowed = ", ".join(f"'{value}'" for value in sorted(ACTIVITY_SOURCES))
+    return f"Invalid source '{source}'. Allowed sources: {allowed}."
+
+
+def invalid_system_error(system: str) -> str:
+    allowed = ", ".join(f"'{value}'" for value in sorted(READABLE_SYSTEMS))
+    return f"Invalid system '{system}'. Allowed systems: {allowed}."

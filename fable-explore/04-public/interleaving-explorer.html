@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Interleaving Explorer: two agents, one row, and a lost update</title>
+<!--
+  A self-contained interactive explainer. No build step, no dependencies.
+  View source: everything is in this file, and the simulation code below is
+  the tutorial. It models the CAS ping-pong scenario from bridge-db's
+  deterministic simulation test suite (tests/dst/test_cas_pingpong.py).
+
+  The model is simplified on purpose: the real system schedules writers at
+  every SQL statement; this page schedules at read/write granularity. The
+  lost-update shape is identical.
+-->
+<style>
+  :root {
+    --paper: #faf8f4;
+    --ink: #1c1a17;
+    --muted: #6b675f;
+    --line: #e2ded6;
+    --card: #ffffff;
+    --accent-a: #b45309;   /* writer A, the blind write: amber */
+    --accent-a-bg: #fdf1e2;
+    --accent-b: #1d4ed8;   /* writer B, the CAS write: blue */
+    --accent-b-bg: #e8eefc;
+    --receipt: #6d28d9;    /* conflict receipts: violet */
+    --receipt-bg: #f1ebfc;
+    --bad: #b91c1c;
+    --bad-bg: #fbe9e9;
+    --good: #15803d;
+    --good-bg: #e8f5ec;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #171613;
+      --ink: #ece9e2;
+      --muted: #a09b90;
+      --line: #33312c;
+      --card: #201e1a;
+      --accent-a: #f59e0b;
+      --accent-a-bg: #33270f;
+      --accent-b: #60a5fa;
+      --accent-b-bg: #17233d;
+      --receipt: #a78bfa;
+      --receipt-bg: #271c3d;
+      --bad: #f87171;
+      --bad-bg: #3a1717;
+      --good: #4ade80;
+      --good-bg: #12301c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem 1rem 4rem;
+    background: var(--paper); color: var(--ink);
+    font: 17px/1.65 Georgia, "Times New Roman", serif;
+  }
+  main { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 1.7rem; line-height: 1.25; margin: 0 0 .4rem; }
+  h2 { font-size: 1.2rem; margin: 2.4rem 0 .6rem; }
+  p.lede { color: var(--muted); font-size: 1.05rem; margin-top: 0; }
+  p { margin: .8rem 0; }
+  code, .mono { font-family: var(--mono); font-size: .85em; }
+  .sim {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 1rem; margin: 1.4rem 0; font-family: var(--mono); font-size: .8rem;
+  }
+  .controls { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-bottom: 1rem; }
+  .controls .spacer { flex: 1; }
+  button {
+    font-family: var(--mono); font-size: .78rem; padding: .38rem .7rem;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--card);
+    color: var(--ink); cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled { opacity: .4; cursor: default; }
+  button.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .mode {
+    display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
+  }
+  .mode button { border: 0; border-radius: 0; }
+  .mode button.on { background: var(--ink); color: var(--paper); }
+  input[type="number"] {
+    font-family: var(--mono); font-size: .78rem; width: 4.2rem; padding: .34rem .4rem;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--ink);
+  }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem; }
+  @media (max-width: 600px) { .grid2 { grid-template-columns: 1fr; } }
+  .panel { border: 1px solid var(--line); border-radius: 8px; padding: .6rem .7rem; }
+  .panel h3 {
+    margin: 0 0 .45rem; font-size: .72rem; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--muted); font-weight: 600;
+  }
+  .panel.wa { border-left: 3px solid var(--accent-a); }
+  .panel.wb { border-left: 3px solid var(--accent-b); }
+  .panel .kv { display: flex; justify-content: space-between; gap: .5rem; padding: .1rem 0; }
+  .panel .kv .k { color: var(--muted); }
+  .dbrow {
+    margin-top: .7rem; border: 1px solid var(--line); border-radius: 8px; padding: .6rem .7rem;
+    background: var(--paper);
+  }
+  .steps { display: flex; flex-wrap: wrap; gap: .3rem; margin: .8rem 0 .2rem; }
+  .step {
+    padding: .22rem .5rem; border-radius: 5px; border: 1px solid var(--line);
+    color: var(--muted); background: var(--card); cursor: pointer; user-select: none;
+  }
+  .step.a { border-color: var(--accent-a); color: var(--accent-a); background: var(--accent-a-bg); }
+  .step.b { border-color: var(--accent-b); color: var(--accent-b); background: var(--accent-b-bg); }
+  .step.future { opacity: .32; }
+  .step.now { outline: 2px solid var(--ink); }
+  .log { margin-top: .6rem; }
+  .log div { padding: .12rem 0; color: var(--muted); }
+  .log .hot { color: var(--ink); }
+  .receipt {
+    border: 1px dashed var(--receipt); background: var(--receipt-bg); color: var(--receipt);
+    border-radius: 6px; padding: .4rem .6rem; margin-top: .45rem;
+  }
+  .banner {
+    margin-top: .8rem; border-radius: 8px; padding: .55rem .7rem; font-weight: 600;
+  }
+  .banner.bad { background: var(--bad-bg); color: var(--bad); }
+  .banner.good { background: var(--good-bg); color: var(--good); }
+  .banner.plain { background: var(--paper); color: var(--muted); border: 1px solid var(--line); }
+  .map { display: grid; gap: .35rem; margin-top: .6rem; }
+  .map .row {
+    display: flex; align-items: center; gap: .5rem; padding: .3rem .5rem;
+    border: 1px solid var(--line); border-radius: 6px; cursor: pointer;
+  }
+  .map .row:hover { border-color: var(--muted); }
+  .map .row.current { outline: 2px solid var(--ink); }
+  .map .ops { display: flex; gap: .25rem; flex: 1; }
+  .map .ops span { padding: .05rem .38rem; border-radius: 4px; }
+  .map .ops .a { background: var(--accent-a-bg); color: var(--accent-a); }
+  .map .ops .b { background: var(--accent-b-bg); color: var(--accent-b); }
+  .badge { padding: .12rem .5rem; border-radius: 999px; font-size: .72rem; white-space: nowrap; }
+  .badge.bad { background: var(--bad-bg); color: var(--bad); }
+  .badge.good { background: var(--good-bg); color: var(--good); }
+  .badge.warn { background: var(--receipt-bg); color: var(--receipt); }
+  .sweep { display: grid; grid-template-columns: repeat(15, 1fr); gap: .3rem; margin-top: .6rem; }
+  .sweep button {
+    aspect-ratio: 1; padding: 0; font-size: .68rem; border-radius: 5px;
+  }
+  .sweep button.lost { background: var(--bad-bg); color: var(--bad); border-color: var(--bad); }
+  .sweep button.ok { background: var(--good-bg); color: var(--good); border-color: var(--line); }
+  .sweep button.current { outline: 2px solid var(--ink); }
+  .sweepnote { color: var(--muted); margin-top: .5rem; }
+  .foot { margin-top: 3rem; color: var(--muted); font-size: .9rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+  a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>The Interleaving Explorer</h1>
+<p class="lede">Two agents. One database row. Six ways their operations can
+interleave, and one of them silently destroys committed work. This page lets
+you run every one of them.</p>
+
+<p>My AI agents coordinate through a single SQLite file. One of the things
+they share is a set of context sections: named rows of markdown that any agent
+can read and update. An update is a full replace, so the row carries an
+integer <code>version</code>, and a well-behaved writer does a compare-and-swap:
+read the row, note its version, and submit the new content
+<em>conditioned on that version being unchanged</em>.</p>
+
+<p>The catch is the writer that doesn't pass the version. A blind write. For a
+long time the system accepted those for compatibility, in a configuration
+called <strong>warn</strong> mode. The simulator below is a faithful small
+model of the real test that measured what warn mode costs, and it is the
+reason the production default is now <strong>enforce</strong>.</p>
+
+<div class="sim" id="sim">
+  <div class="controls">
+    <span class="mode" role="group" aria-label="CAS mode">
+      <button id="modeWarn" class="on">warn</button><button id="modeEnforce">enforce</button>
+    </span>
+    <label>seed <input type="number" id="seed" value="6" min="0" max="9999"></label>
+    <button id="dice" title="random seed">🎲</button>
+    <span class="spacer"></span>
+    <button id="stepBtn" class="primary">step</button>
+    <button id="playBtn">play</button>
+    <button id="resetBtn">reset</button>
+  </div>
+
+  <div class="grid2">
+    <div class="panel wa">
+      <h3>Writer A · blind write</h3>
+      <div class="kv"><span class="k">plan</span><span>read → write (no version)</span></div>
+      <div class="kv"><span class="k">read version</span><span id="aRead">–</span></div>
+      <div class="kv"><span class="k">result</span><span id="aResult">–</span></div>
+    </div>
+    <div class="panel wb">
+      <h3>Writer B · CAS write</h3>
+      <div class="kv"><span class="k">plan</span><span>read → write if version matches</span></div>
+      <div class="kv"><span class="k">read version</span><span id="bRead">–</span></div>
+      <div class="kv"><span class="k">result</span><span id="bResult">–</span></div>
+    </div>
+  </div>
+
+  <div class="dbrow">
+    <h3 style="margin:0 0 .4rem;font-size:.72rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);">context_sections · one row</h3>
+    <div class="kv" style="display:flex;justify-content:space-between;"><span style="color:var(--muted)">content</span><span id="dbContent">"baseline content"</span></div>
+    <div class="kv" style="display:flex;justify-content:space-between;"><span style="color:var(--muted)">version</span><span id="dbVersion">1</span></div>
+  </div>
+
+  <div class="steps" id="steps" title="click any step to scrub to it"></div>
+  <div class="log" id="log"></div>
+  <div id="receipts"></div>
+  <div id="banner"></div>
+</div>
+
+<h2>What you just ran</h2>
+<p>The <em>schedule</em> is the whole game. Each writer's own program order is
+fixed (it must read before it writes), but which writer goes next at each step
+is picked by a seeded random number generator, exactly like the deterministic
+simulator in the real test suite. Same seed, same schedule, same outcome,
+every time. Step through seed 6 in warn mode: both writers read version 1, writer B's
+careful CAS write lands and commits, and then writer A's blind write replaces
+it. Both writers were told <code>ok: true</code>. B's committed work is gone,
+and B will never ask about it again, because as far as B knows, it succeeded.
+That is a <strong>lost update</strong>.</p>
+
+<p>Now flip the toggle to <strong>enforce</strong> and run the identical
+schedule. The blind write is rejected. Nothing is lost. The interesting part
+is what the rejection leaves behind.</p>
+
+<h2>The receipt</h2>
+<p>This system's design rule is that nothing loses quietly. Every refused
+write, and every <em>accepted</em> blind overwrite in warn mode, files a
+durable conflict receipt in the same transaction as the decision itself. The
+warn-mode receipt even records a hash of the content it displaced, so there is
+a forensic trail pointing at exactly whose work was destroyed. Receipts are
+shown in violet above. Cause a conflict and read one.</p>
+
+<h2>All six interleavings</h2>
+<p>With two writers and two operations each, there are only six possible
+schedules. Small enough to enumerate. Click one to load it, then flip the mode
+toggle and watch the same schedule land differently.</p>
+
+<div class="sim">
+  <div class="map" id="map"></div>
+</div>
+
+<p>Notice the structure. In warn mode the danger is concentrated in the two
+schedules where both writers read the same version and the CAS writer commits
+first. In two other schedules warn mode survives by luck: the blind write
+happens to land first, so the CAS writer's version check fails and it gets an
+honest rejection instead. Luck is doing the work a guarantee should do. In
+enforce mode all six schedules are safe, because the blind write is refused no
+matter where it lands.</p>
+
+<h2>The sweep that flipped a default</h2>
+<p>One seed is an anecdote. The real test suite runs a sweep of seeds and asks
+how often the lost update is actually reachable. Here are thirty seeds through
+this model, in warn mode:</p>
+
+<div class="sim">
+  <div class="sweep" id="sweep"></div>
+  <div class="sweepnote" id="sweepnote"></div>
+</div>
+
+<p>In the real system's sweep, seventeen of thirty seeds reached the lost
+update. That number is what moved the default from warn to enforce: not a
+hunch about race conditions, but a measured statement that under concurrent
+writers, warn mode destroys committed work more often than not. The evidence
+seed is pinned in the repository and replays forever, so the bug that
+motivated the change can always be reproduced bit-for-bit.</p>
+
+<h2>Honest small print</h2>
+<p>This page schedules writers at read/write granularity. The real simulator
+schedules at every SQL statement, injects crashes and busy errors, and drives
+the actual production tool code against the actual schema on a simulated
+clock. The lost-update shape you explored here is the same one it found. And
+you do not need a distributed system for any of this to matter: this is five
+agents and one SQLite file on one laptop, and the interleaving still bit.</p>
+
+<p class="foot">Self-contained page, no dependencies. View source: the
+simulation is ~120 lines of plain JavaScript and it is the tutorial.
+Part of a series on bridge-db, a SQLite-backed coordination server for a
+small fleet of AI agents.</p>
+
+<script>
+"use strict";
+/* ── The model ─────────────────────────────────────────────────────────
+   One row: { content, version }. Two writers:
+   A reads, then writes WITHOUT a version token (blind).
+   B reads, then writes WITH the version it read (CAS).
+   A write is atomic: check (if any) + apply + commit in one step.
+   Modes: 'warn'   — blind write on an existing row is accepted, bumps the
+                     version, and files a legacy_blind_write receipt naming
+                     the sha of the content it displaced.
+          'enforce'— blind write on an existing row is rejected with a
+                     missing_cas receipt.
+   A CAS write whose token no longer matches is rejected with a stale_cas
+   receipt in both modes.                                                */
+
+function sha6(s) {            // toy content hash for the receipts display
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(16).padStart(8, "0").slice(0, 6);
+}
+
+function mulberry32(seed) {   // tiny seeded PRNG — the whole determinism trick
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// A schedule is an order of ops, e.g. ["A.read","B.read","B.write","A.write"].
+// Program order within each writer (read before write) is always respected.
+function scheduleFromSeed(seed) {
+  const rand = mulberry32(seed);
+  const pc = { A: 0, B: 0 };            // per-writer program counter: 0=read, 1=write, 2=done
+  const order = [];
+  while (pc.A < 2 || pc.B < 2) {
+    const live = [];
+    if (pc.A < 2) live.push("A");
+    if (pc.B < 2) live.push("B");
+    const w = live[Math.floor(rand() * live.length)];   // the "grant"
+    order.push(w + (pc[w] === 0 ? ".read" : ".write"));
+    pc[w]++;
+  }
+  return order;
+}
+
+const ALL_SCHEDULES = [
+  ["A.read","A.write","B.read","B.write"],
+  ["A.read","B.read","A.write","B.write"],
+  ["A.read","B.read","B.write","A.write"],
+  ["B.read","A.read","A.write","B.write"],
+  ["B.read","A.read","B.write","A.write"],
+  ["B.read","B.write","A.read","A.write"],
+];
+
+// Pure replay: run `schedule` up to `uptoStep` ops in `mode`, return full state.
+function simulate(schedule, mode, uptoStep = Infinity) {
+  const row = { content: "baseline content", version: 1 };
+  const w = {
+    A: { read: null, result: null },
+    B: { read: null, result: null },
+  };
+  const receipts = [];
+  const log = [];
+
+  schedule.slice(0, uptoStep).forEach(op => {
+    const [who, kind] = op.split(".");
+    if (kind === "read") {
+      w[who].read = row.version;
+      log.push(`${who} reads the row: version ${row.version}`);
+      return;
+    }
+    const content = `content from ${who}`;
+    if (who === "B") {                                  // CAS write
+      if (row.version === w.B.read) {
+        row.content = content; row.version++;
+        w.B.result = "ok";
+        log.push(`B writes with if_match_version=${w.B.read} → version matches, committed as v${row.version}`);
+      } else {
+        w.B.result = "rejected (stale_cas)";
+        receipts.push({ reason: "stale_cas", by: "B",
+          detail: `expected v${w.B.read}, row is v${row.version}` });
+        log.push(`B writes with if_match_version=${w.B.read} → row is v${row.version}, REJECTED + receipt`);
+      }
+      return;
+    }
+    // A: blind write, no version token
+    if (mode === "enforce") {
+      w.A.result = "rejected (missing_cas)";
+      receipts.push({ reason: "missing_cas", by: "A",
+        detail: "blind write on an existing row refused" });
+      log.push("A writes blind → enforce mode REJECTS it + receipt");
+    } else {
+      const displaced = row.content;
+      row.content = content; row.version++;
+      w.A.result = "ok (blind)";
+      receipts.push({ reason: "legacy_blind_write", by: "A",
+        detail: `displaced sha ${sha6(displaced)} ("${displaced}")` });
+      log.push(`A writes blind → warn mode ACCEPTS it as v${row.version} + receipt naming the displaced sha`);
+    }
+  });
+
+  // Lost update, same definition as the real test: both writers reported ok
+  // AND both had read the same version — neither knew about the other.
+  const lost = w.A.result === "ok (blind)" && w.B.result === "ok" && w.A.read === w.B.read;
+  return { row, w, receipts, log, lost };
+}
+
+/* ── The page ─────────────────────────────────────────────────────── */
+const $ = id => document.getElementById(id);
+const state = { mode: "warn", seed: 6, schedule: scheduleFromSeed(6), step: 0, timer: null };
+
+function outcomeBadge(schedule, mode) {
+  const r = simulate(schedule, mode);
+  if (r.lost) return `<span class="badge bad">lost update</span>`;
+  if (r.receipts.some(x => x.reason !== "legacy_blind_write"))
+    return `<span class="badge good">rejected + receipt</span>`;
+  if (r.receipts.length)
+    return `<span class="badge warn">accepted + receipt</span>`;
+  return `<span class="badge good">clean</span>`;
+}
+
+function render() {
+  const { schedule, mode, step } = state;
+  const r = simulate(schedule, mode, step);
+
+  $("dbContent").textContent = `"${r.row.content}"`;
+  $("dbVersion").textContent = r.row.version;
+  $("aRead").textContent = r.w.A.read ?? "–";
+  $("bRead").textContent = r.w.B.read ?? "–";
+  $("aResult").textContent = r.w.A.result ?? "–";
+  $("bResult").textContent = r.w.B.result ?? "–";
+
+  $("steps").innerHTML = schedule.map((op, i) => {
+    const cls = ["step", op[0] === "A" ? "a" : "b"];
+    if (i >= step) cls.push("future");
+    if (i === step - 1) cls.push("now");
+    return `<span class="${cls.join(" ")}" data-i="${i + 1}">${op}</span>`;
+  }).join("");
+
+  $("log").innerHTML = r.log.map((l, i) =>
+    `<div class="${i === r.log.length - 1 ? "hot" : ""}">${i + 1}. ${l}</div>`).join("");
+
+  $("receipts").innerHTML = r.receipts.map(x =>
+    `<div class="receipt">⬒ write_conflicts receipt · reason=${x.reason} · attempted_by=${x.by} · ${x.detail}</div>`
+  ).join("");
+
+  const done = step >= schedule.length;
+  let banner = "";
+  if (done && r.lost) banner = `<div class="banner bad">Lost update. Both writers were told ok. B's committed work is gone; only the receipt knows.</div>`;
+  else if (done && r.receipts.some(x => x.reason === "missing_cas")) banner = `<div class="banner good">No loss. The blind write was refused, and the refusal left a durable receipt.</div>`;
+  else if (done && r.receipts.some(x => x.reason === "stale_cas")) banner = `<div class="banner good">No silent loss. The CAS writer was refused honestly: warn mode survived this schedule by luck.</div>`;
+  else if (done) banner = `<div class="banner plain">Sequential enough: every writer saw the version it acted on.</div>`;
+  $("banner").innerHTML = banner;
+
+  $("stepBtn").disabled = done;
+  $("playBtn").disabled = done;
+
+  // interleaving map
+  $("map").innerHTML = ALL_SCHEDULES.map((s, i) => {
+    const cur = s.join() === schedule.join() ? " current" : "";
+    return `<div class="row${cur}" data-s="${i}">
+      <span class="ops">${s.map(op => `<span class="${op[0] === "A" ? "a" : "b"}">${op}</span>`).join("")}</span>
+      ${outcomeBadge(s, mode)}
+    </div>`;
+  }).join("");
+
+  // seed sweep (always shown for the CURRENT mode)
+  let lostCount = 0;
+  $("sweep").innerHTML = Array.from({ length: 30 }, (_, s) => {
+    const res = simulate(scheduleFromSeed(s), mode);
+    if (res.lost) lostCount++;
+    const cur = s === state.seed ? " current" : "";
+    return `<button class="${res.lost ? "lost" : "ok"}${cur}" data-seed="${s}" title="seed ${s}">${s}</button>`;
+  }).join("");
+  $("sweepnote").textContent = mode === "warn"
+    ? `${lostCount} of 30 seeds reach the lost update in warn mode. (The real sweep, scheduling at SQL-statement granularity, found 17/30.)`
+    : `0 of 30 seeds can reach the lost update in enforce mode. Same schedules, same seeds.`;
+}
+
+function setSchedule(schedule, seed) {
+  clearInterval(state.timer); state.timer = null;
+  state.schedule = schedule;
+  if (seed !== undefined) { state.seed = seed; $("seed").value = seed; }
+  state.step = 0;
+  render();
+}
+
+$("stepBtn").onclick = () => { state.step = Math.min(state.step + 1, state.schedule.length); render(); };
+$("playBtn").onclick = () => {
+  clearInterval(state.timer);
+  state.timer = setInterval(() => {
+    state.step++;
+    if (state.step >= state.schedule.length) clearInterval(state.timer);
+    render();
+  }, 650);
+};
+$("resetBtn").onclick = () => setSchedule(state.schedule);
+$("seed").onchange = e => setSchedule(scheduleFromSeed(+e.target.value || 0), +e.target.value || 0);
+$("dice").onclick = () => { const s = Math.floor(Math.random() * 10000); setSchedule(scheduleFromSeed(s), s); };
+$("modeWarn").onclick = () => { state.mode = "warn"; $("modeWarn").classList.add("on"); $("modeEnforce").classList.remove("on"); render(); };
+$("modeEnforce").onclick = () => { state.mode = "enforce"; $("modeEnforce").classList.add("on"); $("modeWarn").classList.remove("on"); render(); };
+$("steps").onclick = e => { const i = e.target.dataset.i; if (i) { state.step = +i; render(); } };
+$("map").onclick = e => { const row = e.target.closest("[data-s]"); if (row) setSchedule(ALL_SCHEDULES[+row.dataset.s].slice()); };
+$("sweep").onclick = e => { const s = e.target.dataset.seed; if (s !== undefined) setSchedule(scheduleFromSeed(+s), +s); };
+
+render();
+</script>
+</main>
+</body>
+</html>
