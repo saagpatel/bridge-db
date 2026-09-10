@@ -1,5 +1,13 @@
 # bridge-db
 
+> [!IMPORTANT]
+> **LOCAL DEPLOYMENT STATUS (2026-09-07):** Standalone BridgeDB runtime services, LaunchAgent schedules (`com.saagar.bridge-db-checkpoint`), and MCP server registrations are **retired** on this Mac deployment. Coherent is the selected ordinary shared-work and sourced-knowledge owner; native Codex and Claude operate independently; KnowledgeCore remains the FINAL encrypted private owner. Standalone BridgeDB, OMO, Engraph, Notification Hub, Conductor standalone, and Personal Ops are retired; Personal Ops actions and schedules are intentionally retired with no parity replacement; historical Slack notifications are abandoned and will never be replayed. Historical BridgeDB schemas (v1–v23) and database files are preserved as technical specifications and immutable reference data.
+> - Verified runtime retirement receipts: [`retirement.json`](</Users/d/Library/Application Support/CoherentBackendRuntime/retirement/bridge-db/retirement.json>), [`checkpoint-retirement.json`](</Users/d/Library/Application Support/CoherentBackendRuntime/retirement/bridge-db/checkpoint-retirement.json>).
+> - Program review: [InfraRefresh review](</Users/d/Documents/Codex/2026-09-07/files-pasted-by-the-user-own/outputs/infrarefresh-review/README.md>).
+
+
+> **Scope clarification:** The Conductor retirement record concerns a stopped historical mission and retired integrations. It does not establish retirement of the retained [Conductor CLI source](../conductor/README.md), which has its own current development and usage scope. Source activity does not reactivate any retired BridgeDB service.
+
 ![CI](https://github.com/saagpatel/bridge-db/actions/workflows/ci.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 
@@ -21,7 +29,7 @@ uv run pytest    # verify the install
 
 ## Status
 
-- Steady maintenance. Scope is cross-system *state* coordination, lexical `recall`, and observability — not a general knowledge store.
+- Retained source in maintenance; the local standalone deployment is retired as described above. Source scope is cross-system *state* coordination, lexical `recall`, and observability — not a general knowledge store.
 - Schema v10: context sections carry monotonic `version` tokens; stale writes and raced handoff claims produce durable `write_conflicts` receipts.
 - Schema v12: adds the `session_classification` sidecar for heuristic cost-routing attribution while keeping `session_costs` as pure actuals. Schema v11 backfills activity `tags` into `content_index` so lifecycle tags (SHIPPED, DECISION, ...) are recall-able on existing DBs.
 - Schema v13: adds `claimed_by` to `pending_handoffs` (the INV-13 claimant gate for `clear_handoff`). Riding the same migration train, activity retention now exempts rows tagged `SHIPPED` or `LEDGER` (case-insensitive) from the 50-per-source prune — BD-INV-1: retention never deletes a protected row, its receipt, or its disposition.
