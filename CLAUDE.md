@@ -1,5 +1,11 @@
 # bridge-db
 
+> [!IMPORTANT]
+> **LOCAL DEPLOYMENT STATUS (2026-09-07):** Standalone BridgeDB runtime services, checkpoint jobs, and MCP registrations are **retired** on this Mac deployment. Coherent is the selected ordinary shared-work and sourced-knowledge owner; native Codex and Claude Code operate independently; KnowledgeCore remains the FINAL encrypted private owner. Standalone BridgeDB, OMO, Engraph, Notification Hub, Conductor standalone, and Personal Ops are retired; Personal Ops actions and schedules are intentionally retired with no parity replacement; historical Slack notifications are abandoned and will never be replayed. Operational commands and contracts below are preserved as historical and technical reference for standalone development.
+> - Verified runtime retirement receipts: [`retirement.json`](</Users/d/Library/Application Support/CoherentBackendRuntime/retirement/bridge-db/retirement.json>), [`checkpoint-retirement.json`](</Users/d/Library/Application Support/CoherentBackendRuntime/retirement/bridge-db/checkpoint-retirement.json>).
+> - Program review: [InfraRefresh review](</Users/d/Documents/Codex/2026-09-07/files-pasted-by-the-user-own/outputs/infrarefresh-review/README.md>).
+
+
 SQLite-backed MCP server for cross-system state sharing between Claude.ai, Claude Code, Codex, Notion OS, and personal-ops.
 
 ## Commands
