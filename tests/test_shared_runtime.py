@@ -354,11 +354,18 @@ def test_relay_request_rejects_socket_replacement_after_receipt_validation(
             paths,
             owner_pid=os.getpid(),
         )
-    original_listener.close()
     paths.socket.unlink()
     replacement_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     replacement_listener.bind(str(paths.socket))
     replacement_listener.listen(1)
+    # Keep the unlinked original socket open until the replacement is bound.
+    # Otherwise filesystems may immediately reuse its inode, which makes this
+    # replacement fixture indistinguishable from the receipt-bound socket on
+    # inode-based identity checks.
+    assert shared_runtime_module._socket_identity(  # pyright: ignore[reportPrivateUsage]
+        paths.socket
+    ) != broker_record["socket_identity"]
+    original_listener.close()
 
     try:
         with pytest.raises(SharedRuntimeContractError) as exc_info:
