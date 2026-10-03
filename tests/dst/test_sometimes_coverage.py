@@ -28,7 +28,7 @@ from pathlib import Path
 import aiosqlite
 import pytest
 from conftest import CaptureMCP, make_ctx
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 
 from bridge_db import config
 from bridge_db.invariants import sometimes_counts

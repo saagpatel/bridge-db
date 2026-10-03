@@ -8,8 +8,8 @@ from typing import Any, cast
 import aiosqlite
 import pytest
 from conftest import CaptureMCP, make_ctx
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from bridge_db import config
 from bridge_db.db import open_db
@@ -83,12 +83,12 @@ async def test_save_snapshot_cc(
 
 
 async def test_save_snapshot_schema_defaults_to_preservation() -> None:
-    mcp = FastMCP("snapshot-schema")
+    mcp = MCPServer("snapshot-schema")
     snap_mod.register(mcp)
 
     tools = await mcp.list_tools()
     save_snapshot = next(tool for tool in tools if tool.name == "save_snapshot")
-    retention_schema = save_snapshot.model_dump()["inputSchema"]["properties"][
+    retention_schema = save_snapshot.model_dump()["input_schema"]["properties"][
         "retention_policy"
     ]
 

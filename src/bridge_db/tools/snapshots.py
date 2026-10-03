@@ -4,8 +4,8 @@ import json
 import logging
 from typing import Annotated, Any
 
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db import clock
@@ -34,7 +34,7 @@ def _utc_snapshot_date() -> str:
     return clock.now().date().isoformat()
 
 
-def register(mcp: FastMCP) -> None:
+def register(mcp: MCPServer) -> None:
     @mcp.tool()
     async def save_snapshot(
         caller: Annotated[CallerID, Field(description="Must be 'cc' or 'codex'")],

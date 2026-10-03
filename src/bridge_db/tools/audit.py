@@ -5,7 +5,7 @@ from collections.abc import Iterator
 from itertools import islice
 from typing import Annotated, Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
 from bridge_db import config
@@ -48,7 +48,7 @@ def collect_audit_tail(
     return list(islice(matching_records(), limit))
 
 
-def register(mcp: FastMCP) -> None:
+def register(mcp: MCPServer) -> None:
     @mcp.tool()
     async def audit_tail(
         limit: Annotated[int, Field(description="Max entries to return", ge=1, le=500)] = 50,

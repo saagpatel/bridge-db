@@ -6,8 +6,8 @@ from collections import Counter
 from datetime import timedelta
 from typing import Annotated, Any, Literal, cast
 
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db import clock, config
@@ -270,7 +270,7 @@ async def _preview_and_trust(
     return "", None
 
 
-def register(mcp: FastMCP) -> None:
+def register(mcp: MCPServer) -> None:
     @mcp.tool()
     async def recall(
         query: Annotated[

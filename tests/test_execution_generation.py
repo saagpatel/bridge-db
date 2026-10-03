@@ -477,7 +477,11 @@ def test_stage_is_content_addressed_immutable_and_idempotent(tmp_path: Path) -> 
         item["distribution"] for item in runtime_evidence["distributions"]
     }
     assert {"aiosqlite", "mcp", "pydantic", "uvicorn"} <= distribution_names
-    assert len(distribution_names) >= 30
+    # SDK2 replaces the six SDK1 HTTP/settings distributions with this graph.
+    # Require the actual runtime families instead of a stale package-count floor.
+    assert {
+        "httpcore2", "httpx2", "mcp-types", "opentelemetry-api", "truststore"
+    } <= distribution_names
     assert first["runtime_dependency_sha256"] == manifest["runtime_dependency_sha256"]
     assert first["runtime_dependency_state"] == "verified"
     assert first["dependency_environment_state"] == RUNTIME_DEPENDENCY_STATE

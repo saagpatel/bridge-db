@@ -9,15 +9,18 @@ import os
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import Context, MCPServer
+from mcp_types import CallToolResult
 
 from bridge_db import clock, config
 import bridge_db.tenancy as tenancy_module
 import bridge_db.server as server_module
 from bridge_db.server import (
-    InstrumentedFastMCP,
+    AppContext,
+    InstrumentedMCPServer,
     app_lifespan,
     mcp as server_mcp,
     monitor_tenancy_retirement,
@@ -245,9 +248,7 @@ def test_probe_process_prefers_observable_identity_over_signal_permission(
 
     monkeypatch.setattr(tenancy_module.os, "kill", refuse_signal)
 
-    assert (
-        probe_process(42, "ps-start:current-protected-process") == "same"
-    )
+    assert probe_process(42, "ps-start:current-protected-process") == "same"
     assert probe_process(42, "ps-start:prior-process") == "mismatch"
 
 
@@ -749,23 +750,26 @@ async def test_instrumented_mcp_accounts_success_and_failure(
     class _Request:
         lifespan_context = _Lifespan()
 
-    class _Context:
-        request_context = _Request()
+    context = Context[AppContext, Any](request_context=cast(Any, _Request()))
 
     async def _call_tool(
-        _self: FastMCP, name: str, _arguments: dict[str, object]
-    ) -> dict[str, object]:
+        _self: MCPServer,
+        name: str,
+        _arguments: dict[str, object],
+        _context: Context[Any, Any] | None = None,
+    ) -> CallToolResult:
         if name == "explode":
             raise RuntimeError("fixture failure")
-        return {"ok": True}
+        return CallToolResult(content=[], structured_content={"ok": True})
 
-    server = InstrumentedFastMCP("tenancy-test")
-    monkeypatch.setattr(server, "get_context", lambda: _Context())
-    monkeypatch.setattr(FastMCP, "call_tool", _call_tool)
+    server = InstrumentedMCPServer("tenancy-test")
+    monkeypatch.setattr(MCPServer, "call_tool", _call_tool)
 
-    assert await server.call_tool("health", {}) == {"ok": True}
+    result = await server.call_tool("health", {}, context)
+    assert isinstance(result, CallToolResult)
+    assert result.structured_content == {"ok": True}
     with pytest.raises(RuntimeError, match="fixture failure"):
-        await server.call_tool("explode", {})
+        await server.call_tool("explode", {}, context)
     assert events == [
         ("started", "health"),
         ("succeeded", "health"),
@@ -787,27 +791,28 @@ async def test_shared_runtime_serializes_one_broker_database_access(
     class _Request:
         lifespan_context = _Lifespan()
 
-    class _Context:
-        request_context = _Request()
+    context = Context[AppContext, Any](request_context=cast(Any, _Request()))
 
     async def _call_tool(
-        _self: FastMCP, _name: str, _arguments: dict[str, object]
-    ) -> dict[str, object]:
+        _self: MCPServer,
+        _name: str,
+        _arguments: dict[str, object],
+        _context: Context[Any, Any] | None = None,
+    ) -> CallToolResult:
         nonlocal active, highwater
         active += 1
         highwater = max(highwater, active)
         await asyncio.sleep(0.01)
         active -= 1
-        return {"ok": True}
+        return CallToolResult(content=[], structured_content={"ok": True})
 
-    server = InstrumentedFastMCP("shared-serialization-test")
+    server = InstrumentedMCPServer("shared-serialization-test")
     server.enable_shared_runtime()
-    monkeypatch.setattr(server, "get_context", lambda: _Context())
-    monkeypatch.setattr(FastMCP, "call_tool", _call_tool)
+    monkeypatch.setattr(MCPServer, "call_tool", _call_tool)
 
     await asyncio.gather(
-        server.call_tool("first", {}),
-        server.call_tool("second", {}),
+        server.call_tool("first", {}, context),
+        server.call_tool("second", {}, context),
     )
 
     assert highwater == 1

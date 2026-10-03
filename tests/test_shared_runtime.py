@@ -795,6 +795,8 @@ def test_shared_wrapper_relays_mcp_over_one_idle_bounded_broker(
         "BRIDGE_DB_PATH": str(tmp_path / "bridge.db"),
         "BRIDGE_FILE_PATH": str(tmp_path / "bridge.md"),
         "BRIDGE_DB_PRINCIPALS_PATH": str(tmp_path / "principals.json"),
+        "BRIDGE_DB_AUDIT_LOG_PATH": str(tmp_path / "audit.jsonl"),
+        "BRIDGE_DB_AUDIT_FAILURE_LOG_PATH": str(tmp_path / "audit-failures.jsonl"),
         "BRIDGE_DB_TENANCY_ROOT": str(tmp_path / "tenancy"),
         "BRIDGE_DB_SHARED_RUNTIME_ROOT": str(shared_root),
         "BRIDGE_DB_SHARED_RUNTIME_LAUNCHER": str(launcher),
@@ -823,7 +825,22 @@ def test_shared_wrapper_relays_mcp_over_one_idle_bounded_broker(
         "method": "tools/list",
         "params": {},
     }
-    messages: tuple[dict[str, object], ...] = (initialize, initialized, tools_list)
+    health_call: dict[str, object] = {
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": "health", "arguments": {}},
+    }
+    denied_write: dict[str, object] = {
+        "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        "params": {
+            "name": "log_activity",
+            "arguments": {
+                "caller": "cc", "project_name": "fixture", "summary": "must be denied"
+            },
+        },
+    }
+    messages: tuple[dict[str, object], ...] = (
+        initialize, initialized, tools_list, health_call, denied_write
+    )
     input_text = "".join(
         json.dumps(message, separators=(",", ":")) + "\n"
         for message in messages
@@ -902,11 +919,16 @@ def test_shared_wrapper_relays_mcp_over_one_idle_bounded_broker(
         process.wait(timeout=20)
         assert process.returncode == 0, stderr
         responses = [json.loads(line) for line in stdout.splitlines()]
-        assert [response["id"] for response in responses] == [1, 2]
+        assert [response["id"] for response in responses] == [1, 2, 3, 4]
         assert responses[0]["result"]["protocolVersion"] == "2025-06-18"
         assert any(
             tool["name"] == "health" for tool in responses[1]["result"]["tools"]
         )
+        assert responses[2]["result"]["isError"] is False
+        assert isinstance(responses[2]["result"]["structuredContent"], dict)
+        assert responses[3]["result"]["isError"] is True
+        assert "Unauthenticated connection" in responses[3]["result"]["content"][0]["text"]
+
 
     deadline = time.monotonic() + 8
     while time.monotonic() < deadline:

@@ -1,18 +1,18 @@
-"""FastMCP server: lifespan, AppContext, and tool registration."""
+"""MCPServer server: lifespan, AppContext, and tool registration."""
 
 import asyncio
 import logging
 import os
 import sys
-from collections.abc import AsyncGenerator, Callable, Sequence
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 import aiosqlite
-from mcp.server.fastmcp import FastMCP
-from mcp.types import ContentBlock
+from mcp.server.mcpserver import Context, MCPServer
+from mcp_types import CallToolResult, InputRequiredResult
 
 from bridge_db import clock, config
 from bridge_db.db import open_db
@@ -39,7 +39,7 @@ class AppContext:
     tenancy_tracker: Any | None = None
 
 
-class InstrumentedFastMCP(FastMCP):
+class InstrumentedMCPServer(MCPServer[AppContext]):
     """Account every MCP tool request in the process-owned tenancy lease."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -64,30 +64,37 @@ class InstrumentedFastMCP(FastMCP):
         self._bridge_shared_runtime = False
 
     async def _call_tool_accounted(
-        self, name: str, arguments: dict[str, Any]
-    ) -> Sequence[ContentBlock] | dict[str, Any]:
-        context = self.get_context()
-        tracker = getattr(
-            context.request_context.lifespan_context, "tenancy_tracker", None
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: Context[AppContext, Any] | None,
+    ) -> CallToolResult | InputRequiredResult:
+        tracker = (
+            getattr(context.request_context.lifespan_context, "tenancy_tracker", None)
+            if context is not None
+            else None
         )
         if tracker is None:
-            return await super().call_tool(name, arguments)
+            return await super().call_tool(name, arguments, context)
         tracker.request_started(name)
         outcome: Literal["succeeded", "failed"] = "failed"
         try:
-            result = await super().call_tool(name, arguments)
+            result = await super().call_tool(name, arguments, context)
             outcome = "succeeded"
             return result
         finally:
             tracker.request_finished(name, outcome=outcome)
 
     async def call_tool(
-        self, name: str, arguments: dict[str, Any]
-    ) -> Sequence[ContentBlock] | dict[str, Any]:
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: Context[AppContext, Any] | None = None,
+    ) -> CallToolResult | InputRequiredResult:
         if self._bridge_shared_runtime:
             async with self._bridge_request_lock:
-                return await self._call_tool_accounted(name, arguments)
-        return await self._call_tool_accounted(name, arguments)
+                return await self._call_tool_accounted(name, arguments, context)
+        return await self._call_tool_accounted(name, arguments, context)
 
 
 async def monitor_tenancy_retirement(
@@ -128,7 +135,7 @@ def build_tenancy_tracker(
 
 
 @asynccontextmanager
-async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # noqa: ARG001
+async def app_lifespan(server: MCPServer) -> AsyncGenerator[AppContext, None]:  # noqa: ARG001
     from bridge_db.audit import log_audit
     from bridge_db.auth import (
         auth_mode,
@@ -136,6 +143,7 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # 
         load_principal_grants,
         resolve_grant,
     )
+
     raw_token = os.environ.get("BRIDGE_DB_PRINCIPAL_TOKEN")
     token = raw_token.strip() if raw_token is not None else None
     grant = resolve_grant(token, load_principal_grants(config.PRINCIPALS_PATH))
@@ -167,7 +175,7 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # 
     )
     shared_tracker = (
         server.shared_tenancy_tracker()
-        if isinstance(server, InstrumentedFastMCP)
+        if isinstance(server, InstrumentedMCPServer)
         else None
     )
     owns_tracker = shared_tracker is None
@@ -228,7 +236,7 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[AppContext, None]:  # 
         logger.info("bridge-db session shut down")
 
 
-mcp = InstrumentedFastMCP(
+mcp = InstrumentedMCPServer(
     "bridge-db",
     instructions=(
         "SQLite-backed bridge for shared state between Claude.ai, Claude Code, "

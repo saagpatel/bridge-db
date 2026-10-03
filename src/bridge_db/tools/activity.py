@@ -5,8 +5,8 @@ import json
 import logging
 from typing import Annotated, Any, cast
 
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db import clock, config
@@ -352,7 +352,7 @@ async def _export_bridge_markdown_after_processing(
     }
 
 
-def register(mcp: FastMCP) -> None:
+def register(mcp: MCPServer) -> None:
     @mcp.tool()
     async def log_activity(
         caller: Annotated[

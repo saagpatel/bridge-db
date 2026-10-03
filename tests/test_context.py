@@ -6,7 +6,7 @@ from typing import Any
 import aiosqlite
 import pytest
 from conftest import CaptureMCP, make_ctx
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 
 import bridge_db.config as cfg
 from bridge_db.tools import context as mod

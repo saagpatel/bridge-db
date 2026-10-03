@@ -9,7 +9,7 @@ from typing import Any
 import aiosqlite
 import pytest
 from conftest import CaptureMCP, make_ctx
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 
 from bridge_db import config
 from bridge_db.db import collect_fts_index_metrics, insert_activity_row
