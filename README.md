@@ -180,6 +180,34 @@ Claude.ai-owned sections would render as `_Not yet populated._`. Set
 Use `get_write_conflicts(status="open")` to inspect stale section writes,
 stale markdown imports, and raced handoff claims.
 
+## Source verification
+
+Run from the repository root with Python 3.12+ and uv. Keep the lockfile fixed:
+
+```bash
+uv sync --frozen
+# Focus a shared-runtime receipt change on this synthetic fixture:
+uv run --frozen pytest tests/test_shared_runtime.py -k rejects_socket_replacement_after_receipt_validation -q
+# Broader source checks:
+uv run --frozen pytest
+uv run --frozen pyright
+uv run --frozen ruff check
+```
+
+`tests/conftest.py` isolates audit/recall/tenancy files under pytest temporary
+paths; database fixtures use temporary SQLite files. Execution-generation tests
+also stage disposable source/runtime copies and require an interpreter path
+without spaces (the generation launcher rejects space-bearing executables).
+Use a checkout/environment whose interpreter path meets that constraint for
+those tests; do not bypass the launcher contract or point fixtures at installed
+runtime roots. Test success does not reactivate the retired deployment.
+
+The commands below include runtime inventory, migration, repair, grants, and
+service startup. They use configured operator paths and are task-specific
+operations, not installation/source smoke checks. Do not run them against live
+or retired state merely to verify a source or documentation change. No browser
+check is needed for this MCP/CLI source lane.
+
 ## Commands
 
 ```bash
@@ -347,9 +375,10 @@ that a live client has reloaded them.
 
 The MCP `status` result separates storage integrity from operating freshness:
 
-- `overall` and `storage_health`: `healthy` or `degraded`, based only on DB,
-  schema, fallback-file, and FTS integrity. `overall` remains the compatibility
-  alias for existing consumers.
+- `storage_health`: `healthy` or `degraded`, based on DB, schema, fallback-file
+  existence, FTS integrity, audit/disposition evidence, recovery integrity,
+  tenancy readiness, and selected shared-runtime readiness. `overall` additionally
+  requires the tracked fallback-file projection to be current and reflects `ok`.
 - `operating_state`: `fresh`, `attention`, `stale`, or `unknown`, derived from
   the `freshness` block without changing command success semantics.
 - `freshness`: the detailed operating-truth block described below.
@@ -458,7 +487,7 @@ events remain available for debugging and forensic review.
 Activity rows preserve two time concepts:
 
 - `timestamp` is the caller-supplied logical activity date or timestamp. When
-  omitted by `log_activity`, it defaults to the operator-local calendar date.
+  omitted by `log_activity`, it defaults to the UTC calendar date.
 - `created_at` is the UTC insertion timestamp assigned by SQLite.
 
 For activity discovery APIs with `since` (`get_recent_activity`,

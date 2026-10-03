@@ -282,8 +282,8 @@ reload/reconnect is required before these leases can close legacy direct-path
 processes.
 
 `python -m bridge_db.tenancy status --root <private-tenancy-root>` inventories
-leases. `plan --policy <replay-policy.json> --current-generation <id>` produces
-a content-bound no-kill plan. `apply --plan <plan.json>` permits one actionable
+leases. `plan --root <private-tenancy-root> --policy <replay-policy.json> --current-generation <id>` produces
+a content-bound no-kill plan. `apply --root <private-tenancy-root> --plan <plan.json>` permits one actionable
 lease; a plan with multiple actions requires `--lease-id <exact-id>`. Missing
 or PID-reused processes are rechecked and their exact lease is retired even if
 the crashed process left a stale active-request count. Live same-identity
@@ -323,8 +323,9 @@ MCP session connections cannot interleave database work.
 
 Client lease history is preserved. Missing or PID-reused relay records are
 retired after identity readback; unknown process state keeps the broker alive.
-The broker exits cooperatively after 300 seconds with no live relay references,
-and startup fails closed after 10 seconds. It has no process-signaling primitive
+The broker exits cooperatively after 300 seconds by default with no live relay references
+(`BRIDGE_DB_BROKER_IDLE_SECONDS`), and startup fails closed after 30 seconds by default
+(`BRIDGE_DB_BROKER_START_TIMEOUT_SECONDS`). It has no process-signaling primitive
 and does not close existing direct clients. CLI arguments always use the direct
 launcher so checkpoint and recovery operations do not depend on the relay.
 Returning the binding to `direct` is the exact rollback for future spawns.
