@@ -375,9 +375,10 @@ that a live client has reloaded them.
 
 The MCP `status` result separates storage integrity from operating freshness:
 
-- `overall` and `storage_health`: `healthy` or `degraded`, based only on DB,
-  schema, fallback-file, and FTS integrity. `overall` remains the compatibility
-  alias for existing consumers.
+- `storage_health`: `healthy` or `degraded`, based on DB, schema, fallback-file
+  existence, FTS integrity, audit/disposition evidence, recovery integrity,
+  tenancy readiness, and selected shared-runtime readiness. `overall` additionally
+  requires the tracked fallback-file projection to be current and reflects `ok`.
 - `operating_state`: `fresh`, `attention`, `stale`, or `unknown`, derived from
   the `freshness` block without changing command success semantics.
 - `freshness`: the detailed operating-truth block described below.
@@ -486,7 +487,7 @@ events remain available for debugging and forensic review.
 Activity rows preserve two time concepts:
 
 - `timestamp` is the caller-supplied logical activity date or timestamp. When
-  omitted by `log_activity`, it defaults to the operator-local calendar date.
+  omitted by `log_activity`, it defaults to the UTC calendar date.
 - `created_at` is the UTC insertion timestamp assigned by SQLite.
 
 For activity discovery APIs with `since` (`get_recent_activity`,

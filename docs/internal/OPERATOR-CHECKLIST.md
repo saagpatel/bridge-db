@@ -240,7 +240,8 @@ that motivated it):
   context.
 - `activity_log.timestamp` is the caller's logical activity date or timestamp,
   while `activity_log.created_at` is the UTC insertion timestamp. Activity
-  `since` filters match either field so closeouts inserted just after UTC
+  `since` filters use only `created_at >= since` (date-only values mean UTC
+  midnight), so closeouts inserted just after UTC
   midnight remain discoverable even if the logical timestamp is the prior local
   day.
 - `system_snapshots` keeps the latest 10 rows per system family; Codex
@@ -268,7 +269,7 @@ that motivated it):
   `disposition_orphan_count`. In the column model the orphan counts are integrity
   guards that should always read `0`: `receipt_orphan_count` = `synced` rows
   missing downstream proof; `disposition_orphan_count` = dispositions on a
-  non-`SHIPPED` row. Every prune also emits a `log_activity.prune` audit line
+  non-`SHIPPED` row or policy dispositions missing a reason. Every prune also emits a `log_activity.prune` audit line
   naming the deleted ids and tags.
 - Claude Code SessionEnd logging uses `--log-session-boundary`; that path adds
   an FTS row and intentionally does not run activity retention pruning.
@@ -336,7 +337,7 @@ dogfood, shipped-event, and export proof.
     (Run manually after eyeballing `get_pending_handoffs` — any handoff you genuinely dictated can stay `operator`.)
 12. Re-run `uv run python -m bridge_db --status` and confirm the pending-handoff trust breakdown reflects the relabel.
 
-**Rollback at any point:** set `BRIDGE_DB_AUTH_MODE=off` in the affected client(s) — restores byte-for-byte legacy behavior including sync label preservation. No DB migration to unwind.
+**Rollback at any point:** set `BRIDGE_DB_AUTH_MODE=off` in the affected client(s) — changes preliminary mismatch auditing only. Strict channel-binding/scope gates remain active, and changed file imports remain `ingested`. No DB migration to unwind.
 
 **Threat-model note:** the TTY gate on enrollment/promotion ceremonies is a
 speed bump for non-interactive agent processes, not a security boundary — any
