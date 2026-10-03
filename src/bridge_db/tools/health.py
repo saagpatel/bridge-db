@@ -7,8 +7,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from bridge_db import clock, config
 from bridge_db.auth import auth_mode, load_principal_grants, load_principals
@@ -1370,7 +1370,7 @@ async def collect_status_summary(
     }
 
 
-def register(mcp: FastMCP) -> None:
+def register(mcp: MCPServer) -> None:
     @mcp.tool()
     async def health(
         ctx: Context = None,  # type: ignore[assignment]

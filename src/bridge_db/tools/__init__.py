@@ -1,9 +1,9 @@
-"""Tool registration: wire all tool modules onto the FastMCP instance."""
+"""Tool registration: wire all tool modules onto the MCPServer instance."""
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 
-def register_all(mcp: FastMCP) -> None:
+def register_all(mcp: MCPServer) -> None:
     """Register all tool groups. Import order is documentation order."""
     from bridge_db.tools import (
         activity,

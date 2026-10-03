@@ -12,7 +12,7 @@ from typing import Any, cast
 import aiosqlite
 import pytest
 from conftest import CaptureMCP, make_ctx
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 
 from bridge_db import clock, config
 from bridge_db.__main__ import run_promote_handoff

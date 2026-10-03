@@ -4,8 +4,8 @@ import logging
 import re
 from typing import Annotated, Any
 
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db.auth import require_bound_caller, require_caller
@@ -23,7 +23,7 @@ logger = logging.getLogger("bridge_db.tools.cost")
 _MONTH_RE = re.compile(r"^\d{4}-(?:0[1-9]|1[0-2])$")
 
 
-def register(mcp: FastMCP) -> None:
+def register(mcp: MCPServer) -> None:
     @mcp.tool()
     async def record_cost(
         caller: Annotated[

@@ -3,8 +3,8 @@
 import json
 from typing import Annotated, Any, cast
 
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db.db import get_db
@@ -25,7 +25,7 @@ def _decode_detail(raw: str | None) -> dict[str, Any]:
     return {"value": parsed}
 
 
-def register(mcp: FastMCP) -> None:
+def register(mcp: MCPServer) -> None:
     @mcp.tool()
     async def get_write_conflicts(
         status: Annotated[

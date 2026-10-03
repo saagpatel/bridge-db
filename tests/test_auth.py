@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 
 from bridge_db import auth, config
 from bridge_db.audit import iter_jsonl

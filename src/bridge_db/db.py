@@ -1277,7 +1277,7 @@ async def open_db(db_path: Path) -> aiosqlite.Connection:
 
 
 def get_db(ctx: Any) -> aiosqlite.Connection:
-    """Extract the typed DB connection from a FastMCP tool context.
+    """Extract the typed DB connection from a MCPServer tool context.
 
     The MCP SDK types lifespan_context as Unknown; this cast surfaces the real type.
     """

@@ -18,6 +18,7 @@ bridge-db replaces ad hoc edits to a shared markdown file with a structured SQLi
 ## Prerequisites
 
 - **Python 3.12+**
+- **MCP Python SDK 2.2+** (pinned by `uv.lock`; the MCP tool inputs and output keys are unchanged)
 - **[uv](https://docs.astral.sh/uv/)** — fast Python package manager
 
 ```bash

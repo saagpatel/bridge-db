@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import aiosqlite
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from bridge_db import config
 from bridge_db.db import open_db
@@ -129,8 +129,8 @@ def make_ctx(
     return ctx
 
 
-class CaptureMCP(FastMCP):
-    """FastMCP subclass that captures registered tool functions by name.
+class CaptureMCP(MCPServer):
+    """MCPServer subclass that captures registered tool functions by name.
 
     Usage:
         cap = CaptureMCP("test")

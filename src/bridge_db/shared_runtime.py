@@ -1790,14 +1790,19 @@ async def _serve_broker(paths: SharedRuntimePaths) -> None:
     tracker, _runtime_generation = build_tenancy_tracker(principal)
     tracker.start()
     mcp.enable_shared_runtime(tracker)
-    mcp.settings.json_response = True
     # DNS-rebinding checks protect TCP listeners. This transport has no TCP
     # listener and is reachable only through its owner-only Unix socket.
-    transport_security = mcp.settings.transport_security
-    if transport_security is None:  # pragma: no cover - FastMCP default invariant
-        raise SharedRuntimeContractError("shared_runtime.transport_security_missing")
-    transport_security.enable_dns_rebinding_protection = False
-    app = _RelayCapabilityMiddleware(paths, mcp.streamable_http_app())
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    app = _RelayCapabilityMiddleware(
+        paths,
+        mcp.streamable_http_app(
+            json_response=True,
+            transport_security=TransportSecuritySettings(
+                enable_dns_rebinding_protection=False
+            ),
+        ),
+    )
     configuration = uvicorn.Config(
         app,
         uds=str(paths.socket),

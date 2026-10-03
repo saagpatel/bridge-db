@@ -16,7 +16,7 @@ from typing import Any, cast
 import aiosqlite
 import pytest
 from conftest import CaptureMCP, make_ctx
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 
 from bridge_db.tools import conflicts as conflict_mod
 from bridge_db.tools import context as c_mod

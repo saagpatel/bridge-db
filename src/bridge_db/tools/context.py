@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import aiosqlite
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from bridge_db import config
@@ -580,7 +580,7 @@ async def sync_owned_sections_from_file(
     }
 
 
-def register(mcp: FastMCP) -> None:
+def register(mcp: MCPServer) -> None:
     @mcp.tool()
     async def update_section(
         caller: Annotated[

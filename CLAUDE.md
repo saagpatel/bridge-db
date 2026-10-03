@@ -99,7 +99,7 @@ claude mcp add --scope user bridge-db \
 
 - `db` fixture: `tmp_path / "test.db"` with WAL mode + schema applied
 - `make_ctx(conn)`: mock Context satisfying `ctx.request_context.lifespan_context.db`
-- `CaptureMCP`: `FastMCP` subclass that captures registered tool fns by name
+- `CaptureMCP`: `MCPServer` subclass that captures registered tool fns by name
 
 <!-- portfolio-context:start -->
 # Portfolio Context
