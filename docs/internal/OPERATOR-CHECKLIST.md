@@ -2,14 +2,18 @@
 
 # bridge-db Operator Checklist
 
-Use this checklist when verifying that bridge-db is ready for local use and that the documented Claude.ai registration path matches the current environment.
+The [README deployment status](../../README.md) records this Mac's standalone
+runtime retirement. For maintained source checks, use
+[Source verification](../../README.md#source-verification). Runtime/registration
+procedures below are historical or explicitly authorized operations, not a
+routine source verification lane.
 
 ## Local Verification
 
 First confirm the checkout is current with GitHub:
 
 ```bash
-git fetch --prune origin
+git fetch --no-prune origin
 git status --short --branch
 git rev-parse HEAD origin/main
 ```
@@ -30,6 +34,12 @@ Then run these commands from the repo root:
 uv run pytest
 uv run pyright
 uv run ruff check
+```
+
+These are source checks. Only when the task explicitly requires operator state
+and authorizes its use, run the following runtime checks with reviewed paths:
+
+```bash
 uv run python -m bridge_db --doctor
 uv run python -m bridge_db --status
 uv run python -m bridge_db --dogfood
