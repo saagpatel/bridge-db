@@ -48,7 +48,7 @@ After reading every source file, running the interpreter, and inspecting the liv
 | "likely 500–2000 rows" to embed | **64 rows total** (4 sections + 54 activity + 4 snapshots + 2 handoffs). Retention caps put the long-run ceiling at **~280 rows** |
 | sqlite-vec is a LOW risk | **sqlite-vec is blocked today**: `sqlite3.Connection.enable_load_extension` raises `AttributeError` on the current uv-managed Python 3.12.0 build. It was compiled without `--enable-loadable-sqlite-extensions` |
 | Section source_id is `INTEGER` | `context_sections.section_name` is `TEXT PRIMARY KEY` — source_id must be `TEXT` for sections and `INTEGER` for activity/snapshots/handoffs |
-| Migration file naming `008_semantic_memory.sql` | Repo has no migrations directory. Schema is inline in [db.py](src/bridge_db/db.py) via `SCHEMA_VERSION` integer + an in-function migration block. Semantic-layer schema becomes `SCHEMA_VERSION = 3` |
+| Migration file naming `008_semantic_memory.sql` | Repo has no migrations directory. Schema is inline in [db.py](../../src/bridge_db/db.py) via `SCHEMA_VERSION` integer + an in-function migration block. Semantic-layer schema becomes `SCHEMA_VERSION = 3` |
 | Write paths: `update_section`, `log_activity`, `save_snapshot` | **Also:** `sync_from_file` (bulk upsert of sections), `mark_shipped_processed` (UPDATE activity tags), `create_handoff` / `pick_up_handoff` / `clear_handoff`, `codex_seed.apply_manifest` (direct INSERT bypassing tools), `migration.migrate_from_markdown` (bulk bootstrap INSERT), and the auto-prune DELETE inside `log_activity` and `save_snapshot` |
 | Content types: sections, snapshots, activity | **Also: handoffs.** Short free-text rows with high "have I dispatched this before" recall value |
 | 41 new tests needed | ~23 new tests with the simpler design (see Section 6) |
@@ -115,7 +115,7 @@ Add a recall layer to bridge-db that lets any of the three connected systems (Cl
 3. **No API keys required at runtime.** All embedding happens locally via Ollama.
 4. **The recall layer must degrade gracefully.** If Ollama is down, FTS5 path returns. If FTS5 doesn't exist yet (pre Phase −1), existing tools still work.
 5. **New tools follow the existing naming convention:** snake_case, action verb, single-module registration.
-6. **Schema changes follow the existing pattern.** Increment `SCHEMA_VERSION`, add DDL inline in [db.py](src/bridge_db/db.py), write an in-place migration from the previous version. No new migrations directory.
+6. **Schema changes follow the existing pattern.** Increment `SCHEMA_VERSION`, add DDL inline in [db.py](../../src/bridge_db/db.py), write an in-place migration from the previous version. No new migrations directory.
 7. **No embedding of credentials.** The pre-embed scrubber from v2 carries over (see Section 5).
 8. **No implicit write-path hooks.** Reconciler-based invalidation, not per-write hooks. Simpler to reason about; catches unseen write paths.
 
@@ -236,7 +236,7 @@ bridge-db/
 
 ### 3d. Data model
 
-Migration v2 → v3, added inline to [db.py](src/bridge_db/db.py):
+Migration v2 → v3, added inline to [db.py](../../src/bridge_db/db.py):
 
 ```sql
 -- 1. FTS5 contentless virtual table indexing relevant source columns.
@@ -405,13 +405,13 @@ ollama serve   # or set up launchd plist for auto-start
 - Existing 19 tools and 104 tests continue to pass.
 
 **Tasks**
-1. Bump `SCHEMA_VERSION = 3` in [db.py](src/bridge_db/db.py). Add v2→v3 migration creating only `content_index`. **Acceptance:** fresh DB applies v3 DDL; existing v2 DB runs v2→v3 migration; v2 test suite still passes.
+1. Bump `SCHEMA_VERSION = 3` in [db.py](../../src/bridge_db/db.py). Add v2→v3 migration creating only `content_index`. **Acceptance:** fresh DB applies v3 DDL; existing v2 DB runs v2→v3 migration; v2 test suite still passes.
 2. Build `repopulate_content_index(db)` that walks sections, activity, snapshots (JSON-dump `data`), handoffs. **Acceptance:** after running against live bridge.db, `SELECT COUNT(*) FROM content_index` returns 64.
 3. Hook `content_index` writes into `update_section`, `log_activity`, `save_snapshot`, `create_handoff`, and the delete paths where applicable. **Acceptance:** row inserted via any tool is findable by `MATCH` immediately.
 4. Build `src/bridge_db/tools/recall.py` registering `recall(query, limit, scope)` MCP tool. Uses FTS5 `MATCH` with `snippet()` and `bm25()`, joins source tables for previews. **Acceptance:** `recall("bridge-db")` returns results from all four source types.
 5. Append each `recall` call to `recall_query_log.jsonl` under the audit log directory. No schema change. **Acceptance:** every call produces one line.
 6. Write `tests/test_recall.py`: 5 tests — happy path, empty result, scope filter, limit clamping, populator idempotence. **Acceptance:** suite → 109.
-7. Update [CLAUDE.md](CLAUDE.md) with new tool count (19 → 20) and recall note.
+7. Update [CLAUDE.md](../../CLAUDE.md) with new tool count (19 → 20) and recall note.
 8. **Dogfood for 7 calendar days.** Log into `last-session.md` any query where you mentally thought "semantic search would've caught this."
 
 **Phase Verification Checklist**
@@ -508,7 +508,7 @@ Existing suite: **104 tests**. New tests by phase:
 
 **Total new: 28 tests.** Final suite after Phase 2: **132 tests**.
 
-All tests follow the existing `CaptureMCP` + async fixture pattern in [tests/conftest.py](tests/conftest.py). Real SQLite in tmp_path — no mocks of the DB layer. Ollama is mocked at the HTTP boundary via `httpx.MockTransport` — no real network calls from tests.
+All tests follow the existing `CaptureMCP` + async fixture pattern in [tests/conftest.py](../../tests/conftest.py). Real SQLite in tmp_path — no mocks of the DB layer. Ollama is mocked at the HTTP boundary via `httpx.MockTransport` — no real network calls from tests.
 
 **Correctness probes (manual, not in suite):**
 - After Phase 1 backfill, pick 5 ad-hoc queries, verify top-1 is reasonable.

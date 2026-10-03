@@ -22,27 +22,26 @@ After registration, bridge-db tools appear as `bridge-db__log_activity`, etc.
 | Tool | Caller | Purpose |
 |---|---|---|
 | `bridge-db__log_activity` | `"codex"` | Log a session activity entry |
-| `bridge-db__get_recent_activity` | — | Read recent activity (CC + Codex) |
+| `bridge-db__get_recent_activity` | — | Read recent activity across all sources |
 | `bridge-db__get_shipped_events` | — | Get SHIPPED-tagged events |
-| `bridge-db__confirm_shipped_sync` | `"codex"` | Record downstream proof, then mark one SHIPPED entry PROCESSED |
-| `bridge-db__mark_shipped_processed` | — | Compatibility-only processed marker for non-shipped operational rows; do not use for `SHIPPED` |
+| `bridge-db__record_disposition` | `"codex"` | Record SHIPPED downstream proof or a reasoned policy disposition; requires source ownership or exact-resource delegation |
 | `bridge-db__create_handoff` | `"claude_ai"` | Create a project handoff (Claude.ai only) |
 | `bridge-db__get_pending_handoffs` | — | List pending handoffs |
-| `bridge-db__pick_up_handoff` | `"codex"` | Mark handoff as active |
-| `bridge-db__clear_handoff` | `"codex"` | Clear completed handoff |
+| `bridge-db__pick_up_handoff` | `"codex"` | Claim an operator-promoted handoff; returns a session completion capability |
+| `bridge-db__clear_handoff` | `"codex"` | Complete the exact handoff with `handoff_id` and the claiming-session `completion_capability` |
 | `bridge-db__save_snapshot` | `"codex"` | Save Codex state snapshot |
 | `bridge-db__get_latest_snapshot` | — | Get latest snapshot for a system |
 | `bridge-db__record_cost` | `"codex"` | Record monthly cost |
 | `bridge-db__get_cost_history` | — | Query cost records |
 | `bridge-db__get_section` | — | Read a context section |
 | `bridge-db__get_all_sections` | — | Read all context sections |
-| `bridge-db__sync_from_file` | — | Import Claude.ai-owned file edits into SQLite |
+| `bridge-db__sync_from_file` | `"cc"` | Import Claude.ai-owned file edits into SQLite; not scoped to Codex |
 | `bridge-db__export_bridge_markdown` | — | Regenerate the markdown file |
 | `bridge-db__health` | — | Read DB and bridge file health metrics |
 | `bridge-db__status` | — | Read compact operator summary data |
 
 **Notes:**
-- `update_section` requires `caller="claude_ai"` — Codex cannot write Claude.ai's sections.
+- `update_section` requires `caller="claude_ai"` for the four narrative sections and `caller="cc"` for `portfolio`; Codex owns neither.
 - Claude Code `/start` now runs `sync_from_file` before bridge reads, so Claude.ai file edits are pulled into SQLite at session start.
 
 ## 3. Per-Skill Migration
@@ -85,9 +84,10 @@ bridge-db__get_recent_activity(source="cc", limit=10)
 *Shipped events sync to Notion:*
 ```
 bridge-db__get_shipped_events(unprocessed_only=True)
-# ... sync to Notion ...
-bridge-db__confirm_shipped_sync(
+# ... sync to Notion: event must be Codex-owned or exactly delegated to Codex ...
+bridge-db__record_disposition(
     caller="codex",
+    disposition="synced",
     activity_id=event_id,
     downstream_system="notion",
     downstream_ref=confirmed_notion_page_id_or_url,
@@ -96,7 +96,7 @@ bridge-db__confirm_shipped_sync(
 ```
 
 Only append the secondary processed-ships ledger key after
-`confirm_shipped_sync` succeeds. If bridge-db is unavailable and the workflow is
+`record_disposition` succeeds. If bridge-db is unavailable and the workflow is
 running from the markdown fallback path, keep using the JSON ledger as the only
 dedupe surface.
 
@@ -194,7 +194,7 @@ This replaces manual appending to `## Recent Codex Activity`.
 
 If bridge-db is down or misconfigured:
 1. All Codex skills have explicit fallback instructions pointing at `claude_ai_context.md`
-2. The markdown file is kept in sync by `export_bridge_markdown` on every write — so it's always current
+2. Consumers explicitly call `export_bridge_markdown` after writes; verify freshness before using the fallback
 3. To disable bridge-db: remove `[mcp_servers.bridge-db]` from `~/.codex/config.toml`
 
 ## 6. Current State
